@@ -10,6 +10,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 from scipy.spatial import distance
 from pathlib import Path
+from skimage.color import rgb2lab
 import random
 import sys
 
@@ -116,6 +117,10 @@ lego_colors = np.array([
 
 
 # Vectorized nearest-color snapping
+# potentially use lab space instead of euclidian rgb
+# pixels_lab = rgb2lab(pixels.reshape(-1, 1, 3) / 255.0)
+# lego_lab = rgb2lab(lego_colors.reshape(-1, 1, 3) / 255.0)
+# lego_distances = distance.cdist(pixels_lab.reshape(-1, 3), lego_lab.reshape(-1, 3))
 lego_distances = distance.cdist(centroids, lego_colors)
 nearest_indices = np.argmin(lego_distances, axis=1)
 snapped_colors = lego_colors[nearest_indices]
@@ -133,7 +138,12 @@ lego_image = lego_pixels.reshape(mosaic_size, mosaic_size, 3).astype(np.uint8)
 lego_mosaic = Image.fromarray(lego_image)
 
 # Optional upscale for viewing
-lego_mosaic_upscaled = lego_mosaic.resize(img.size, Image.NEAREST)
+scale = 8
+lego_mosaic_upscaled = lego_mosaic.resize(
+    (mosaic_size * scale, mosaic_size * scale),
+    Image.NEAREST
+)
+
 
 output_path = image_path.parent / "lego_mosaic_kmeans_output.png"
 lego_mosaic_upscaled.save(output_path)
