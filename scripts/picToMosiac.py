@@ -1,68 +1,15 @@
-# ============================================
-# LEGO Mosaic Generator (KMeans)
-# ============================================
-# - KMeans compresses the color space
-# - Snaps colors to LEGO palette for final mosaic
-# ============================================
+# Requirements: pillow, numpy, scikit-image
+# pip install pillow numpy scikit-image
 
-from PIL import Image
+from PIL import Image, ImageFilter
 import numpy as np
-from sklearn.cluster import KMeans
-from scipy.spatial import distance
-from pathlib import Path
-from skimage.color import rgb2lab
-import random
+from skimage import color
 import sys
+from pathlib import Path
 
-# -------------------------------
-# STEP 0: CLI Argument Handling
-# -------------------------------
-# Usage:
-#   python picToMosiac.py [mosaic_size] [num_colors]
-# Example:
-#   python picToMosiac.py 64 12
-
-if len(sys.argv) < 2:
-    print("Usage: python picToMosiac.py [mosaic_size] [num_colors]")
-    sys.exit(1)
-
-mosaic_size = int(sys.argv[1]) if len(sys.argv) > 1 else 64
-K = int(sys.argv[2]) if len(sys.argv) > 2 else 12
-
-print("getting paths")
-# Paths
-script_dir = Path(__file__).resolve().parent
-print(script_dir)
-image_path = script_dir.parent / "images" / "labrador.jpg"
-
-# -------------------------------
-# STEP 1: Load and Resize Image
-# -------------------------------
-print(f"Loading image: {image_path}")
-img = Image.open(image_path).convert("RGB")
-target_size = (mosaic_size, mosaic_size)
-img = img.resize(target_size, Image.Resampling.LANCZOS)
-
-pixels = np.array(img).reshape(-1, 3)
-n_pixels = len(pixels)
-print(f"Image resized to {target_size}, total pixels = {n_pixels}")
-
-# -------------------------------
-# STEP 2: KMeans Color Compression
-# -------------------------------
-print(f"Running KMeans with K={K} to compress color space...")
-kmeans = KMeans(n_clusters=K, random_state=0, n_init="auto")
-kmeans.fit(pixels)
-
-centroids = kmeans.cluster_centers_
-labels = kmeans.labels_
-print("KMeans complete. Approximate colors identified.")
-
-# -------------------------------
-# STEP 3: Snap to LEGO Palette
-# -------------------------------
+# LEGO palette in rgb
 # got color codes from https://rebrickable.com/colors/
-lego_colors = np.array([
+LEGO_PALETTE_RGB = np.array([
     [114, 20, 15],     # Dark Red
     [255, 105, 143],   # Coral
     [228, 173, 200],   # Bright Pink
@@ -115,38 +62,71 @@ lego_colors = np.array([
     [255, 255, 255],   # White
 ])
 
+def rgb_list_to_lab(arr_rgb):
+    arr = np.array(arr_rgb, dtype=np.uint8).reshape((-1,1,3))/255.0
+    lab = color.rgb2lab(arr).reshape((-1,3))
+    return lab
 
-# Vectorized nearest-color snapping
-# potentially use lab space instead of euclidian rgb
-# pixels_lab = rgb2lab(pixels.reshape(-1, 1, 3) / 255.0)
-# lego_lab = rgb2lab(lego_colors.reshape(-1, 1, 3) / 255.0)
-# lego_distances = distance.cdist(pixels_lab.reshape(-1, 3), lego_lab.reshape(-1, 3))
-lego_distances = distance.cdist(centroids, lego_colors)
-nearest_indices = np.argmin(lego_distances, axis=1)
-snapped_colors = lego_colors[nearest_indices]
+PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
 
-# -------------------------------
-# STEP 4: Reconstruct Full Mosaic
-# -------------------------------
-# Assign each pixel to its cluster’s snapped LEGO color
-lego_pixels = np.zeros_like(pixels)
-for i in range(K):
-    lego_pixels[labels == i] = snapped_colors[i]
+def nearest_palette_index_lab(pixel_lab, palette_lab):
+    # Use perceptually accurate CIEDE2000 distance
+    pixel_lab_reshaped = pixel_lab.reshape((1, 1, 3))
+    palette_lab_reshaped = palette_lab.reshape((-1, 1, 3))
+    d = color.deltaE_ciede2000(palette_lab_reshaped, pixel_lab_reshaped)
+    return int(np.argmin(d))
 
-# Reshape to mosaic dimensions
-lego_image = lego_pixels.reshape(mosaic_size, mosaic_size, 3).astype(np.uint8)
-lego_mosaic = Image.fromarray(lego_image)
+def image_to_lego_mosaic(img_path, studs_w):
+    img = Image.open(img_path).convert('RGB')
 
-# Optional upscale for viewing
-scale = 8
-lego_mosaic_upscaled = lego_mosaic.resize(
-    (mosaic_size * scale, mosaic_size * scale),
-    Image.NEAREST
-)
+    # Apply Unsharp Mask
+    img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=350, threshold=3))
 
+    # Maintain aspect ratio — width fixed, height derived
+    orig_w, orig_h = img.size
+    aspect = orig_h / orig_w
+    studs_h = int(round(studs_w * aspect))
 
-output_path = image_path.parent / "lego_mosaic_kmeans_output.png"
-lego_mosaic_upscaled.save(output_path)
-lego_mosaic_upscaled.show()
+    img_small = img.resize((studs_w, studs_h), resample=Image.LANCZOS)
 
-print(f"✅ LEGO mosaic generated and saved as {output_path}")
+    rgb = np.asarray(img_small)/255.0  # float [0,1]
+    lab = color.rgb2lab(rgb)
+
+    out_idx = np.zeros((studs_h, studs_w), dtype=np.int32)
+    err = np.zeros_like(lab)
+
+    # Floyd–Steinberg kernel (distributes error to neighbors)
+    for y in range(studs_h):
+        for x in range(studs_w):
+            current = lab[y, x] + err[y, x]
+            idx = nearest_palette_index_lab(current, PALETTE_LAB)
+            out_idx[y, x] = idx
+            quant = PALETTE_LAB[idx]
+            e = current - quant
+            # distribute error (in Lab), clamped to prevent overflow
+            if x+1 < studs_w: err[y, x+1] = np.clip(err[y, x+1] + e * 7/16, -128, 128)
+            if y+1 < studs_h:
+                if x-1 >= 0: err[y+1, x-1] = np.clip(err[y+1, x-1] + e * 3/16, -128, 128)
+                err[y+1, x] = np.clip(err[y+1, x] + e * 5/16, -128, 128)
+                if x+1 < studs_w: err[y+1, x+1] = np.clip(err[y+1, x+1] + e * 1/16, -128, 128)
+
+    # produce RGB output image of studs
+    out_rgb = np.array([LEGO_PALETTE_RGB[i] for i in out_idx.flatten()]).reshape((studs_h, studs_w, 3)).astype(np.uint8)
+    out_img = Image.fromarray(out_rgb).resize((studs_w * 10, studs_h * 10), Image.NEAREST)
+    return out_img, out_idx
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python picToMosiac.py width")
+        sys.exit(1)
+
+    studs_width = int(sys.argv[1])
+    script_dir = Path(__file__).resolve().parent
+    image_folder = script_dir.parent / "images"
+    image_path = image_folder / "stella1.jpg"
+
+    out_img, idx = image_to_lego_mosaic(image_path, studs_width)
+    out_img.show()
+    output_path = image_folder / f"{image_path.stem}_lego.png"
+    out_img.save(output_path)
+    print(f"Saved mosaic to {output_path}")
