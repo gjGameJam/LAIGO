@@ -1,11 +1,16 @@
-# Requirements: pillow, numpy, scikit-image
-# pip install pillow numpy scikit-image
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import absl.logging
+absl.logging.set_verbosity(absl.logging.ERROR)
 
 from PIL import Image, ImageFilter
 import numpy as np
 from skimage import color
 import sys
 from pathlib import Path
+import cv2
+import mediapipe as mp
 
 # LEGO palette in rgb
 # got color codes from https://rebrickable.com/colors/
@@ -76,9 +81,7 @@ def nearest_palette_index_lab(pixel_lab, palette_lab):
     d = color.deltaE_ciede2000(palette_lab_reshaped, pixel_lab_reshaped)
     return int(np.argmin(d))
 
-def image_to_lego_mosaic(img_path, studs_w):
-    img = Image.open(img_path).convert('RGB')
-
+def image_to_lego_mosaic(img, studs_w):
     # Apply Unsharp Mask
     img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=350, threshold=3))
 
@@ -115,18 +118,100 @@ def image_to_lego_mosaic(img_path, studs_w):
     out_img = Image.fromarray(out_rgb).resize((studs_w * 10, studs_h * 10), Image.NEAREST)
     return out_img, out_idx
 
+
+def remove_background(pil_img):
+    mp_selfie = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+
+    img = np.array(pil_img)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    results = mp_selfie.process(img_rgb)
+    mask = results.segmentation_mask
+
+    # Foreground mask (True = subject)
+    fg_mask = mask > 0.51
+    bg_mask = ~fg_mask
+
+    # --- Foreground only (background becomes white) ---
+    foreground = np.where(fg_mask[..., None], img, 255)
+
+    # --- Background only (foreground becomes white or transparent) ---
+    background = np.where(bg_mask[..., None], img, 255)
+
+    # Convert back to PIL
+    fg_pil = Image.fromarray(foreground.astype(np.uint8))
+    bg_pil = Image.fromarray(background.astype(np.uint8))
+
+    return fg_pil, bg_pil, fg_mask
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python picToMosiac.py width")
+    if len(sys.argv) < 3:
+        print("Usage: python picToMosiac.py width true")
         sys.exit(1)
 
     studs_width = int(sys.argv[1])
+    bg_fg_split = str(sys.argv[2])
     script_dir = Path(__file__).resolve().parent
     image_folder = script_dir.parent / "images"
     image_path = image_folder / "stella1.jpg"
 
-    out_img, idx = image_to_lego_mosaic(image_path, studs_width)
-    out_img.show()
+    img = Image.open(image_path).convert('RGB')
+
+    if (bg_fg_split == "true"):
+
+        # Remove background FIRST (foreground will be layer 2 background will be layer 1)
+        fg_pil, bg_pil, fg_mask = remove_background(img)
+        foreground = fg_pil
+        background = bg_pil
+
+        # Convert PIL to OpenCV
+        fg_img_np = np.array(foreground)
+        fg_img_bgr = cv2.cvtColor(fg_img_np, cv2.COLOR_RGB2BGR)
+        bg_img_np = np.array(background)
+        bg_img_bgr = cv2.cvtColor(bg_img_np, cv2.COLOR_RGB2BGR)
+
+        # Bilateral filter
+        fg_bilateral_bgr = cv2.bilateralFilter(fg_img_bgr, 15, 150, 150)
+        fg_gaus_blur_bgr = cv2.medianBlur(fg_bilateral_bgr, 25, 0)
+        bg_bilateral_bgr = cv2.bilateralFilter(bg_img_bgr, 15, 150, 150)
+        bg_gaus_blur_bgr = cv2.medianBlur(bg_bilateral_bgr, 25, 0)
+
+        # Back to PIL RGB
+        fg_filtered_rgb = cv2.cvtColor(fg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
+        fg_filtered_image = Image.fromarray(fg_filtered_rgb)
+        #fg_filtered_image.show()
+        bg_filtered_rgb = cv2.cvtColor(bg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
+        bg_filtered_image = Image.fromarray(bg_filtered_rgb)
+        #bg_filtered_image.show()
+
+        fg_out_img, idx = image_to_lego_mosaic(fg_filtered_image, studs_width)
+        fg_out_img.show()
+        bg_out_img, idx = image_to_lego_mosaic(bg_filtered_image, studs_width)
+        bg_out_img.show()
+
+    
+    else:
+
+        # Convert PIL to OpenCV
+        img_np = np.array(img)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+        # Bilateral filter
+        bilateral_bgr = cv2.bilateralFilter(img_bgr, 15, 150, 150)
+        gaus_blur_bgr = cv2.medianBlur(bilateral_bgr, 25, 0)
+
+        # Back to PIL RGB
+        filtered_rgb = cv2.cvtColor(gaus_blur_bgr, cv2.COLOR_BGR2RGB)
+        filtered_image = Image.fromarray(filtered_rgb)
+        #filtered_image.show()
+
+        out_img, idx = image_to_lego_mosaic(filtered_image, studs_width)
+        out_img.show()
+
+    
+
+    #out_img.save(image_folder / "mosaic_preview.png")
+    #os.startfile(image_folder / "mosaic_preview.png")     # Windows only
     output_path = image_folder / f"{image_path.stem}_lego.png"
-    out_img.save(output_path)
+    fg_out_img.save(output_path)
     print(f"Saved mosaic to {output_path}")
