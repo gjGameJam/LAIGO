@@ -144,6 +144,21 @@ def remove_background(pil_img):
 
     return fg_pil, bg_pil, fg_mask
 
+#todo: get this function returning a transparent foreground (front most layer of lego mosiac)
+def make_difference_transparent(orig, new):
+    # Compare fg PIL to original image, making all pixels that are different transparent
+    orig = np.array(orig.convert("RGBA"))
+    fg = np.array(new.convert("RGBA"))
+
+    # Mask of pixels that changed after background removal
+    diff = np.any(fg[..., :3] != orig[..., :3], axis=-1)
+
+    # Apply transparency
+    result = fg.copy()
+    result[diff, 3] = 0
+
+    return Image.fromarray(result)
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python picToMosiac.py width true")
@@ -159,36 +174,76 @@ if __name__ == "__main__":
 
     if (bg_fg_split == "true"):
 
-        # Remove background FIRST (foreground will be layer 2 background will be layer 1)
+        print("processing image with background-foreground separation...")
+        # Remove background FIRST (foreground = layer 2, background = layer 1)
         fg_pil, bg_pil, fg_mask = remove_background(img)
-        foreground = fg_pil
-        background = bg_pil
 
-        # Convert PIL to OpenCV
-        fg_img_np = np.array(foreground)
-        fg_img_bgr = cv2.cvtColor(fg_img_np, cv2.COLOR_RGB2BGR)
-        bg_img_np = np.array(background)
-        bg_img_bgr = cv2.cvtColor(bg_img_np, cv2.COLOR_RGB2BGR)
+        # Compare fg PIL to original image → make background transparent
+        fg_alpha_pil = make_difference_transparent(img, fg_pil)  # RGBA
 
-        # Bilateral filter
-        fg_bilateral_bgr = cv2.bilateralFilter(fg_img_bgr, 15, 150, 150)
-        fg_gaus_blur_bgr = cv2.medianBlur(fg_bilateral_bgr, 25, 0)
-        bg_bilateral_bgr = cv2.bilateralFilter(bg_img_bgr, 15, 150, 150)
-        bg_gaus_blur_bgr = cv2.medianBlur(bg_bilateral_bgr, 25, 0)
+        # -----------------------------
+        # FOREGROUND: preserve alpha
+        # -----------------------------
+        fg_rgba = fg_alpha_pil.convert("RGBA")
+        fg_rgb  = fg_rgba.convert("RGB")             # RGB for OpenCV + mosaic
+        fg_a    = fg_rgba.getchannel("A")            # store alpha separately
+
+        # Convert RGB → OpenCV BGR
+        fg_bgr = cv2.cvtColor(np.array(fg_rgb), cv2.COLOR_RGB2BGR)
+
+        # Apply filters on RGB only
+        fg_bilateral_bgr = cv2.bilateralFilter(fg_bgr, 15, 150, 150)
+        fg_gaus_blur_bgr = cv2.medianBlur(fg_bilateral_bgr, 25)
 
         # Back to PIL RGB
         fg_filtered_rgb = cv2.cvtColor(fg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
         fg_filtered_image = Image.fromarray(fg_filtered_rgb)
-        #fg_filtered_image.show()
+
+        # -----------------------------
+        # BACKGROUND (no alpha)
+        # -----------------------------
+        bg_np = np.array(bg_pil)
+        bg_bgr = cv2.cvtColor(bg_np, cv2.COLOR_RGB2BGR)
+
+        bg_bilateral_bgr = cv2.bilateralFilter(bg_bgr, 15, 150, 150)
+        bg_gaus_blur_bgr = cv2.medianBlur(bg_bilateral_bgr, 25)
+
         bg_filtered_rgb = cv2.cvtColor(bg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
         bg_filtered_image = Image.fromarray(bg_filtered_rgb)
-        #bg_filtered_image.show()
 
+        # -----------------------------
+        # Produce LEGO mosaics
+        # -----------------------------
+        print("converting processed image to lego mosiac...")
+
+        # ---- Foreground mosaic (RGB only) ----
         fg_out_img, idx = image_to_lego_mosaic(fg_filtered_image, studs_width)
-        fg_out_img.show()
+
+        # Resize alpha to match mosaic output
+        fg_alpha_resized = fg_a.resize(fg_out_img.size, Image.NEAREST)
+
+        # Recombine RGB mosaic + alpha
+        fg_out_rgba = fg_out_img.convert("RGBA")
+        fg_out_rgba.putalpha(fg_alpha_resized)
+
+        print("showing foreground and background (layer 2 and 1)")
+        fg_out_rgba.show()  # now shows with transparency preserved
+
+        # ---- Background mosaic ----
         bg_out_img, idx = image_to_lego_mosaic(bg_filtered_image, studs_width)
         bg_out_img.show()
 
+        #TODO: send background and foreground to instruction set generation script
+
+        # Ensure BG is RGBA to match
+        bg_rgba = bg_out_img.convert("RGBA")
+
+        # Composite: foreground on top
+        composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
+
+        print("showing final output")
+        # Show result
+        composite.show()
     
     else:
 
