@@ -160,108 +160,91 @@ def make_difference_transparent(orig, new):
     return Image.fromarray(result)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python picToMosiac.py width true")
+    if len(sys.argv) < 2:
+        print("Usage: python picToMosiac.py width")
         sys.exit(1)
 
     studs_width = int(sys.argv[1])
-    bg_fg_split = str(sys.argv[2])
     script_dir = Path(__file__).resolve().parent
     image_folder = script_dir.parent / "images"
     image_path = image_folder / "stella1.jpg"
 
     img = Image.open(image_path).convert('RGB')
 
-    if (bg_fg_split == "true"):
+    print("processing image with background-foreground separation...")
+    # Remove background FIRST (foreground = layer 2, background = layer 1)
+    fg_pil, bg_pil, fg_mask = remove_background(img)
 
-        print("processing image with background-foreground separation...")
-        # Remove background FIRST (foreground = layer 2, background = layer 1)
-        fg_pil, bg_pil, fg_mask = remove_background(img)
+    #downsize foreground and background to get correct alpha mask
 
-        # Compare fg PIL to original image → make background transparent
-        fg_alpha_pil = make_difference_transparent(img, fg_pil)  # RGBA
+    # Compare fg PIL to original image → make background transparent
+    fg_alpha_pil = make_difference_transparent(img, fg_pil)  # RGBA
 
-        # -----------------------------
-        # FOREGROUND: preserve alpha
-        # -----------------------------
-        fg_rgba = fg_alpha_pil.convert("RGBA")
-        fg_rgb  = fg_rgba.convert("RGB")             # RGB for OpenCV + mosaic
-        fg_a    = fg_rgba.getchannel("A")            # store alpha separately
+    # -----------------------------
+    # FOREGROUND: preserve alpha
+    # -----------------------------
+    fg_rgba = fg_alpha_pil.convert("RGBA")
+    fg_rgb  = fg_rgba.convert("RGB")             # RGB for OpenCV + mosaic
+    fg_a    = fg_rgba.getchannel("A")            # store alpha separately
 
-        # Convert RGB → OpenCV BGR
-        fg_bgr = cv2.cvtColor(np.array(fg_rgb), cv2.COLOR_RGB2BGR)
+    # Convert RGB → OpenCV BGR
+    fg_bgr = cv2.cvtColor(np.array(fg_rgb), cv2.COLOR_RGB2BGR)
 
-        # Apply filters on RGB only
-        fg_bilateral_bgr = cv2.bilateralFilter(fg_bgr, 15, 150, 150)
-        fg_gaus_blur_bgr = cv2.medianBlur(fg_bilateral_bgr, 25)
+    # Apply filters on RGB only
+    fg_bilateral_bgr = cv2.bilateralFilter(fg_bgr, 15, 150, 150)
+    fg_gaus_blur_bgr = cv2.medianBlur(fg_bilateral_bgr, 25)
 
-        # Back to PIL RGB
-        fg_filtered_rgb = cv2.cvtColor(fg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
-        fg_filtered_image = Image.fromarray(fg_filtered_rgb)
+    # Back to PIL RGB
+    fg_filtered_rgb = cv2.cvtColor(fg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
+    fg_filtered_image = Image.fromarray(fg_filtered_rgb)
 
-        # -----------------------------
-        # BACKGROUND (no alpha)
-        # -----------------------------
-        bg_np = np.array(bg_pil)
-        bg_bgr = cv2.cvtColor(bg_np, cv2.COLOR_RGB2BGR)
+    # -----------------------------
+    # BACKGROUND (no alpha)
+    # -----------------------------
+    bg_np = np.array(bg_pil)
+    bg_bgr = cv2.cvtColor(bg_np, cv2.COLOR_RGB2BGR)
 
-        bg_bilateral_bgr = cv2.bilateralFilter(bg_bgr, 15, 150, 150)
-        bg_gaus_blur_bgr = cv2.medianBlur(bg_bilateral_bgr, 25)
+    bg_bilateral_bgr = cv2.bilateralFilter(bg_bgr, 15, 150, 150)
+    bg_gaus_blur_bgr = cv2.medianBlur(bg_bilateral_bgr, 25)
 
-        bg_filtered_rgb = cv2.cvtColor(bg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
-        bg_filtered_image = Image.fromarray(bg_filtered_rgb)
+    bg_filtered_rgb = cv2.cvtColor(bg_gaus_blur_bgr, cv2.COLOR_BGR2RGB)
+    bg_filtered_image = Image.fromarray(bg_filtered_rgb)
 
-        # -----------------------------
-        # Produce LEGO mosaics
-        # -----------------------------
-        print("converting processed image to lego mosiac...")
+    # -----------------------------
+    # Produce LEGO mosaics
+    # -----------------------------
+    print("converting processed image to lego mosiac...")
 
-        # ---- Foreground mosaic (RGB only) ----
-        fg_out_img, idx = image_to_lego_mosaic(fg_filtered_image, studs_width)
+    # ---- Foreground mosaic (RGB only) ----
+    fg_out_img, idx = image_to_lego_mosaic(fg_filtered_image, studs_width)
 
-        # Resize alpha to match mosaic output
-        fg_alpha_resized = fg_a.resize(fg_out_img.size, Image.NEAREST)
+    # Resize alpha to match mosaic output
+    fg_alpha_resized = fg_a.resize(fg_out_img.size, Image.NEAREST)
 
-        # Recombine RGB mosaic + alpha
-        fg_out_rgba = fg_out_img.convert("RGBA")
-        fg_out_rgba.putalpha(fg_alpha_resized)
+    # Recombine RGB mosaic + alpha
+    fg_out_rgba = fg_out_img.convert("RGBA")
+    fg_out_rgba.putalpha(fg_alpha_resized)
 
-        print("showing foreground and background (layer 2 and 1)")
-        fg_out_rgba.show()  # now shows with transparency preserved
+    print("showing foreground and background (layer 2 and 1)")
+    fg_out_rgba.show()  # now shows with transparency preserved
 
-        # ---- Background mosaic ----
-        bg_out_img, idx = image_to_lego_mosaic(bg_filtered_image, studs_width)
-        bg_out_img.show()
+    # ---- Background mosaic ----
+    bg_out_img, idx = image_to_lego_mosaic(bg_filtered_image, studs_width)
+    bg_out_img.show()
 
-        #TODO: send background and foreground to instruction set generation script
+    #TODO: send background and foreground to instruction set generation script
 
-        # Ensure BG is RGBA to match
-        bg_rgba = bg_out_img.convert("RGBA")
+    # Ensure BG is RGBA to match
+    bg_rgba = bg_out_img.convert("RGBA")
 
-        # Composite: foreground on top
-        composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
+    # Composite: foreground on top
+    composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
 
-        print("showing final output")
-        # Show result
-        composite.show()
+    print("showing final output")
+    # Show result
+    composite.show()
     
-    else:
 
-        # Convert PIL to OpenCV
-        img_np = np.array(img)
-        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-
-        # Bilateral filter
-        bilateral_bgr = cv2.bilateralFilter(img_bgr, 15, 150, 150)
-        gaus_blur_bgr = cv2.medianBlur(bilateral_bgr, 25, 0)
-
-        # Back to PIL RGB
-        filtered_rgb = cv2.cvtColor(gaus_blur_bgr, cv2.COLOR_BGR2RGB)
-        filtered_image = Image.fromarray(filtered_rgb)
-        #filtered_image.show()
-
-        out_img, idx = image_to_lego_mosaic(filtered_image, studs_width)
-        out_img.show()
 
     
 
