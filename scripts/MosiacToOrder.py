@@ -22,6 +22,7 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     #             #map pixel color to lego piece
 
 
+    print("returning order list...")
     return 1
 
 #helper function for determining piece from color

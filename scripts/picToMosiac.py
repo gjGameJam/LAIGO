@@ -10,7 +10,7 @@ import cv2
 import mediapipe as mp
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
-from Util import GetPalette
+from Util import GetPaletteRGBArray
 
 
 
@@ -19,7 +19,7 @@ def rgb_list_to_lab(arr_rgb):
     lab = color.rgb2lab(arr).reshape((-1,3))
     return lab
 
-LEGO_PALETTE_RGB = GetPalette()
+LEGO_PALETTE_RGB = GetPaletteRGBArray()
 PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
 
 def nearest_palette_index_lab(pixel_lab, palette_lab):
