@@ -1,4 +1,4 @@
-
+from Util import GetPaletteDict
 
 #return list of all lego pieces needed for both layers
 def GenerateOrderList(fg_out_rgba, bg_rgba):
@@ -18,6 +18,8 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     #             #ignore alpha channel for foreground
     #             if (i == 1 and pixel[3] == 0):
     #                 continue
+    #             else:
+    #                 use GetLegoPieceFromColor(on current pixel) then add to order list
                 
     #             #map pixel color to lego piece
 
@@ -25,9 +27,17 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     print("returning order list...")
     return 1
 
+PALETTE_DICT = GetPaletteDict()
+
 #helper function for determining piece from color
 #all plates (1x1) are piece number 3024
-def GetLegoPieceFromColor(rgb):
-    #map rgb to lego piece id
-    lego_piece_id = 3024  #1x1 plate
-    return lego_piece_id
+# helper function for determining piece from color
+# all plates (1x1) are piece number 3024
+def GetLegoPieceFromColor(rgb, palette_dict=PALETTE_DICT):
+
+    rgb = tuple(int(c) for c in rgb)
+
+    try:
+        return palette_dict[rgb]
+    except KeyError:
+        raise ValueError(f"RGB color {rgb} not found in LEGO palette")

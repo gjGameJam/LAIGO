@@ -219,10 +219,10 @@ if __name__ == "__main__":
     bg_filtered_image = Image.fromarray(cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2RGB))
 
     # Darken background slightly
-    #bg_filtered_image = adjust_lightness_lab(bg_filtered_image, delta_L=-3)
+    #bg_filtered_image = adjust_lightness_lab(bg_filtered_image, delta_L=-5)
 
     # Brighten foreground slightly
-    fg_filtered_image = adjust_lightness_lab(fg_filtered_image, delta_L=+8)
+    fg_filtered_image = adjust_lightness_lab(fg_filtered_image, delta_L=-5)
 
 
     # -----------------------------
