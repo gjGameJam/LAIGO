@@ -1,31 +1,53 @@
 from Util import GetPaletteDict
 
 #return list of all lego pieces needed for both layers
+from collections import defaultdict
+from Util import GetPaletteDict
+
+PALETTE_DICT = GetPaletteDict()
+
+# return list of all lego pieces needed for both layers
 def GenerateOrderList(fg_out_rgba, bg_rgba):
-    #need to get each non alpha pixel from foreground and background and return dictionary of pieces and counts
+    """
+    fg_out_rgba : PIL Image, mode RGBA
+    bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
+    returns     : dict {lego_piece_id: count}
+    """
+
     print("creating order list...")
-    #layer 1: background
-    #here we loop over each pixel and get the color (should match lego palette) and add pieces to order list
+    order = defaultdict(int)
 
-    #layer 2: foreground
-    #here we loop over each pixel and get the color (should match lego palette) and add pieces to order list
+    # -----------------
+    # Layer 1: Background
+    # -----------------
+    bg_pixels = bg_rgba.load()
+    for y in range(bg_rgba.height):
+        for x in range(bg_rgba.width):
+            pixel = bg_pixels[x, y]
 
-    # for i in range(2): #go over each layer
-    #     #for each pixel in the layer
-    #     for y in range(fg_out_rgba.height):
-    #         for x in range(fg_out_rgba.width):
-    #             #get pixel color
-    #             #ignore alpha channel for foreground
-    #             if (i == 1 and pixel[3] == 0):
-    #                 continue
-    #             else:
-    #                 use GetLegoPieceFromColor(on current pixel) then add to order list
-                
-    #             #map pixel color to lego piece
+            # Handle RGB or RGBA safely
+            rgb = pixel[:3]
+            piece_id = GetLegoPieceFromColor(rgb, PALETTE_DICT)
+            order[piece_id] += 1
 
+    # -----------------
+    # Layer 2: Foreground
+    # -----------------
+    fg_pixels = fg_out_rgba.load()
+    for y in range(fg_out_rgba.height):
+        for x in range(fg_out_rgba.width):
+            r, g, b, a = fg_pixels[x, y]
+
+            # ignore transparent foreground pixels
+            if a == 0:
+                continue
+
+            piece_id = GetLegoPieceFromColor((r, g, b), PALETTE_DICT)
+            order[piece_id] += 1
 
     print("returning order list...")
-    return 1
+    return dict(order)
+
 
 PALETTE_DICT = GetPaletteDict()
 
@@ -33,6 +55,7 @@ PALETTE_DICT = GetPaletteDict()
 #all plates (1x1) are piece number 3024
 # helper function for determining piece from color
 # all plates (1x1) are piece number 3024
+#returns lego piece number for given rgb color via dictionary lookup
 def GetLegoPieceFromColor(rgb, palette_dict=PALETTE_DICT):
 
     rgb = tuple(int(c) for c in rgb)
