@@ -125,6 +125,15 @@ def SaveDictAsJsonsOptimized(order_dict: dict, output_path: Path, max_per_item: 
         print(f"Saved {len(chunk)} items to {out_path}")
         json_index += 1
 
+def SaveInstructionsAsPDF(instruction_set: dict, output_path: Path):
+    """
+    Save instruction set to a PDF file.
+
+    Args:
+        instruction_set: dict containing instructions
+        output_path: Path for the output PDF file
+    """
+
 
 
 

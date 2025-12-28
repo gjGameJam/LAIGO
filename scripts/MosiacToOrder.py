@@ -12,6 +12,10 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
 
     print("creating order list...")
     order = defaultdict(int)
+    # -----------------
+    # Layer 0: Base Layer (to place all plates on)
+    # -----------------
+    desiredSize = fg_out_rgba.size
 
     # -----------------
     # Layer 1: Background

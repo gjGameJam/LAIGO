@@ -11,7 +11,7 @@ import copy
 sys.path.append(str(Path(__file__).resolve().parent))
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
-from Util import GetPaletteRGBArray, SaveDictAsJsonsOptimized
+from Util import GetPaletteRGBArray, SaveDictAsJsonsOptimized, SaveInstructionsAsPDF
 
 
 # ------------------------------
@@ -179,20 +179,25 @@ if __name__ == "__main__":
         fg_out_rgba.putalpha(fg_alpha_resized)
         bg_rgba = bg_out_img.convert("RGBA").resize(fg_out_rgba.size, Image.NEAREST)
         
+        print("size of foreground mosaic:", fg_out_rgba.size)
         fg_out_rgba.show()
         bg_rgba.show()
         
         print("generating order list...")
         orderList = GenerateOrderList(fg_out_rgba, bg_rgba)
-        #TODO: need to account for website only allowing 999 pieces of each id to be submitted per order so we will need to split orders over multiple if needed
+        print("finished order list!")
         print(orderList)
         #save json of order list
-        output_json_path = image_folder / f"{image_path.stem}_order.json"
+        output_json_path = image_folder / "OrderLists" / f"{image_path.stem}_order.json"
         SaveDictAsJsonsOptimized(orderList, output_json_path)
         print("Sum of all pieces:", sum(orderList.values()))
-        
+        #TODO: need to generate instructions via the orderList and images
         instructionSet = GenerateInstructions(fg_out_rgba, bg_rgba, orderList)
-        print("finished order list!")
+        output_pdf_path = image_folder / "InstructionSets" / f"{image_path.stem}_order.json"
+        SaveInstructionsAsPDF(instructionSet, output_pdf_path)
+        print("finished instructions!")
+        #save instructions to file
+        
         
         composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
         composite.show()
