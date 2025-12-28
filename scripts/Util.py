@@ -2,6 +2,9 @@ import numpy as np
 from pathlib import Path 
 from collections import defaultdict
 import json
+from pathlib import Path
+
+
 
 # LEGO palette in rgb
 # got color codes from https://brickset.com/colours/family-Green
@@ -60,58 +63,68 @@ def GetPaletteDict():
 def GetPaletteRGBArray():
     return np.array(list(LEGO_PALETTE_RGB_DICT.keys()), dtype=np.uint8)
 
-def SaveDictAsJson(data: dict, output_path: Path):
-    if not isinstance(data, dict):
-        raise TypeError(f"SaveDictAsJson expected dict, got {type(data)}")
+# def SaveDictAsJson(data: dict, output_path: Path):
+#     if not isinstance(data, dict):
+#         raise TypeError(f"SaveDictAsJson expected dict, got {type(data)}")
 
-    if not output_path.parent.exists():
-        raise FileNotFoundError(f"Output directory does not exist: {output_path.parent}")
+#     if not output_path.parent.exists():
+#         raise FileNotFoundError(f"Output directory does not exist: {output_path.parent}")
 
-    try:
-        order_json = DictToJson(data)
-    except Exception as e:
-        raise RuntimeError("Failed to serialize dictionary to JSON") from e
+#     try:
+#         order_json = DictToJson(data)
+#     except Exception as e:
+#         raise RuntimeError("Failed to serialize dictionary to JSON") from e
 
-    try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(order_json)
-    except Exception as e:
-        raise IOError(f"Failed to write JSON to {output_path}") from e
+#     try:
+#         with open(output_path, "w", encoding="utf-8") as f:
+#             f.write(order_json)
+#     except Exception as e:
+#         raise IOError(f"Failed to write JSON to {output_path}") from e
 
 
 #input data will be dictionary of int elementId (piece number) and int quantity (key and value)
 #this function should return output of json string with following format
-def DictToJson(data: dict) -> str:
+def SaveDictAsJsonsOptimized(order_dict: dict, output_path: Path, max_per_item: int = 999):
     """
-    Input:
-        { elementId(int): quantity(int), ... }
+    Save an order dictionary to one or more JSON files, minimizing the number
+    of files while keeping no item quantity above max_per_item in any JSON.
 
-    Output JSON format:
-    [
-        { "elementId": "300321", "quantity": 18 },
-        { "elementId": "300121", "quantity": 999 }
-    ]
+    Args:
+        order_dict: { elementId(int): quantity(int), ... }
+        output_path: Path for the base filename
+        max_per_item: maximum quantity per item in a JSON
     """
-    if not isinstance(data, dict):
-        raise TypeError(f"DictToJson expected dict, got {type(data)}")
+    if not isinstance(order_dict, dict):
+        raise TypeError(f"SaveDictAsJsonsOptimized expected dict, got {type(order_dict)}")
+    if not output_path.parent.exists():
+        raise FileNotFoundError(f"Output directory does not exist: {output_path.parent}")
 
-    output = []
+    # Prepare a dict of remaining quantities
+    remaining = {k: v for k, v in order_dict.items() if v > 0}
+    json_index = 0
 
-    for element_id, quantity in data.items():
-        if not isinstance(element_id, int):
-            raise TypeError(f"elementId must be int, got {type(element_id)}")
-        if not isinstance(quantity, int):
-            raise TypeError(f"quantity must be int, got {type(quantity)}")
+    while remaining:
+        chunk = []
+        for element_id in list(remaining.keys()):
+            qty = remaining[element_id]
+            take = min(qty, max_per_item)
+            chunk.append({"elementId": str(element_id), "quantity": take})
+            remaining[element_id] -= take
+            if remaining[element_id] <= 0:
+                del remaining[element_id]
 
-        output.append({
-            "elementId": str(element_id),
-            "quantity": quantity
-        })
+        # Save current chunk
+        if json_index == 0:
+            out_path = output_path
+        else:
+            out_path = output_path.with_name(f"{output_path.stem}_{json_index}{output_path.suffix}")
 
-    try:
-        return json.dumps(output, indent=4)
-    except Exception as e:
-        raise RuntimeError("Failed to serialize order list to JSON") from e
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(chunk, f, indent=4)
+
+        print(f"Saved {len(chunk)} items to {out_path}")
+        json_index += 1
+
 
 
 

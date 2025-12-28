@@ -6,11 +6,12 @@ import sys
 from pathlib import Path
 import cv2
 import mediapipe as mp
+import copy
 
 sys.path.append(str(Path(__file__).resolve().parent))
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
-from Util import GetPaletteRGBArray, SaveDictAsJson
+from Util import GetPaletteRGBArray, SaveDictAsJsonsOptimized
 
 
 # ------------------------------
@@ -23,6 +24,20 @@ def rgb_list_to_lab(arr_rgb):
 
 LEGO_PALETTE_RGB = GetPaletteRGBArray()
 PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
+
+def split_order_list(order: dict, max_quantity: int = 999) -> dict:
+    """
+    Takes a dict {elementId: quantity} and returns a new dict
+    with quantities capped at max_quantity per entry.
+    """
+    split_order = {}
+    for elementId, qty in order.items():
+        while qty > 0:
+            current_qty = min(qty, max_quantity)
+            # Use unique key for split pieces (optional) or accumulate into list of dicts later
+            split_order[elementId] = split_order.get(elementId, []) + [current_qty]
+            qty -= current_qty
+    return split_order
 
 def nearest_palette_index_lab(pixel_lab, palette_lab):
     pixel_lab_reshaped = pixel_lab.reshape((1, 1, 3))
@@ -169,10 +184,11 @@ if __name__ == "__main__":
         
         print("generating order list...")
         orderList = GenerateOrderList(fg_out_rgba, bg_rgba)
+        #TODO: need to account for website only allowing 999 pieces of each id to be submitted per order so we will need to split orders over multiple if needed
         print(orderList)
         #save json of order list
         output_json_path = image_folder / f"{image_path.stem}_order.json"
-        SaveDictAsJson(orderList, output_json_path)
+        SaveDictAsJsonsOptimized(orderList, output_json_path)
         print("Sum of all pieces:", sum(orderList.values()))
         
         instructionSet = GenerateInstructions(fg_out_rgba, bg_rgba, orderList)
