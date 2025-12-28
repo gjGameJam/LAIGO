@@ -1,5 +1,7 @@
 import numpy as np
-
+from pathlib import Path 
+from collections import defaultdict
+import json
 
 # LEGO palette in rgb
 # got color codes from https://brickset.com/colours/family-Green
@@ -57,4 +59,59 @@ def GetPaletteDict():
 
 def GetPaletteRGBArray():
     return np.array(list(LEGO_PALETTE_RGB_DICT.keys()), dtype=np.uint8)
+
+def SaveDictAsJson(data: dict, output_path: Path):
+    if not isinstance(data, dict):
+        raise TypeError(f"SaveDictAsJson expected dict, got {type(data)}")
+
+    if not output_path.parent.exists():
+        raise FileNotFoundError(f"Output directory does not exist: {output_path.parent}")
+
+    try:
+        order_json = DictToJson(data)
+    except Exception as e:
+        raise RuntimeError("Failed to serialize dictionary to JSON") from e
+
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(order_json)
+    except Exception as e:
+        raise IOError(f"Failed to write JSON to {output_path}") from e
+
+
+#input data will be dictionary of int elementId (piece number) and int quantity (key and value)
+#this function should return output of json string with following format
+def DictToJson(data: dict) -> str:
+    """
+    Input:
+        { elementId(int): quantity(int), ... }
+
+    Output JSON format:
+    [
+        { "elementId": "300321", "quantity": 18 },
+        { "elementId": "300121", "quantity": 999 }
+    ]
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"DictToJson expected dict, got {type(data)}")
+
+    output = []
+
+    for element_id, quantity in data.items():
+        if not isinstance(element_id, int):
+            raise TypeError(f"elementId must be int, got {type(element_id)}")
+        if not isinstance(quantity, int):
+            raise TypeError(f"quantity must be int, got {type(quantity)}")
+
+        output.append({
+            "elementId": str(element_id),
+            "quantity": quantity
+        })
+
+    try:
+        return json.dumps(output, indent=4)
+    except Exception as e:
+        raise RuntimeError("Failed to serialize order list to JSON") from e
+
+
 

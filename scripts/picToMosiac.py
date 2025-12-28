@@ -10,7 +10,8 @@ import mediapipe as mp
 sys.path.append(str(Path(__file__).resolve().parent))
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
-from Util import GetPaletteRGBArray
+from Util import GetPaletteRGBArray, SaveDictAsJson
+
 
 # ------------------------------
 # Helper functions
@@ -124,6 +125,7 @@ def make_difference_transparent(orig, new):
 # Main script with error handling
 # ------------------------------
 if __name__ == "__main__":
+    
     try:
         if len(sys.argv) < 3:
             raise ValueError("Usage: python picToMosiac.py width PercentOfBackgroundColors")
@@ -168,6 +170,9 @@ if __name__ == "__main__":
         print("generating order list...")
         orderList = GenerateOrderList(fg_out_rgba, bg_rgba)
         print(orderList)
+        #save json of order list
+        output_json_path = image_folder / f"{image_path.stem}_order.json"
+        SaveDictAsJson(orderList, output_json_path)
         print("Sum of all pieces:", sum(orderList.values()))
         
         instructionSet = GenerateInstructions(fg_out_rgba, bg_rgba, orderList)

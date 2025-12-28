@@ -1,9 +1,5 @@
-from Util import GetPaletteDict
-
-#return list of all lego pieces needed for both layers
 from collections import defaultdict
 from Util import GetPaletteDict
-
 PALETTE_DICT = GetPaletteDict()
 
 # return list of all lego pieces needed for both layers
@@ -23,10 +19,7 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     bg_pixels = bg_rgba.load()
     for y in range(bg_rgba.height):
         for x in range(bg_rgba.width):
-            pixel = bg_pixels[x, y]
-
-            # Handle RGB or RGBA safely
-            rgb = pixel[:3]
+            rgb = bg_pixels[x, y][:3]
             piece_id = GetLegoPieceFromColor(rgb, PALETTE_DICT)
             order[piece_id] += 1
 
@@ -37,19 +30,14 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     for y in range(fg_out_rgba.height):
         for x in range(fg_out_rgba.width):
             r, g, b, a = fg_pixels[x, y]
-
-            # ignore transparent foreground pixels
             if a == 0:
                 continue
-
             piece_id = GetLegoPieceFromColor((r, g, b), PALETTE_DICT)
             order[piece_id] += 1
 
     print("returning order list...")
     return dict(order)
 
-
-PALETTE_DICT = GetPaletteDict()
 
 #helper function for determining piece from color
 #all plates (1x1) are piece number 3024
