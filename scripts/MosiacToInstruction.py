@@ -8,6 +8,9 @@
 
 def GenerateInstructions(fg_out_rgba, bg_rgba, orderList):
     print("creating instructions...")
+    #layer 0: baseplate
+    # two layers of baseplates to ensure solid foundation
+    
     #layer 1: background
     #here we loop over each row and column to get the color (should be contained in order list)
     #only place small number of pieces per instruction step to avoid overwhelming user

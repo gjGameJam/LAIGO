@@ -1,0 +1,15 @@
+To Run Project:
+1) log into virtual envrionment and navigate to scripts folder:
+    A) venv\Scripts\activate.bat
+    B) cd scripts
+2) run picture to mosiac script
+    B) Python picToMosiac.py
+3) upload order list to LEGO website
+    A) go to https://www.lego.com/en-us/pick-and-build/pick-a-brick
+    B) click "Upload List"
+    C) upload the jsons in the OrderLists folder
+    D) click "View All Pieces"
+    E) Click "Pick Selected Pieces
+    F) Check out and buy all the uploaded pieces from the order lists
+4) Follow the instructions
+    A) go to the InstructionSets folder
