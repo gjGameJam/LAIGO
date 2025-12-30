@@ -1,4 +1,5 @@
 from collections import defaultdict
+import numpy as np
 from Util import GetPaletteDict
 PALETTE_DICT = GetPaletteDict()
 
@@ -11,15 +12,13 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     """
 
     print("creating order list...")
-    order = defaultdict(int)
     # -----------------
     # Layer 0: Base Layer (to place all plates on)
     # -----------------
     desiredSize = fg_out_rgba.size
-    baseplates = GetBaseplatesForSize(desiredSize[0], desiredSize[1])
-    for piece_id, qty in baseplates.items():
-        order[piece_id] += qty
-        print("baseplate piece:", piece_id, "qty:", qty)
+    #order = GetBaseplatesForSize(desiredSize[0], desiredSize[1])
+    order = defaultdict(int, GetBaseplatesForSize(desiredSize[0], desiredSize[1]))
+
 
     # -----------------
     # Layer 1: Background
@@ -60,42 +59,42 @@ def GetLegoPieceFromColor(rgb, palette_dict=PALETTE_DICT):
         raise ValueError(f"RGB color {rgb} not found in LEGO palette")
     
 
-plate_id_by_size = {
-    (32, 32): 6139364,
-    (16, 32): 4269651,
-    (16, 16): 6004927,
-    (8, 16): 4654613,
-    (8, 8): 4210802,
-    (6, 16): 4226358,
-    (6, 14): 4210720,
-    (6, 12): 4256149,
-    (6, 10): 4211114,
-    (6, 8): 4210794,
-    (6, 6): 4211134,
-    (4, 12): 4210706,
-    (4, 10): 4211122,
-    (4, 8): 4211061,
-    (4, 6): 4211115,
-    (4, 4): 4243831,
-    (3, 3): 6039176,
-    (2, 16): 4210796,
-    (2, 14): 6000970,
-    (2, 12): 4211067,
-    (2, 10): 4210678,
-    (2, 8): 4210997,
-    (2, 4): 4211065,
-    (2, 3): 4211043,
-    (2, 2): 4211094,
-    (1, 12): 6133611,
-    (1, 10): 4257526,
-    (1, 8): 4210998,
-    (1, 6): 4211056,
-    (1, 5): 6413109,
-    (1, 4): 4211001,
-    (1, 3): 4211133,
-    (1, 2): 4211063,
-    (1, 1): 4210719,
-}
+# plate_id_by_size = {
+#     (32, 32): 6139364,
+#     (16, 32): 4269651,
+#     (16, 16): 6004927,
+#     (8, 16): 4654613,
+#     (8, 8): 4210802,
+#     (6, 16): 4226358,
+#     (6, 14): 4210720,
+#     (6, 12): 4256149,
+#     (6, 10): 4211114,
+#     (6, 8): 4210794,
+#     (6, 6): 4211134,
+#     (4, 12): 4210706,
+#     (4, 10): 4211122,
+#     (4, 8): 4211061,
+#     (4, 6): 4211115,
+#     (4, 4): 4243831,
+#     (3, 3): 6039176,
+#     (2, 16): 4210796,
+#     (2, 14): 6000970,
+#     (2, 12): 4211067,
+#     (2, 10): 4210678,
+#     (2, 8): 4210997,
+#     (2, 4): 4211065,
+#     (2, 3): 4211043,
+#     (2, 2): 4211094,
+#     (1, 12): 6133611,
+#     (1, 10): 4257526,
+#     (1, 8): 4210998,
+#     (1, 6): 4211056,
+#     (1, 5): 6413109,
+#     (1, 4): 4211001,
+#     (1, 3): 4211133,
+#     (1, 2): 4211063,
+#     (1, 1): 4210719,
+# }
 
 
 # this function has input of width and height in studs
@@ -106,55 +105,37 @@ def GetBaseplatesForSize(width, height):
         dict {baseplate_piece_id: quantity}
     """
 
-    # Sort plate sizes largest → smallest by area
-    plates = sorted(
-        plate_id_by_size.keys(),
-        key=lambda s: s[0] * s[1],
-        reverse=True
-    )
+    blockWidth = width / 16
+    blockHeight = height / 16
 
-    # remaining untiled rectangles
-    rects = [(width, height)]
+    numOfBlocks = int(blockWidth * blockHeight)
+    numOfGreenConnectors = (int)((2 * (blockWidth - 1)) * blockHeight)
+    numOfGreenPlates = (int)((blockWidth - 1) * blockHeight)
+    numOfRedConnectors = (int)((2 * (blockHeight - 1)) * blockWidth)
+    numOfRedPlates = (int)((blockHeight - 1) * blockWidth)
+    twoxtwoPlates = numOfBlocks * 5
+    nailHooks = min(numOfBlocks, 2)
+    nailHookConnectors = nailHooks * 2
 
-    # counts by (w, h)
-    size_counts = defaultdict(int)
-
-    for pw, ph in plates:
-        new_rects = []
-
-        for rw, rh in rects:
-            nx = rw // pw
-            ny = rh // ph
-            count = nx * ny
-
-            if count:
-                size_counts[(pw, ph)] += count
-
-                # right strip
-                rem_w = rw - nx * pw
-                if rem_w > 0:
-                    new_rects.append((rem_w, ny * ph))
-
-                # bottom strip
-                rem_h = rh - ny * ph
-                if rem_h > 0:
-                    new_rects.append((rw, rem_h))
-            else:
-                new_rects.append((rw, rh))
-
-        rects = new_rects
-
+    blockID = 63202092
+    nailHookID = 6302094
+    nailHookConnectorID = 6279875
+    greenConnectorID = 6526672
+    redConnectorID = 6347789
+    greenPlateID = 4621548
+    redPlateID = 379521
+    twoxtwoPlateID = 4211094
     # convert size counts → piece ID counts
     baseplates = defaultdict(int)
+    baseplates[blockID] = numOfBlocks
+    baseplates[nailHookID] = nailHooks
+    baseplates[nailHookConnectorID] = nailHookConnectors
+    baseplates[greenConnectorID] = numOfGreenConnectors
+    baseplates[redConnectorID] = numOfRedConnectors
+    baseplates[greenPlateID] = numOfGreenPlates
+    baseplates[redPlateID] = numOfRedPlates
+    baseplates[twoxtwoPlateID] = twoxtwoPlates
 
-    for (w, h), qty in size_counts.items():
-        # normalize orientation if needed
-        key = (w, h)
-        if key not in plate_id_by_size:
-            key = (h, w)
-
-        piece_id = plate_id_by_size[key]
-        baseplates[piece_id] += qty * 2  # two layers to ensure solid base
 
     return dict(baseplates)
 
