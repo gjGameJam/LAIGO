@@ -9,7 +9,7 @@
 def GenerateInstructions(fg_out_rgba, bg_rgba, orderList):
     print("creating instructions...")
     #layer 0: baseplate
-    # two layers of baseplates to ensure solid foundation
+    # grid of interlocking 16x16s to ensure solid foundation
     
     #layer 1: background
     #here we loop over each row and column to get the color (should be contained in order list)
@@ -18,5 +18,21 @@ def GenerateInstructions(fg_out_rgba, bg_rgba, orderList):
     #layer 2: foreground
     #same thing as background but ignore alpha channel to allow background to show through
 
+
+    return 1
+
+def GenerateBasePlateInstructions(fg_out_rgba, bg_rgba, orderList):
+    print("creating baseplate instructions...")
+    #first step is to get 16x16 baseplate out
+    #add green connectors on right side and red connectors along bottom side
+    #add green plates on right side and red plates along bottom side
+    #add 2x2 plates on middle and corners for extra stability
+    #add nail hooks on top edges (or direct middle) for hanging
+    #add nail hook connectors to nail hooks to allow connection to frame
+
+    #3 cases: 
+    #case 1: in middle of mosiac(all connections)
+    #case 2: top/left side of mosiac (no top/left connections)
+    #case 3: bottom/right mosiac (no bottom/right connections)
 
     return 1
