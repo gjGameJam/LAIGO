@@ -100,7 +100,7 @@ def draw_plate_column(c, start_blockX, colors):
  
 #this function draws a baseplate that is face up
 #TODO: add case 1-4 for baseplate connections and render accordingly
-def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2)):
+def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     """
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
     with NxN studs.
@@ -195,11 +195,24 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2)):
             cy + VERTICAL_HEIGHT/2,
             fill=1
         )
+
+
+    #TODO: add case 0-3 for baseplate connections and render accordingly
+    if (case == 0):
+        #red and green connectors
+        pass
+    if (case == 1):
+        #red connectors no green
+        pass
+    if (case == 2):
+        #green connectors no red
+        pass
+    if (case == 3):
+        #no connectors
+        pass
  
 #this function draws a baseplate that is face up
-#TODO: add lines and coloring to make bottom sections appear separate where studs are (need for green/red connectors)
-#TODO: add case 1-4 for baseplate connections and render accordingly
-def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2)):
+def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     """
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
     with NxN studs.
@@ -369,7 +382,6 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2)):
  
         cx = stud_left + STUD_WIDTH / 2
         cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
- 
         c.ellipse(
             cx - VERTICAL_WIDTH/2,
             cy - VERTICAL_HEIGHT/2,
@@ -377,6 +389,22 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2)):
             cy + VERTICAL_HEIGHT/2,
             fill=1
         )
+
+    #TODO: add case 0-3 for baseplate connections and render accordingly
+    if (case == 0):
+        #red and green connectors
+        pass
+    if (case == 1):
+        #red connectors no green
+        pass
+    if (case == 2):
+        #green connectors no red
+        pass
+    if (case == 3):
+        #no connectors
+        pass
+
+    
 
 def block_center_xy(bx, by, xOffset, yOffset):
     return get_block_xy(bx + xOffset + 0.5, by + yOffset + 0.5)
@@ -386,7 +414,11 @@ def block_center_xy(bx, by, xOffset, yOffset):
 # Example usage
 # -----------------------------
 c = canvas.Canvas("lego_plates.pdf")
-draw_baseplate_top(c)
+#case 0: red and green connectors
+#case 1: red connectors no green
+#case 2: green connectors no red
+#case 3: no connectors
+draw_baseplate_top(c, 16, Color(0.2, 0.2, 0.2), 0)
 draw_plate(c, 0, 1, Color(1, 0.8, 0.2))
 draw_plate(c, 0, 0, Color(1, 0.2, 0.2))
 draw_plate(c, 1, 1, Color(0.2, 0.6, 1))
@@ -395,7 +427,7 @@ draw_plate(c, 0, 15, Color(0.2, 0.8, .2))
 draw_plate(c, 15, 15, Color(0.2, 0.8, .2))
 c.save()
 b = canvas.Canvas("backplateTest.pdf")
-draw_baseplate_bottom(b)
+draw_baseplate_bottom(b, 16, Color(0.2, 0.2, 0.2), 0)
 b.save()
 
 print("finished visuals!")
