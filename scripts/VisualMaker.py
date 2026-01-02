@@ -99,12 +99,29 @@ def draw_plate_column(c, start_blockX, colors):
         blockY += 1
  
 #this function draws a baseplate that is face up
-#TODO: add case 1-4 for baseplate connections and render accordingly
 def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     """
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
     with NxN studs.
     """
+    #TODO: add case 0-3 for baseplate connections and render accordingly
+    if (case == 0):
+        #red and green connectors
+        draw_plate_sized(c, 16.5, 4.5, 2, 4, Color(0.1, 0.8, 0.1))   # 2x4
+        draw_plate_sized(c, 7.5, -2.5, 4, 2, Color(0.8, 0.1, 0.1))   # 4x2
+        
+    if (case == 1):
+        #red connectors no green
+        draw_plate_sized(c, 7.5, -2.5, 4, 2, Color(0.8, 0.1, 0.1))   # 4x2
+        pass
+    if (case == 2):
+        #green connectors no red
+        draw_plate_sized(c, 16.5, 4, 2, 4, Color(0.1, 0.8, 0.1))   # 2x4
+    if (case == 3):
+        #no connectors (already handled)
+        pass
+
+    
     xOffset = .5
     yOffset = -.5
     x, y = get_block_xy(xOffset, yOffset)
@@ -195,21 +212,118 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
             cy + VERTICAL_HEIGHT/2,
             fill=1
         )
+    
+    red_holes = [
+        (3.7, -1.15), (12.7, -1.15)
+    ]
+
+    green_holes = [
+        (16.15, 2.35), (16.15, 11.35)
+    ]
 
 
-    #TODO: add case 0-3 for baseplate connections and render accordingly
+    #case 0-3 for baseplate connections
     if (case == 0):
         #red and green connectors
-        pass
+        #red connectors
+        c.setFillColor(Color(0.8, 0.1, 0.1))
+        for sx, sy in red_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+
+        
+
+        #then do green holes
+        c.setFillColor(Color(0.1, 0.8, 0.1))
+        for sx, sy in green_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+        return
     if (case == 1):
-        #red connectors no green
-        pass
+        #red connectors
+        c.setFillColor(Color(0.8, 0.1, 0.1))
+        for sx, sy in red_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+        return
     if (case == 2):
         #green connectors no red
-        pass
+        c.setFillColor(Color(0.1, 0.8, 0.1))
+        for sx, sy in green_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+        return
     if (case == 3):
-        #no connectors
-        pass
+        #no connectors (already handled)
+        return
  
 #this function draws a baseplate that is face up
 def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
@@ -393,21 +507,115 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     #TODO: add case 0-3 for baseplate connections and render accordingly
     if (case == 0):
         #red and green connectors
+        #TODO: draw connectors in hole facing outward and plates facing downward
         pass
     if (case == 1):
         #red connectors no green
+        #TODO: draw connectors in hole facing outward and plates facing downward
         pass
     if (case == 2):
         #green connectors no red
+        #TODO: draw connectors in hole facing outward and plates facing downward
         pass
     if (case == 3):
-        #no connectors
-        pass
+        #no connectors (already handled)
+        return
 
     
 
 def block_center_xy(bx, by, xOffset, yOffset):
     return get_block_xy(bx + xOffset + 0.5, by + yOffset + 0.5)
+
+def draw_plate_sized(c, blockX, blockY, width, height, color):
+    PLATE_Z = PLATE_HEIGHT * 0.33
+
+    top_color = color
+    right_color = Color(color.red * 0.85, color.green * 0.85, color.blue * 0.85)
+    front_color = Color(color.red * 0.70, color.green * 0.70, color.blue * 0.70)
+
+    # --- Top corners ---
+    p0 = get_block_xy(blockX, blockY)                   # front-left
+    p1 = get_block_xy(blockX + width, blockY)           # front-right
+    p2 = get_block_xy(blockX + width, blockY + height)  # back-right
+    p3 = get_block_xy(blockX, blockY + height)          # back-left
+
+    # --- Top ---
+    draw_polygon(c, [p0, p1, p2, p3], top_color)
+
+    # --- FRONT FACE (correct: +X edge) ---
+    front = [
+        p0,
+        p1,
+        (p1[0], p1[1] - PLATE_Z),
+        (p0[0], p0[1] - PLATE_Z),
+    ]
+    draw_polygon(c, front, front_color)
+
+    # --- RIGHT FACE (diagonal depth) ---
+    right = [
+        p1,
+        p2,
+        (p2[0], p2[1] - PLATE_Z),
+        (p1[0], p1[1] - PLATE_Z),
+    ]
+    draw_polygon(c, right, right_color)
+
+    # --- Studs ---
+    c.setFillColor(top_color)
+    for sy in range(height):
+        for sx in range(width):
+            sx_iso, sy_iso = get_block_xy(blockX + sx, blockY + sy)
+
+            cx = sx_iso + PLATE_HALF_WIDTH
+            cy = sy_iso + STUD_OFFSET_Y
+
+            draw_stud_with_neck(
+                c,
+                cx,
+                cy,
+                top_color,
+                front_color,
+                right_color
+            )
+
+STUD_NECK_HEIGHT = PLATE_HEIGHT * 0.3
+STUD_NECK_WIDTH  = STUD_WIDTH * 0.75
+STUD_NECK_OFFSET = (STUD_WIDTH - STUD_NECK_WIDTH) / 2
+STUD_NECK_RISE = STUD_HEIGHT * 0.35   # how high into the stud the neck starts
+
+
+def draw_stud_with_neck(c, cx, cy, top_color, front_color, right_color):
+    # --- Stud top ---
+    left  = cx - STUD_WIDTH / 2
+    right = cx + STUD_WIDTH / 2
+
+    
+
+    # --- Neck geometry (spawn higher) ---
+    neck_left  = cx - STUD_WIDTH / 2
+    neck_right = cx + STUD_WIDTH / 2
+
+    neck_top = cy + STUD_NECK_RISE
+    neck_bot = neck_top - STUD_NECK_HEIGHT
+
+    # Front face
+    front = [
+        (neck_left,  neck_top),
+        (neck_right, neck_top),
+        (neck_right, neck_bot),
+        (neck_left,  neck_bot),
+    ]
+    draw_polygon(c, front, front_color)
+    c.setFillColor(top_color)
+    c.ellipse(
+        left,
+        cy,
+        right,
+        cy + STUD_HEIGHT,
+        fill=1
+    )
+
+
 
  
 # -----------------------------
