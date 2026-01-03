@@ -104,7 +104,6 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
     with NxN studs.
     """
-    #TODO: add case 0-3 for baseplate connections and render accordingly
     if (case == 0):
         #red and green connectors
         draw_plate_sized(c, 16.5, 4.5, 2, 4, Color(0.1, 0.8, 0.1))   # 2x4
@@ -487,11 +486,11 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
         (16.15, 1.35), (16.15, 2.35), (16.15, 3.35), (16.15, 4.35), (16.15, 5.35), (16.15, 6.35), (16.15, 7.35), (16.15, 8.35), (16.15, 9.35), (16.15, 10.35), (16.15, 11.35), (16.15, 12.35)
     ]
 
-    red_holes = [
+    green_holes = [
         (3.7, -1.15), (12.7, -1.15)
     ]
 
-    green_holes = [
+    red_holes = [
         (16.15, 2.35), (16.15, 11.35)
     ]
  
@@ -515,9 +514,11 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
             fill=1
         )
 
-    #TODO: draw upside down pieces
-    draw_plate_sized_upside_down(b, 6, -1, 4, 2, Color(0.8, 0.1, 0.1))
-    draw_plate_sized_upside_down(b, 15, 7, 2, 4, Color(0.1, 0.8, 0.1))
+    #draw upside down pieces
+    #red and green
+    draw_plate_sized_upside_down(b, 6, -1, 4, 2, Color(0.1, 0.8, 0.1))
+    draw_plate_sized_upside_down(b, 15, 7, 2, 4, Color(0.8, 0.1, 0.1))
+    #2x2s
     draw_plate_sized_upside_down(b, 0, 0, 2, 2, Color(0.44, 0.44, 0.44))
     draw_plate_sized_upside_down(b, 14, 0, 2, 2, Color(0.44, 0.44, 0.44))
     draw_plate_sized_upside_down(b, 14, 14, 2, 2, Color(0.44, 0.44, 0.44))
