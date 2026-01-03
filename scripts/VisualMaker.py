@@ -108,12 +108,10 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     if (case == 0):
         #red and green connectors
         draw_plate_sized(c, 16.5, 4.5, 2, 4, Color(0.1, 0.8, 0.1))   # 2x4
-        draw_plate_sized(c, 7.5, -2.5, 4, 2, Color(0.8, 0.1, 0.1))   # 4x2
-        
+        draw_plate_sized(c, 7.5, -2.5, 4, 2, Color(0.8, 0.1, 0.1))   # 4x2       
     if (case == 1):
         #red connectors no green
         draw_plate_sized(c, 7.5, -2.5, 4, 2, Color(0.8, 0.1, 0.1))   # 4x2
-        pass
     if (case == 2):
         #green connectors no red
         draw_plate_sized(c, 16.5, 4, 2, 4, Color(0.1, 0.8, 0.1))   # 2x4
@@ -121,6 +119,10 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
         #no connectors (already handled)
         pass
 
+    #2x2 grey plates on bottom of plate
+    draw_plate_sized(c, 1.5, -1.5, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized(c, 15.5, -1.5, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized(c, 15.5, 12.5, 2, 2, Color(0.44, 0.44, 0.44))
     
     xOffset = .5
     yOffset = -.5
@@ -331,6 +333,7 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
     with NxN studs.
     """
+
     xOffset = .5
     yOffset = -.5
     x, y = get_block_xy(xOffset, yOffset)
@@ -483,6 +486,14 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
  
         (16.15, 1.35), (16.15, 2.35), (16.15, 3.35), (16.15, 4.35), (16.15, 5.35), (16.15, 6.35), (16.15, 7.35), (16.15, 8.35), (16.15, 9.35), (16.15, 10.35), (16.15, 11.35), (16.15, 12.35)
     ]
+
+    red_holes = [
+        (3.7, -1.15), (12.7, -1.15)
+    ]
+
+    green_holes = [
+        (16.15, 2.35), (16.15, 11.35)
+    ]
  
     for sx, sy in side_holes:
         sx_iso, sy_iso = get_block_xy(
@@ -504,23 +515,116 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
             fill=1
         )
 
-    #TODO: add case 0-3 for baseplate connections and render accordingly
+    #TODO: draw upside down pieces
+    draw_plate_sized_upside_down(b, 6, -1, 4, 2, Color(0.8, 0.1, 0.1))
+    draw_plate_sized_upside_down(b, 15, 7, 2, 4, Color(0.1, 0.8, 0.1))
+    draw_plate_sized_upside_down(b, 0, 0, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(b, 14, 0, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(b, 14, 14, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(b, 0, 14, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(b, 7, 7, 2, 2, Color(0.44, 0.44, 0.44))
+    #case 0-3 for baseplate connections
     if (case == 0):
         #red and green connectors
-        #TODO: draw connectors in hole facing outward and plates facing downward
-        pass
+        #red connectors
+        c.setFillColor(Color(0.8, 0.1, 0.1))
+        for sx, sy in red_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+
+        
+
+        #then do green holes
+        c.setFillColor(Color(0.1, 0.8, 0.1))
+        for sx, sy in green_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+        return
     if (case == 1):
-        #red connectors no green
-        #TODO: draw connectors in hole facing outward and plates facing downward
-        pass
+        #red connectors
+        c.setFillColor(Color(0.8, 0.1, 0.1))
+        for sx, sy in red_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+        return
     if (case == 2):
         #green connectors no red
-        #TODO: draw connectors in hole facing outward and plates facing downward
-        pass
+        c.setFillColor(Color(0.1, 0.8, 0.1))
+        for sx, sy in green_holes:
+            sx_iso, sy_iso = get_block_xy(
+                sx + xOffset,
+                sy + yOffset
+            )
+            stud_left = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+            VERTICAL_WIDTH  = STUD_WIDTH * 0.4
+            VERTICAL_HEIGHT = STUD_HEIGHT * 2.0
+    
+            cx = stud_left + STUD_WIDTH / 2
+            cy = sy_iso + STUD_OFFSET_Y + STUD_HEIGHT / 2
+    
+            c.ellipse(
+                cx - VERTICAL_WIDTH/2,
+                cy - VERTICAL_HEIGHT/2,
+                cx + VERTICAL_WIDTH/2,
+                cy + VERTICAL_HEIGHT/2,
+                fill=1
+            )
+        return
     if (case == 3):
         #no connectors (already handled)
         return
-
     
 
 def block_center_xy(bx, by, xOffset, yOffset):
@@ -615,6 +719,70 @@ def draw_stud_with_neck(c, cx, cy, top_color, front_color, right_color):
         fill=1
     )
 
+
+def draw_plate_sized_upside_down(c, blockX, blockY, width, height, color):
+    PLATE_Z = PLATE_HEIGHT * 0.33
+
+    top_color = color
+    right_color = Color(color.red * 0.85, color.green * 0.85, color.blue * 0.85)
+    front_color = Color(color.red * 0.70, color.green * 0.70, color.blue * 0.70)
+
+    blockX = blockX + .15
+    blockY = blockY - .15
+    # --- Top corners ---
+    p0 = get_block_xy(blockX, blockY)                   # front-left
+    p1 = get_block_xy(blockX + width, blockY)           # front-right
+    p2 = get_block_xy(blockX + width, blockY + height)  # back-right
+    p3 = get_block_xy(blockX, blockY + height)          # back-left
+
+    # --- Top ---
+    draw_polygon(c, [p0, p1, p2, p3], top_color)
+
+    # --- FRONT FACE (correct: +X edge) ---
+    front = [
+        p0,
+        p1,
+        (p1[0], p1[1] - PLATE_Z),
+        (p0[0], p0[1] - PLATE_Z),
+    ]
+    draw_polygon(c, front, front_color)
+
+    # --- RIGHT FACE (diagonal depth) ---
+    right = [
+        p1,
+        p2,
+        (p2[0], p2[1] - PLATE_Z),
+        (p1[0], p1[1] - PLATE_Z),
+    ]
+    draw_polygon(c, right, right_color)
+
+    # =====================
+    # HOLES (stud-sized)
+    # =====================
+
+    dx = 0.1
+    dy = -0.1
+    
+    c.setFillColor(Color(front_color.red * 0.50, front_color.green * 0.50, front_color.blue * 0.50))
+
+    for sy in range(height):
+        for sx in range(width):
+            sx_hole = blockX + sx - dx
+            sy_hole = blockY + sy - dy
+
+            sx_iso, sy_iso = get_block_xy(sx_hole, sy_hole)
+
+            stud_left  = sx_iso + STUD_OFFSET_X
+            stud_right = stud_left + STUD_WIDTH
+
+            c.ellipse(
+                stud_left,
+                sy_iso + STUD_OFFSET_Y - PLATE_Z,
+                stud_right,
+                sy_iso + STUD_OFFSET_Y + STUD_HEIGHT - PLATE_Z,
+                fill=1,
+                stroke=0
+            )
 
 
  
