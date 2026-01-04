@@ -518,16 +518,16 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
 
     #draw upside down pieces
     #2x2s
-    draw_plate_sized_upside_down(b, 0, 0, 2, 2, Color(0.44, 0.44, 0.44))
-    draw_plate_sized_upside_down(b, 14, 0, 2, 2, Color(0.44, 0.44, 0.44))
-    draw_plate_sized_upside_down(b, 14, 14, 2, 2, Color(0.44, 0.44, 0.44))
-    draw_plate_sized_upside_down(b, 0, 14, 2, 2, Color(0.44, 0.44, 0.44))
-    draw_plate_sized_upside_down(b, 7, 7, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(c, 0, 0, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(c, 14, 0, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(c, 14, 14, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(c, 0, 14, 2, 2, Color(0.44, 0.44, 0.44))
+    draw_plate_sized_upside_down(c, 7, 7, 2, 2, Color(0.44, 0.44, 0.44))
     #case 0-3 for baseplate connections
     if (case == 0):
         #red and green plates upside down
-        draw_plate_sized_upside_down(b, 6, -1, 4, 2, green_color)
-        draw_plate_sized_upside_down(b, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
+        draw_plate_sized_upside_down(c, 6, -1, 4, 2, green_color)
+        draw_plate_sized_upside_down(c, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
         #red and green connectors
         #red connectors
         c.setFillColor(Color(0.8, 0.1, 0.1))
@@ -623,7 +623,7 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
         return
     if (case == 1):
         #red plate upside
-        draw_plate_sized_upside_down(b, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
+        draw_plate_sized_upside_down(c, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
         #red connectors
         c.setFillColor(Color(0.8, 0.1, 0.1))
         for sx, sy in red_holes:
@@ -671,7 +671,7 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
         return
     if (case == 2):
         #green plate upside down
-        draw_plate_sized_upside_down(b, 6, -1, 4, 2, green_color)
+        draw_plate_sized_upside_down(c, 6, -1, 4, 2, green_color)
         #green connectors no red
         c.setFillColor(green_color)
         for sx, sy in green_holes:
@@ -879,16 +879,36 @@ def draw_plate_sized_upside_down(c, blockX, blockY, width, height, color):
                 stroke=0
             )
 
+#function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
+def generate_baseplate_setup(step, case):
+    #if case is not 3 (empty) draw empty plate to help user see next step requirements
+    if (case != 3):
+        canv = canvas.Canvas(str(step) + ".pdf")
+        step = step + 1
+        draw_baseplate_bottom(canv, 16, Color(0.2, 0.2, 0.2), 3)
+        canv.save()
+    canv = canvas.Canvas(str(step) + ".pdf")
+    step = step + 1
+    draw_baseplate_bottom(canv, 16, Color(0.2, 0.2, 0.2), case)
+    canv.save()
+    
+    canv = canvas.Canvas(str(step) + ".pdf")
+    draw_baseplate_top(canv, 16, Color(0.2, 0.2, 0.2), case)
+    canv.save()
+    print("drew baseplate instruction")
+    return step
 
  
 # -----------------------------
 # Example usage
 # -----------------------------
 c = canvas.Canvas("lego_plates.pdf")
-#case 0: red and green connectors
-#case 1: red connectors no green
-#case 2: green connectors no red
+#case 0: red and green connectors (bottom right corner only)
+#case 1: red connectors no green (right most column)
+#case 2: green connectors no red (bottom row)
 #case 3: no connectors
+
+#backplate test top
 draw_baseplate_top(c, 16, Color(0.2, 0.2, 0.2), 0)
 draw_plate(c, 0, 1, Color(1, 0.8, 0.2))
 draw_plate(c, 0, 0, Color(1, 0.2, 0.2))
@@ -897,8 +917,12 @@ draw_plate(c, 15, 0, Color(0.2, 0.8, .2))
 draw_plate(c, 0, 15, Color(0.2, 0.8, .2))
 draw_plate(c, 15, 15, Color(0.2, 0.8, .2))
 c.save()
+
+#backplate test bottom
 b = canvas.Canvas("backplateTest.pdf")
 draw_baseplate_bottom(b, 16, Color(0.2, 0.2, 0.2), 0)
 b.save()
 
+#instruction generation test
+generate_baseplate_setup(2, 0)
 print("finished visuals!")
