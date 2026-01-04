@@ -343,6 +343,7 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     top_color = color
     right_color = Color(color.red * 0.85, color.green * 0.85, color.blue * 0.85)
     front_color = Color(color.red * 0.70, color.green * 0.70, color.blue * 0.70)
+    green_color = Color(.647, .792, .09)
     # -----------------
     # Baseplate faces
     # -----------------
@@ -516,8 +517,8 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
 
     #draw upside down pieces
     #red and green
-    draw_plate_sized_upside_down(b, 6, -1, 4, 2, Color(0.1, 0.8, 0.1))
-    draw_plate_sized_upside_down(b, 15, 7, 2, 4, Color(0.8, 0.1, 0.1))
+    draw_plate_sized_upside_down(b, 6, -1, 4, 2, green_color)
+    draw_plate_sized_upside_down(b, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
     #2x2s
     draw_plate_sized_upside_down(b, 0, 0, 2, 2, Color(0.44, 0.44, 0.44))
     draw_plate_sized_upside_down(b, 14, 0, 2, 2, Color(0.44, 0.44, 0.44))
@@ -550,10 +551,53 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
                 fill=1
             )
 
-        
+        #TODO: draw back of green/red connectors
+        xSpot = x + 72
+        ySpot = y - 31
+        greenPin = [
+            (xSpot + 3,           ySpot + 9),            # top-left
+            (xSpot + 30,      ySpot + 25),       # top-right
+            (xSpot + 22, ySpot + 29),  # bottom-right
+            (xSpot + -5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, greenPin, green_color)
+
+        xSpot = x + 210
+        ySpot = y - 100
+        greenPin = [
+            (xSpot + 3,           ySpot + 9),            # top-left
+            (xSpot + 30,      ySpot + 25),       # top-right
+            (xSpot + 22, ySpot + 29),  # bottom-right
+            (xSpot + -5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, greenPin, green_color)
+
+        xSpot = x + 270
+        ySpot = y - 100
+        redPin = [
+            (xSpot - 3,           ySpot + 9),            # top-left
+            (xSpot - 30,      ySpot + 25),       # top-right
+            (xSpot - 22, ySpot + 29),  # bottom-right
+            (xSpot + 5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, redPin, Color(0.8, 0.1, 0.1))
+
+        xSpot = x + 405
+        ySpot = y - 33
+        redPin = [
+            (xSpot - 3,           ySpot + 9),            # top-left
+            (xSpot - 30,      ySpot + 25),       # top-right
+            (xSpot - 22, ySpot + 29),  # bottom-right
+            (xSpot + 5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, redPin, Color(0.8, 0.1, 0.1))
 
         #then do green holes
-        c.setFillColor(Color(0.1, 0.8, 0.1))
+        c.setFillColor(green_color)
         for sx, sy in green_holes:
             sx_iso, sy_iso = get_block_xy(
                 sx + xOffset,
