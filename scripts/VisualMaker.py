@@ -104,16 +104,17 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
     with NxN studs.
     """
+    green_color = Color(.647, .792, .09)
     if (case == 0):
         #red and green connectors
-        draw_plate_sized(c, 16.5, 4.5, 2, 4, Color(0.1, 0.8, 0.1))   # 2x4
+        draw_plate_sized(c, 16.5, 4.5, 2, 4, green_color)   # 2x4
         draw_plate_sized(c, 7.5, -2.5, 4, 2, Color(0.8, 0.1, 0.1))   # 4x2       
     if (case == 1):
         #red connectors no green
         draw_plate_sized(c, 7.5, -2.5, 4, 2, Color(0.8, 0.1, 0.1))   # 4x2
     if (case == 2):
         #green connectors no red
-        draw_plate_sized(c, 16.5, 4, 2, 4, Color(0.1, 0.8, 0.1))   # 2x4
+        draw_plate_sized(c, 16.5, 4, 2, 4, green_color)   # 2x4
     if (case == 3):
         #no connectors (already handled)
         pass
@@ -252,7 +253,7 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
         
 
         #then do green holes
-        c.setFillColor(Color(0.1, 0.8, 0.1))
+        c.setFillColor(green_color)
         for sx, sy in green_holes:
             sx_iso, sy_iso = get_block_xy(
                 sx + xOffset,
@@ -300,7 +301,7 @@ def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
         return
     if (case == 2):
         #green connectors no red
-        c.setFillColor(Color(0.1, 0.8, 0.1))
+        c.setFillColor(green_color)
         for sx, sy in green_holes:
             sx_iso, sy_iso = get_block_xy(
                 sx + xOffset,
@@ -516,9 +517,6 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
         )
 
     #draw upside down pieces
-    #red and green
-    draw_plate_sized_upside_down(b, 6, -1, 4, 2, green_color)
-    draw_plate_sized_upside_down(b, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
     #2x2s
     draw_plate_sized_upside_down(b, 0, 0, 2, 2, Color(0.44, 0.44, 0.44))
     draw_plate_sized_upside_down(b, 14, 0, 2, 2, Color(0.44, 0.44, 0.44))
@@ -527,6 +525,9 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
     draw_plate_sized_upside_down(b, 7, 7, 2, 2, Color(0.44, 0.44, 0.44))
     #case 0-3 for baseplate connections
     if (case == 0):
+        #red and green plates upside down
+        draw_plate_sized_upside_down(b, 6, -1, 4, 2, green_color)
+        draw_plate_sized_upside_down(b, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
         #red and green connectors
         #red connectors
         c.setFillColor(Color(0.8, 0.1, 0.1))
@@ -551,7 +552,7 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
                 fill=1
             )
 
-        #TODO: draw back of green/red connectors
+        # draw back of green connectors
         xSpot = x + 72
         ySpot = y - 31
         greenPin = [
@@ -574,6 +575,7 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
 
         draw_polygon(c, greenPin, green_color)
 
+        # draw back of red connectors
         xSpot = x + 270
         ySpot = y - 100
         redPin = [
@@ -620,6 +622,8 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
             )
         return
     if (case == 1):
+        #red plate upside
+        draw_plate_sized_upside_down(b, 15, 6, 2, 4, Color(0.8, 0.1, 0.1))
         #red connectors
         c.setFillColor(Color(0.8, 0.1, 0.1))
         for sx, sy in red_holes:
@@ -642,10 +646,34 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
                 cy + VERTICAL_HEIGHT/2,
                 fill=1
             )
+        # draw back of red connectors
+        xSpot = x + 270
+        ySpot = y - 100
+        redPin = [
+            (xSpot - 3,           ySpot + 9),            # top-left
+            (xSpot - 30,      ySpot + 25),       # top-right
+            (xSpot - 22, ySpot + 29),  # bottom-right
+            (xSpot + 5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, redPin, Color(0.8, 0.1, 0.1))
+
+        xSpot = x + 405
+        ySpot = y - 33
+        redPin = [
+            (xSpot - 3,           ySpot + 9),            # top-left
+            (xSpot - 30,      ySpot + 25),       # top-right
+            (xSpot - 22, ySpot + 29),  # bottom-right
+            (xSpot + 5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, redPin, Color(0.8, 0.1, 0.1))
         return
     if (case == 2):
+        #green plate upside down
+        draw_plate_sized_upside_down(b, 6, -1, 4, 2, green_color)
         #green connectors no red
-        c.setFillColor(Color(0.1, 0.8, 0.1))
+        c.setFillColor(green_color)
         for sx, sy in green_holes:
             sx_iso, sy_iso = get_block_xy(
                 sx + xOffset,
@@ -666,6 +694,28 @@ def draw_baseplate_bottom(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
                 cy + VERTICAL_HEIGHT/2,
                 fill=1
             )
+        # draw back of green connectors
+        xSpot = x + 72
+        ySpot = y - 31
+        greenPin = [
+            (xSpot + 3,           ySpot + 9),            # top-left
+            (xSpot + 30,      ySpot + 25),       # top-right
+            (xSpot + 22, ySpot + 29),  # bottom-right
+            (xSpot + -5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, greenPin, green_color)
+
+        xSpot = x + 210
+        ySpot = y - 100
+        greenPin = [
+            (xSpot + 3,           ySpot + 9),            # top-left
+            (xSpot + 30,      ySpot + 25),       # top-right
+            (xSpot + 22, ySpot + 29),  # bottom-right
+            (xSpot + -5,      ySpot + 13),       # bottom-left
+        ]
+
+        draw_polygon(c, greenPin, green_color)
         return
     if (case == 3):
         #no connectors (already handled)
