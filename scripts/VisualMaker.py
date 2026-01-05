@@ -1,5 +1,6 @@
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import Color
+from pathlib import Path
 # -----------------------------
 # CONSTANTS
 # -----------------------------
@@ -90,13 +91,6 @@ def draw_plate(c, blockX, blockY, color):
         y + STUD_OFFSET_Y + STUD_HEIGHT,
         fill=1
     )
- 
-#pass in 16 colors to draw a column of plates on a specific column
-def draw_plate_column(c, start_blockX, colors):
-    blockY = 0
-    for color in colors:
-        draw_plate(c, start_blockX, blockY, color)
-        blockY += 1
  
 #this function draws a baseplate that is face up
 def draw_baseplate_top(c, size=16, color=Color(0.2, 0.2, 0.2), case=0):
@@ -903,23 +897,38 @@ def draw_plate_sized_upside_down(c, blockX, blockY, width, height, color):
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
 def generate_baseplate_setup(step, case):
     #draw empty plate to help user see next step requirements
-    canv = canvas.Canvas(str(step) + ".pdf")
+    canv = canvas.Canvas(get_output_path(step))
     step = step + 1
     draw_baseplate_bottom(canv, 16, Color(0.2, 0.2, 0.2), -1)
     canv.save()
     #draw bottom of baseplate with current case
-    canv = canvas.Canvas(str(step) + ".pdf")
+    canv = canvas.Canvas(get_output_path(step))
     step = step + 1
     draw_baseplate_bottom(canv, 16, Color(0.2, 0.2, 0.2), case)
     canv.save()
     #draw top of baseplate with current case
-    canv = canvas.Canvas(str(step) + ".pdf")
+    canv = canvas.Canvas(get_output_path(step))
     step = step + 1
     draw_baseplate_top(canv, 16, Color(0.2, 0.2, 0.2), case)
     canv.save()
     print("drew baseplate instruction")
     return step
 
+
+folder = Path("instructions")
+
+if not folder.is_dir():
+    raise FileNotFoundError(f"Expected folder does not exist: {folder}")
+def get_output_path(step):
+    return str(folder / f"{step}.pdf")
+
+
+#pass in 16 colors to draw a column of plates on a specific column
+def draw_plate_column(c, start_blockX, colors):
+    blockY = 0
+    for color in colors:
+        draw_plate(c, start_blockX, blockY, color)
+        blockY += 1
  
 # -----------------------------
 # Example usage

@@ -17,14 +17,15 @@ def GenerateInstructions(fg_out_rgba, bg_rgba, orderList):
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
         for blockH in reversed(range(0, blockHeight)):
-            #print("step " + str(step))
             #layer 0: baseplate
             # grid of interlocking 16x16s to ensure solid foundation
             step = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step)
+            #TODO: use copies of canvas from last baseplate setup instruction as starting point for 1x1 placement instructions
             #layer 1: background
             #here we loop over each row and column to get the color (should be contained in order list)
-            #only place small number of pieces per instruction step to avoid overwhelming user
+            #only place maximum of 16 pieces per instruction step to avoid overwhelming user
 
+            #TODO: use copies of canvas from 1x1 background instruction as starting point for 1x1 foreground placement instructions
             #layer 2: foreground
             #same thing as background but ignore alpha channel to allow background to show through
 
