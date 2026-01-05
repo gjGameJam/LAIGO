@@ -192,13 +192,11 @@ if __name__ == "__main__":
         SaveDictAsJsonsOptimized(orderList, output_json_path)
         print("Sum of all pieces:", sum(orderList.values()))
         #TODO: need to generate instructions via the orderList and images
-        instructionSet = GenerateInstructions(fg_out_rgba, bg_rgba, orderList)
-        output_pdf_path = image_folder / "InstructionSets" / f"{image_path.stem}_order.json"
-        SaveInstructionsAsPDF(instructionSet, output_pdf_path)
+        GenerateInstructions(fg_out_rgba, bg_rgba, orderList)
+        # output_pdf_path = image_folder / "InstructionSets" / f"{image_path.stem}_order.json"
+        # SaveInstructionsAsPDF(instructionSet, output_pdf_path)
         print("finished instructions!")
-        #save instructions to file
-        
-        
+
         composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
         composite.show()
         

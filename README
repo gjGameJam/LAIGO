@@ -1,6 +1,6 @@
 To Run Project:
 1) log into virtual envrionment and navigate to scripts folder:
-    A) venv\Scripts\activate.bat
+    A) .venv\Scripts\activate.bat
     B) cd scripts
 2) run picture to mosiac script
     B) Python picToMosiac.py
