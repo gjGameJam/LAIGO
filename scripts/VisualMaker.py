@@ -896,10 +896,11 @@ def draw_plate_sized_upside_down(c, blockX, blockY, width, height, color):
 
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
 def generate_baseplate_setup(step, case):
+    #TODO: use pillow images to allow building on step by step
     #draw empty plate to help user see next step requirements
     canv = canvas.Canvas(get_output_path(step))
     step = step + 1
-    draw_baseplate_bottom(canv, 16, Color(0.2, 0.2, 0.2), -1)
+    draw_baseplate_bottom(canv, 16, Color(0.2, 0.2, 0.2), -1) #-1 case is where the baseplate piece is by itself
     canv.save()
     #draw bottom of baseplate with current case
     canv = canvas.Canvas(get_output_path(step))
@@ -957,3 +958,49 @@ def draw_plate_column(c, start_blockX, colors):
 # #instruction generation test
 # generate_baseplate_setup(2, 0)
 # print("finished visuals!")
+
+
+#TODO: convert report canvases functions to pillow images supporting
+from PIL import Image, ImageDraw
+
+def get_file_name(step_num):
+    return f"instructions/{step_num}.png"
+
+def save_img_and_increment_step(img, step):
+    saveName = get_file_name(step)
+    img.save(saveName)
+    print("Saved " + saveName)
+    return step + 1
+
+def get_img_and_draw(step, wantClear):
+    if (step == 1 or wantClear): #if on first step or user wants clear img, then make empty IMG
+        # create image with specified size and background color
+        bg_color = (255, 255, 255, 255) # white background
+        image_size = (612, 792)
+        img = Image.new("RGBA", image_size, bg_color)
+    else: #already has previous step that user wants to use so just open previous step
+        fileName = get_file_name(step - 1) 
+        img = Image.open(fileName).convert("RGBA")
+    return img, ImageDraw.Draw(img) #return imagedraw to allow user to modify current step before saving
+
+
+
+# ----------------------------
+# Step 0: Setup step number
+# ----------------------------
+step = 1
+
+# -----------------------------------------------
+# Step 1: Create base image and add rectangle
+# -----------------------------------------------
+img, draw = get_img_and_draw(step, False) # get previous image (blank if no previous) and draw object to draw on it
+draw.rectangle((50, 50, 150, 150), fill=(200, 50, 50, 255)) # Draw stuff for current step (can be arbritrary amount of draws)
+step = save_img_and_increment_step(img, step) # Save current step
+
+# -----------------------------------------
+# Step 2: Reopen the image and add more
+# -----------------------------------------
+img, draw = get_img_and_draw(step, False) # get previous image (blank if no previous) and draw object to draw on it
+draw.ellipse((200, 50, 300, 150), fill=(50, 150, 255, 255)) # Draw stuff for current step (can be arbritrary amount of draws)
+step = save_img_and_increment_step(img, step) # Save current step
+
