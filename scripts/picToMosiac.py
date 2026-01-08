@@ -11,7 +11,7 @@ import copy
 sys.path.append(str(Path(__file__).resolve().parent))
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
-from Util import GetPaletteRGBArray, SaveDictAsJsonsOptimized, SaveInstructionsAsPDF
+from Util import GetPaletteRGBArray, SaveDictAsJsonsOptimized
 
 
 # ------------------------------
