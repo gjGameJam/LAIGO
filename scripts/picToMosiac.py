@@ -191,17 +191,14 @@ if __name__ == "__main__":
         output_json_path = image_folder / "OrderLists" / f"{image_path.stem}_order.json"
         SaveDictAsJsonsOptimized(orderList, output_json_path)
         print("Sum of all pieces:", sum(orderList.values()))
-        #TODO: need to generate instructions via the orderList and images
         GenerateInstructions(fg_out_rgba, bg_rgba, orderList)
-        # output_pdf_path = image_folder / "InstructionSets" / f"{image_path.stem}_order.json"
-        # SaveInstructionsAsPDF(instructionSet, output_pdf_path)
         print("finished instructions!")
 
         composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
         composite.show()
         
         output_path = image_folder / f"{image_path.stem}_lego.png"
-        fg_out_img.save(output_path)
+        composite.save(output_path)
         print(f"Saved mosaic to {output_path}")
     
     except Exception as e:

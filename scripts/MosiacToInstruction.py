@@ -7,6 +7,13 @@ import numpy as np
 
 #function to generate instructions for creating the mosiac frame (stretch)
 
+
+def count_colors(img_rgba):
+    arr = np.asarray(img_rgba, dtype=np.uint8)
+    assert arr.shape[2] == 4  # RGBA
+    rgb = arr[:, :, :3].reshape(-1, 3)
+    return len(np.unique(rgb, axis=0))
+
 #function to generate instrucctions for a RGBA image mosiac (pixel-perfect)
 
 def GenerateInstructions(fg_rgba, bg_rgba, orderList):
@@ -23,58 +30,86 @@ def GenerateInstructions(fg_rgba, bg_rgba, orderList):
     fg = np.asarray(fg_rgba, dtype=np.uint8)
     bg = np.asarray(bg_rgba, dtype=np.uint8)
 
+    fg = fg.astype(np.float32) / 255.0
+    bg = bg.astype(np.float32) / 255.0
+
+
+    # Extract RGB only, ignore alpha
+    fg_colors = set(map(tuple, fg[:, :, :3].reshape(-1, 3)))
+    bg_colors = set(map(tuple, bg[:, :, :3].reshape(-1, 3)))
+
+    print(f"FG unique RGB colors ({len(fg_colors)}):")
+    print(fg_colors)
+
+    print(f"\nBG unique RGB colors ({len(bg_colors)}):")
+    print(bg_colors)
+
     H, W, C = fg.shape
     assert C == 4
     assert W == fg_w and H == fg_h
     assert W % 16 == 0 and H % 16 == 0
 
+    fg_color_count = count_colors(fg_rgba)
+    bg_color_count = count_colors(bg_rgba)
+
+    print("FG unique RGB colors:", fg_color_count)
+    print("BG unique RGB colors:", bg_color_count)
+
     #Split height into blockHeight chunks of 16 rows
     #Split width into blockWidth chunks of 16 columns
     #with four at end for rgba
-    fg_blocks = (
-        fg
-        .reshape(blockHeight, 16, blockWidth, 16, 4)
-        .transpose(2, 0, 3, 1, 4)
-    )
+    # reshape with (blockH, blockW, 16 rows, 16 cols, 4)
+    # bg_blocks = bg.reshape(blockHeight, 16, blockWidth, 16, 4).transpose(0, 2, 1, 3, 4)
+    # fg_blocks = fg.reshape(blockHeight, 16, blockWidth, 16, 4).transpose(0, 2, 1, 3, 4)
 
-    bg_blocks = (
-        bg
-        .reshape(blockHeight, 16, blockWidth, 16, 4)
-        .transpose(2, 0, 3, 1, 4)
-    )
     #(blockWidth, blockHeight, 16, 16, 4)
 
 
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
-        for blockH in reversed(range(0, blockHeight)):
+        for blockH in range(0, blockHeight):
             #layer 0: baseplate
             # grid of interlocking 16x16s to ensure solid foundation
             step = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step)
-            #TODO: use copies of canvas from last baseplate setup instruction as starting point for 1x1 placement instructions
             #layer 1: background
             #here we loop over each row and column to get the color (should be contained in order list)
             #only place maximum of 16 pieces per instruction step to avoid overwhelming user
             #16x16x4 blocks
-            fg_block = fg_blocks[blockW, blockH]
+            # Slice out a 16x16 block
+            y0, y1 = blockH*16, (blockH+1)*16
+            x0, x1 = blockW*16, (blockW+1)*16
+            bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
+            fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
             #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
-            for col in range(0, len(fg_block[0])):
+            for col in range(0, len(bg_block[0])):
                 #loop over columns of 16x16 block (each column is 16 plates)
                 #draw_plate_column()
                 img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
                 # take the column and convert to a list of 3-element tuples (R,G,B)
-                column_rgb = [tuple(fg_block[y, col, :3]) for y in range(16)]
+                # bg_block[col, row, rgba]
+                column_rgb = [tuple(bg_block[15 - y, col, :3]) for y in range(16)]
+                #print("RAW column colors:", len(set(column_rgb)), set(column_rgb))
+                #print(set(column_rgb))
+                #TODO: correct colors to use actual pixel color from bg
                 draw_plate_column(draw, col, column_rgb)
                 step = save_img_and_increment_step(img, step) # Save current step
 
 
-            #TODO: use copies of canvas from 1x1 background instruction as starting point for 1x1 foreground placement instructions
+            
             #layer 2: foreground
             #same thing as background but ignore alpha channel to allow background to show through
-            bg_block = bg_blocks[blockW, blockH]
+            # fg_block = fg_blocks[blockW, blockH]
+            # #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
+            # for col in range(0, len(fg_block[0])):
+            #   #TODO: add height (z) to x,y placement on draw_plate_column
 
 
-    return 1
+def sample_column(img_np, blockW, blockH, col):
+    return [
+        tuple(img_np[blockH*16 + row, blockW*16 + col][:3])
+        for row in range(16)
+    ]
+
 
 def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step):
     
@@ -83,11 +118,11 @@ def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step):
     #case 2: green connectors no red (bottom row)
     #case 3: no connectors (bottom right corner only)
     case = 0
-    if 0 == blockRow and colMax - 1 == blockCol:
+    if rowMax - 1 == blockRow and colMax - 1 == blockCol:
         case = 3
     elif colMax - 1 == blockCol:
         case = 1
-    elif 0 == blockRow:
+    elif rowMax - 1 == blockRow:
         case = 2
 
     print("creating baseplate instructions for width " + str(blockCol) + " and height " + str(blockRow) + " for max width " + str(colMax) + " and max height " + str(rowMax) + " case " + str(case))
