@@ -974,18 +974,20 @@ def get_block_xy(blockX, blockY):
 
 
 #pass in array of 16 length to draw a column of plates on a specific column (if element is empty then no plate is needed)
-def draw_plate_column(draw, start_blockX, colors):
+def draw_plate_column(draw, start_blockX, height, colors):
     if len(colors) != 16:
         print("need 16 color indexes")
         return
     for i in range(15, -1, -1): #go from 15 to 0
         #paint back to front to adhere to painters algorithm
         #print("DRAWING color:", colors[i])
-        draw_plate(draw, start_blockX, i, colors[i])
+        draw_plate(draw, start_blockX, i, height, colors[i])
 
 
-def draw_plate(draw, blockX, blockY, color):
+def draw_plate(draw, blockX, blockY, blockZ, color):
     x, y = get_block_xy(blockX, blockY)
+    if blockZ == 1:
+        y += PLATE_HALF_HEIGHT
     # Shading
     top_color = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
@@ -1061,6 +1063,8 @@ def draw_plate(draw, blockX, blockY, color):
 # step = generate_baseplate_setup(6, 0)
 # img, draw = get_img_and_draw(step, False) #use previous step to add onto for this step
 # test_array = [(random.random(), random.random(), random.random()) for _ in range(16)]
-# draw_plate_column(draw, 2, test_array)
+# draw_plate_column(draw, 0, 0, test_array)
+# test_array = [(random.random(), random.random(), random.random()) for _ in range(16)]
+# draw_plate_column(draw, 0, 1, test_array)
 # step = save_img_and_increment_step(img, step) # Save current step
 

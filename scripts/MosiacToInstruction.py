@@ -80,28 +80,29 @@ def GenerateInstructions(fg_rgba, bg_rgba, orderList):
             x0, x1 = blockW*16, (blockW+1)*16
             bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
             fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
-            #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
+            #print(f"bg size {len(bg_block)} x {len(bg_block[0])}")
             for col in range(0, len(bg_block[0])):
                 #loop over columns of 16x16 block (each column is 16 plates)
-                #draw_plate_column()
                 img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
                 # take the column and convert to a list of 3-element tuples (R,G,B)
-                # bg_block[col, row, rgba]
                 column_rgb = [tuple(bg_block[15 - y, col, :3]) for y in range(16)]
                 #print("RAW column colors:", len(set(column_rgb)), set(column_rgb))
                 #print(set(column_rgb))
-                #TODO: correct colors to use actual pixel color from bg
-                draw_plate_column(draw, col, column_rgb)
+                draw_plate_column(draw, col, 0, column_rgb) #zero height
                 step = save_img_and_increment_step(img, step) # Save current step
-
 
             
             #layer 2: foreground
             #same thing as background but ignore alpha channel to allow background to show through
-            # fg_block = fg_blocks[blockW, blockH]
             # #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
-            # for col in range(0, len(fg_block[0])):
-            #   #TODO: add height (z) to x,y placement on draw_plate_column
+            for col in range(0, len(fg_block[0])):
+                img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
+                # take the column and convert to a list of 3-element tuples (R,G,B)
+                column_rgb = [tuple(fg_block[15 - y, col, :3]) for y in range(16)]
+                #TODO: add height (z) to x,y placement on draw_plate_column
+                draw_plate_column(draw, col, 1, column_rgb) #one height
+                step = save_img_and_increment_step(img, step) # Save current step
+                
 
 
 def sample_column(img_np, blockW, blockH, col):
