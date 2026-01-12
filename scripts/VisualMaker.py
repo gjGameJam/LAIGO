@@ -981,7 +981,8 @@ def draw_plate_column(draw, start_blockX, height, colors):
     for i in range(15, -1, -1): #go from 15 to 0
         #paint back to front to adhere to painters algorithm
         #print("DRAWING color:", colors[i])
-        draw_plate(draw, start_blockX, i, height, colors[i])
+        if (colors[i][3] != 0):
+            draw_plate(draw, start_blockX, i, height, colors[i])
 
 
 def draw_plate(draw, blockX, blockY, blockZ, color):

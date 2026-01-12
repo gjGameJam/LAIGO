@@ -85,7 +85,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, orderList):
                 #loop over columns of 16x16 block (each column is 16 plates)
                 img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
                 # take the column and convert to a list of 3-element tuples (R,G,B)
-                column_rgb = [tuple(bg_block[15 - y, col, :3]) for y in range(16)]
+                column_rgb = [tuple(bg_block[15 - y, col]) for y in range(16)]
                 #print("RAW column colors:", len(set(column_rgb)), set(column_rgb))
                 #print(set(column_rgb))
                 draw_plate_column(draw, col, 0, column_rgb) #zero height
@@ -97,10 +97,12 @@ def GenerateInstructions(fg_rgba, bg_rgba, orderList):
             # #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
             for col in range(0, len(fg_block[0])):
                 img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
-                # take the column and convert to a list of 3-element tuples (R,G,B)
-                column_rgb = [tuple(fg_block[15 - y, col, :3]) for y in range(16)]
-                #TODO: add height (z) to x,y placement on draw_plate_column
-                draw_plate_column(draw, col, 1, column_rgb) #one height
+                # take the column and convert to a list of 3-element tuples (R,G,B,A)
+                column_rgba = [tuple(fg_block[15 - y, col]) for y in range(16)]
+                if all(pixel[3] == 0 for pixel in column_rgba):
+                    # Entire column is transparent, skip
+                    continue
+                draw_plate_column(draw, col, 1, column_rgba) #one height
                 step = save_img_and_increment_step(img, step) # Save current step
                 
 

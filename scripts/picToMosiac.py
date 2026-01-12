@@ -160,8 +160,8 @@ if __name__ == "__main__":
         fg_alpha_pil = make_difference_transparent(img, fg_pil)
         fg_rgba = fg_alpha_pil.convert("RGBA")
         fg_a = fg_rgba.getchannel("A").point(lambda p:255 if p>0 else 0)
-        fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=-5)
-        bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=-5)
+        fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=5)
+        bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
         
         print("converting processed image to lego mosiac...")
         fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, studs_width, alpha_mask=fg_a)
