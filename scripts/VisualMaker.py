@@ -901,36 +901,36 @@ def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
 
 
 
-step = generate_baseplate_setup(6, 0)
+# step = generate_baseplate_setup(6, 0)
 
 
-#img never has highlighting and to_reuse will be the same as img except the most recent step is highlighted
-img, draw = get_img_and_draw(step, False) #use previous step to add onto for this step
-to_reuse = img.copy()
-draw2 = ImageDraw.Draw(to_reuse)
-test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
-#draw twice, once for highlight and once regularly, using the regular one for the next step's start and saving highlighted one as current step
-#draw highlight on the step on reuse
-#reuse gets set to image each step. image is the previous without highlighting
-draw_plate_column(draw, 0, 0, test_array, False) #draw step without highlight
-draw_plate_column(draw2, 0, 0, test_array, True) #draw highlight
-step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+# #img never has highlighting and to_reuse will be the same as img except the most recent step is highlighted
+# img, draw = get_img_and_draw(step, False) #use previous step to add onto for this step
+# to_reuse = img.copy()
+# draw2 = ImageDraw.Draw(to_reuse)
+# test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
+# #draw twice, once for highlight and once regularly, using the regular one for the next step's start and saving highlighted one as current step
+# #draw highlight on the step on reuse
+# #reuse gets set to image each step. image is the previous without highlighting
+# draw_plate_column(draw, 0, 0, test_array, False) #draw step without highlight
+# draw_plate_column(draw2, 0, 0, test_array, True) #draw highlight
+# step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
 
 
-to_reuse = img.copy()
-draw2 = ImageDraw.Draw(to_reuse)
-test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
-draw_plate_column(draw, 0, 1, test_array, False)
-draw_plate_column(draw2, 0, 1, test_array, True)
-step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+# to_reuse = img.copy()
+# draw2 = ImageDraw.Draw(to_reuse)
+# test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
+# draw_plate_column(draw, 0, 1, test_array, False)
+# draw_plate_column(draw2, 0, 1, test_array, True)
+# step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
 
 
-to_reuse = img.copy()
-draw2 = ImageDraw.Draw(to_reuse)
-test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
-draw_plate_column(draw, 4, 0, test_array, False)
-draw_plate_column(draw2, 4, 0, test_array, True)
-step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+# to_reuse = img.copy()
+# draw2 = ImageDraw.Draw(to_reuse)
+# test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
+# draw_plate_column(draw, 4, 0, test_array, False)
+# draw_plate_column(draw2, 4, 0, test_array, True)
+# step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
 
 
 
