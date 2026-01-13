@@ -14,7 +14,6 @@ STUD_HEIGHT = PLATE_HEIGHT * 0.30
 STUD_OFFSET_X = (PLATE_WIDTH - STUD_WIDTH) / 2   # centers the stud
 STUD_OFFSET_Y = 0
 
-
 def get_file_name(step_num):
     return f"instructions/{step_num}.png"
 
@@ -105,16 +104,7 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     # c.setStrokeColor(Color(0.05, 0.05, 0.05))
     # c.setLineWidth(1.25)
 
-
-
-
     iso_points = [block_center_xy(bx, by, xOffset, yOffset) for bx, by in islands]
-
-
-
-
-
-
 
 
     for i in range(len(iso_points)):
@@ -123,10 +113,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         px1, py1 = to_pillow(x1, y1)
         px2, py2 = to_pillow(x2, y2)
         draw.line([(px1, py1), (px2, py2)], fill=(10,10,10), width=1)
-
-
-
-
 
 
     bottom_left_square = [
@@ -138,14 +124,10 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     draw.polygon(bottom_left_square, top_color, outline=(10,10,10))
 
 
-
-
     dx = -PLATE_WIDTH * 7 #- PLATE_HALF_WIDTH
     dy = -PLATE_WIDTH * 4 + PLATE_HALF_WIDTH
     top_left_square = [(x - dx, y - dy) for x, y in bottom_left_square]
     draw.polygon(top_left_square, top_color, outline=(10,10,10))
-
-
 
 
     dx = -PLATE_WIDTH * 14 #- PLATE_HALF_WIDTH
@@ -153,30 +135,18 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     top_right_square = [(x - dx, y - dy) for x, y in bottom_left_square]
     draw.polygon(top_right_square, top_color, outline=(10,10,10))
 
-
-
-
     dx = -PLATE_WIDTH * 7 #- PLATE_HALF_WIDTH
     dy = PLATE_WIDTH * 4 - PLATE_HALF_WIDTH
     bottom_right_square = [(x - dx, y - dy) for x, y in bottom_left_square]
     draw.polygon(bottom_right_square, top_color, outline=(10,10,10))
 
-
-
-
     # -----------------
     # Big middle 3D square
     # -----------------
 
-
-
-
     middle = x + PLATE_WIDTH * 6
     top_hh = PLATE_HALF_WIDTH * 2
     depth = PLATE_HEIGHT * 0.8  # slightly thinner than a plate
-
-
-
 
     # --- Top face ---
     big_top = [
@@ -186,9 +156,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         to_pillow(middle + PLATE_WIDTH * 2, y - top_hh),
     ]
 
-
-
-
     # --- Right face ---
     big_right = [
         to_pillow(middle + PLATE_WIDTH * 4, y + 0),
@@ -196,8 +163,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         to_pillow(middle + PLATE_WIDTH * 2, y - top_hh - depth),
         to_pillow(middle + PLATE_WIDTH * 4, y - depth),
     ]
-
-
 
 
     # --- Front face ---
@@ -209,14 +174,9 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     ]
 
 
-
-
     draw.polygon(big_top,   top_color, outline=(10,10,10))
     draw.polygon(big_right, right_color, outline=(10,10,10))
     draw.polygon(big_front, front_color, outline=(10,10,10))
-
-
-
 
     # -----------------
     # Studs (top only)
@@ -232,7 +192,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     dx = 0.2
     dy = -0.2
     studs = [(x - dx, y - dy) for x, y in studs]
-
 
     for sx, sy in studs:
         sx_iso, sy_iso = get_block_xy(
@@ -254,15 +213,9 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         (1.15, 16.35), (2.15, 16.35), (3.15, 16.35), (4.15, 16.35), (5.15, 16.35), (6.15, 16.35), (7.15, 16.35), (8.15, 16.35), (9.15, 16.35), (10.15, 16.35), (11.15, 16.35), (12.15, 16.35)
     ]
 
-
-
-
     green_holes = [
         (-1.3, 3.9), (-1.3, 12.9)
     ]
-
-
-
 
     red_holes = [
         (2.15, 16.35), (11.15, 16.35)
@@ -285,9 +238,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             fill=(25,25,25),
             outline=(10,10,10)
         )
-
-
-
 
     #case 0-3 for baseplate connections
     if (case == 0):
@@ -323,8 +273,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             )
 
 
-
-
         # draw back of green connectors
         xSpot = x + 100
         ySpot = y + 1
@@ -336,9 +284,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         ]
         draw.polygon(greenPin, green_color, outline=(10,10,10))
 
-
-
-
         xSpot = x + 235
         ySpot = y + 69
         greenPin = [
@@ -348,10 +293,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             (xSpot + 5,      ySpot + 13),       # bottom-left
         ]
         draw.polygon(greenPin, green_color, outline=(10,10,10))
-
-
-
-
         # draw back of red connectors
         xSpot = x + 245
         ySpot = y + 69
@@ -362,10 +303,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             (xSpot + -5,      ySpot + 13),       # bottom-left
         ]
         draw.polygon(redPin, red_color, outline=(10,10,10))
-
-
-
-
         xSpot = x + 380
         ySpot = y + 1
         redPin = [
@@ -375,10 +312,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             (xSpot + -5,      ySpot + 13),       # bottom-left
         ]
         draw.polygon(redPin, red_color, outline=(10,10,10))
-
-
-
-
         #then do green holes
         for sx, sy in green_holes:
             sx_iso, sy_iso = get_block_xy(
@@ -439,10 +372,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             (xSpot + -5,      ySpot + 13),       # bottom-left
         ]
         draw.polygon(redPin, red_color, outline=(10,10,10))
-
-
-
-
         xSpot = x + 380
         ySpot = y + 1
         redPin = [
@@ -492,10 +421,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             (xSpot + 5,      ySpot + 13),       # bottom-left
         ]
         draw.polygon(greenPin, green_color, outline=(10,10,10))
-
-
-
-
         xSpot = x + 235
         ySpot = y + 69
         greenPin = [
@@ -518,14 +443,11 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         return
 
 
-
-
 def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     """
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
     with NxN studs.
     """
-
 
     if (case == 0):
         #red and green connectors
@@ -540,8 +462,6 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     if (case == 3):
         #no connectors (already handled)
         pass
-
-
 
 
     #2x2 grey plates on bottom of plate
@@ -643,14 +563,9 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     ]
 
 
-
-
     red_holes = [
         (-1.3, 3.9), (-1.3, 12.9)
     ]
-
-
-
 
     #case 0-3 for baseplate connections
     if (case == 0):
@@ -674,7 +589,6 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
                 fill=red_color,
                 outline=(10,10,10)
             )
-
 
         #then do green holes
         for sx, sy in green_holes:
@@ -742,18 +656,13 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         return
 
 
+
 def draw_plate_sized(draw, blockX, blockY, width, height, color):
     PLATE_Z = PLATE_HEIGHT * 0.33
-
-
-
 
     top_color = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
-
-
-
 
     # --- Top corners ---
     p0 = get_block_xy(blockX, blockY)                   # front-left
@@ -761,15 +670,8 @@ def draw_plate_sized(draw, blockX, blockY, width, height, color):
     p2 = get_block_xy(blockX + width, blockY + height)  # back-right
     p3 = get_block_xy(blockX, blockY + height)          # back-left
 
-
-
-
     # --- Top ---
     draw.polygon([to_pillow(p0[0], p0[1]), to_pillow(p1[0], p1[1]), to_pillow(p2[0], p2[1]), to_pillow(p3[0], p3[1])], top_color, outline=(10,10,10))
-
-
-
-
     # --- FRONT FACE (correct: +X edge) ---
     front = [
         to_pillow(p0[0], p0[1]),
@@ -778,10 +680,6 @@ def draw_plate_sized(draw, blockX, blockY, width, height, color):
         to_pillow(p0[0], p0[1] - PLATE_Z),
     ]
     draw.polygon(front, front_color, outline=(10,10,10))
-
-
-
-
     # --- RIGHT FACE (diagonal depth) ---
     right = [
         to_pillow(p1[0], p1[1]),
@@ -791,34 +689,22 @@ def draw_plate_sized(draw, blockX, blockY, width, height, color):
     ]
     draw.polygon(right, right_color, outline=(10,10,10))
 
-
-
-
     # --- Studs ---
     for sy in range(height):
         for sx in range(width):
             sx_iso, sy_iso = get_block_xy(blockX + sx, blockY + sy)
 
-
             cx = sx_iso + PLATE_HALF_WIDTH
             cy = sy_iso + STUD_OFFSET_Y
-
-
             draw_stud_with_neck(draw, cx, cy, top_color, front_color, right_color)
 
 
 def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
     PLATE_Z = PLATE_HEIGHT * 0.33
 
-
-
-
     top_color = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
-
-
-
 
     blockX = blockX + .31
     blockY = blockY - .31
@@ -828,17 +714,8 @@ def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
     p2 = get_block_xy(blockX + width,   blockY)
     p3 = get_block_xy(blockX,           blockY)
 
-
-
-
-
-
     # --- Top ---
     draw.polygon([p0, p1, p2, p3], top_color, outline=(10,10,10))
-
-
-
-
     # --- FRONT FACE (correct: +X edge) ---
     front = [
         p0,
@@ -847,10 +724,6 @@ def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
         (p0[0], p0[1] + PLATE_Z),
     ]
     draw.polygon(front, front_color, outline=(10,10,10))
-
-
-
-
     # --- RIGHT FACE (diagonal depth) ---
     right = [
         p3,                               # top-left of the face
@@ -858,41 +731,21 @@ def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
         (p0[0], p0[1] + PLATE_Z),         # bottom-left dropped
         (p3[0], p3[1] + PLATE_Z),         # top-left dropped
     ]
-
-
     draw.polygon(right, right_color, outline=(10,10,10))
-
-
-
 
     # =====================
     # HOLES (stud-sized)
     # =====================
-
-
-
-
     dx = 0.1
     dy = -0.1
-   
     hole_color = ((int)(front_color[0] * 0.50), (int)(front_color[1] * 0.50), (int)(front_color[2] * 0.50))
-
-
-
-
     for sy in range(height):
         for sx in range(width):
             sx_hole = blockX + sx - dx
             sy_hole = blockY + sy - dy
-
-
             sx_iso, sy_iso = get_block_xy(sx_hole, sy_hole)
-
-
             stud_left  = sx_iso + STUD_OFFSET_X
             stud_right = stud_left + STUD_WIDTH
-
-
             draw.ellipse(
                 [stud_left, sy_iso + STUD_OFFSET_Y - PLATE_Z, stud_right, sy_iso + STUD_OFFSET_Y + STUD_HEIGHT - PLATE_Z],
                 fill=hole_color,
@@ -900,27 +753,21 @@ def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
             )
 
 
+
 STUD_NECK_HEIGHT = PLATE_HEIGHT * 0.3
 STUD_NECK_WIDTH  = STUD_WIDTH * 0.75
 STUD_NECK_OFFSET = (STUD_WIDTH - STUD_NECK_WIDTH) / 2
 STUD_NECK_RISE = STUD_HEIGHT * 0.35   # how high into the stud the neck starts
 
-
 def draw_stud_with_neck(draw, cx, cy, top_color, front_color, right_color):
     # --- Stud top ---
     left  = cx - STUD_WIDTH / 2
     right = cx + STUD_WIDTH / 2
-
-
     # --- Neck geometry (spawn higher) ---
     neck_left  = cx - STUD_WIDTH / 2
     neck_right = cx + STUD_WIDTH / 2
-
-
     neck_top = cy + STUD_NECK_RISE
     neck_bot = neck_top - STUD_NECK_HEIGHT
-
-
     # Front face
     front = [
         to_pillow(neck_left,  neck_top),
@@ -955,9 +802,6 @@ def generate_baseplate_setup(step, case):
     print("drew baseplate instruction")
     return step
 
-
-
-
 # -----------------------------
 # Convert block grid to isometric XY
 # -----------------------------
@@ -974,7 +818,7 @@ def get_block_xy(blockX, blockY):
 
 
 #pass in array of 16 length to draw a column of plates on a specific column (if element is empty then no plate is needed)
-def draw_plate_column(draw, start_blockX, height, colors):
+def draw_plate_column(draw, start_blockX, height, colors, highlight):
     if len(colors) != 16:
         print("need 16 color indexes")
         return
@@ -982,10 +826,10 @@ def draw_plate_column(draw, start_blockX, height, colors):
         #paint back to front to adhere to painters algorithm
         #print("DRAWING color:", colors[i])
         if (colors[i][3] != 0):
-            draw_plate(draw, start_blockX, i, height, colors[i])
+            draw_plate(draw, start_blockX, i, height, colors[i], highlight)
 
 
-def draw_plate(draw, blockX, blockY, blockZ, color):
+def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
     x, y = get_block_xy(blockX, blockY)
     if blockZ == 1:
         y += PLATE_HALF_HEIGHT
@@ -1015,6 +859,25 @@ def draw_plate(draw, blockX, blockY, blockZ, color):
     draw.polygon(top, top_color, outline=(10,10,10))
     draw.polygon(right, right_color, outline=(10,10,10))
     draw.polygon(front, front_color, outline=(10,10,10))
+
+
+
+
+    #perform highlight if desired
+    if highlight:
+        yellow = (255, 255, 0)
+        outline = [
+            to_pillow(x + 0,               y + 0),
+            to_pillow(x + 0,               y - PLATE_HALF_HEIGHT + 1),
+            to_pillow(x + PLATE_HALF_WIDTH, y - PLATE_HEIGHT + 1),
+            to_pillow(x + PLATE_WIDTH,      y - PLATE_HALF_HEIGHT + 1),
+            to_pillow(x + PLATE_WIDTH,      y + 0),
+            to_pillow(x + PLATE_HALF_WIDTH, y + PLATE_HALF_HEIGHT),
+            to_pillow(x + 0,               y + 0)
+        ]
+        draw.line(outline, fill=yellow, width=2)
+
+
     # --- Stud front wall ---
     stud_left = x + STUD_OFFSET_X
     stud_right = stud_left + STUD_WIDTH
@@ -1035,37 +898,41 @@ def draw_plate(draw, blockX, blockY, blockZ, color):
         fill=top_color,
         outline=(10,10,10)
     )
-# # ----------------------------
-# # Step 0: Setup step number
-# # ----------------------------
-# step = 1
+
+
+
+step = generate_baseplate_setup(6, 0)
+
+
+#img never has highlighting and to_reuse will be the same as img except the most recent step is highlighted
+img, draw = get_img_and_draw(step, False) #use previous step to add onto for this step
+to_reuse = img.copy()
+draw2 = ImageDraw.Draw(to_reuse)
+test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
+#draw twice, once for highlight and once regularly, using the regular one for the next step's start and saving highlighted one as current step
+#draw highlight on the step on reuse
+#reuse gets set to image each step. image is the previous without highlighting
+draw_plate_column(draw, 0, 0, test_array, False) #draw step without highlight
+draw_plate_column(draw2, 0, 0, test_array, True) #draw highlight
+step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+
+
+to_reuse = img.copy()
+draw2 = ImageDraw.Draw(to_reuse)
+test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
+draw_plate_column(draw, 0, 1, test_array, False)
+draw_plate_column(draw2, 0, 1, test_array, True)
+step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+
+
+to_reuse = img.copy()
+draw2 = ImageDraw.Draw(to_reuse)
+test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
+draw_plate_column(draw, 4, 0, test_array, False)
+draw_plate_column(draw2, 4, 0, test_array, True)
+step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
 
 
 
 
-# # -----------------------------------------------
-# # Step 1: Create base image and add rectangle
-# # -----------------------------------------------
-# img, draw = get_img_and_draw(step, False) # get previous image (blank if no previous) and draw object to draw on it
-# draw.rectangle((50, 50, 150, 150), fill=(200, 50, 50, 255)) # Draw stuff for current step (can be arbitrary amount of draws)
-# step = save_img_and_increment_step(img, step) # Save current step
-
-
-
-
-# # -----------------------------------------
-# # Step 2: Reopen the image and add more
-# # -----------------------------------------
-# img, draw = get_img_and_draw(step, False) # get previous image (blank if no previous) and draw object to draw on it
-# draw.ellipse((200, 50, 300, 150), fill=(50, 150, 255, 255)) # Draw stuff for current step (can be arbitrary amount of draws)
-# step = save_img_and_increment_step(img, step) # Save current step
-
-
-# step = generate_baseplate_setup(6, 0)
-# img, draw = get_img_and_draw(step, False) #use previous step to add onto for this step
-# test_array = [(random.random(), random.random(), random.random()) for _ in range(16)]
-# draw_plate_column(draw, 0, 0, test_array)
-# test_array = [(random.random(), random.random(), random.random()) for _ in range(16)]
-# draw_plate_column(draw, 0, 1, test_array)
-# step = save_img_and_increment_step(img, step) # Save current step
 
