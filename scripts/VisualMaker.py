@@ -899,6 +899,19 @@ def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
         outline=(10,10,10)
     )
 
+#function for drawing frame around mosiac, saving each step until frame is complete
+def draw_frame_for_mosiac(width, height, draw):
+    blockWidth = (int)(width / 16)
+    blockHeight = (int)(height / 16)
+    pass
+
+#straight on view for finished mosiac (with black axle pins going into the holes to attach frame to backplate)
+def draw_finished_view(composite, draw):
+    #composite is a RGBA image of the finished lego mosiac
+    blockWidth = (int)(composite.width / 16)
+    blockHeight = (int)(composite.height / 16)
+    pass
+
 
 
 # step = generate_baseplate_setup(6, 0)

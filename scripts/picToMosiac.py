@@ -182,7 +182,14 @@ if __name__ == "__main__":
         print("size of foreground mosaic:", fg_out_rgba.size)
         fg_out_rgba.show()
         bg_rgba.show()
+
+        composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
+        composite.show()
         
+        output_path = image_folder / f"{image_path.stem}_lego.png"
+        composite.save(output_path)
+        print(f"Saved mosaic to {output_path}")
+
         print("generating order list...")
         orderList = GenerateOrderList(fg_out_rgba, bg_rgba)
         print("finished order list!")
@@ -191,15 +198,8 @@ if __name__ == "__main__":
         output_json_path = image_folder / "OrderLists" / f"{image_path.stem}_order.json"
         SaveDictAsJsonsOptimized(orderList, output_json_path)
         print("Sum of all pieces:", sum(orderList.values()))
-        GenerateInstructions(fg_out_rgba, bg_rgba, orderList)
+        GenerateInstructions(fg_out_rgba, bg_rgba, composite)
         print("finished instructions!")
-
-        composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
-        composite.show()
-        
-        output_path = image_folder / f"{image_path.stem}_lego.png"
-        composite.save(output_path)
-        print(f"Saved mosaic to {output_path}")
     
     except Exception as e:
         print(f"[ERROR] {type(e).__name__}: {e}")
