@@ -3,6 +3,7 @@ from pathlib import Path
 from collections import defaultdict
 import json
 from pathlib import Path
+from math import ceil
 
 
 
@@ -84,47 +85,65 @@ def GetPaletteRGBArray():
 
 #input data will be dictionary of int elementId (piece number) and int quantity (key and value)
 #this function should return output of json string with following format
-def SaveDictAsJsonsOptimized(order_dict: dict, output_path: Path, max_per_item: int = 999):
+def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 999):
     """
-    Save an order dictionary to one or more JSON files, minimizing the number
-    of files while keeping no item quantity above max_per_item in any JSON.
+    Split order_dict values into chunks <= max_per_item and write multiple JSONs
+    while keeping the output as defaultdict(int).
 
     Args:
-        order_dict: { elementId(int): quantity(int), ... }
-        output_path: Path for the base filename
-        max_per_item: maximum quantity per item in a JSON
+        order_dict: defaultdict(int) or dict {element_id: quantity}
+        output_path: Path to the first output JSON
+        max_per_item: maximum quantity per item per JSON
     """
-    if not isinstance(order_dict, dict):
-        raise TypeError(f"SaveDictAsJsonsOptimized expected dict, got {type(order_dict)}")
+    if not isinstance(order_dict, (dict, defaultdict)):
+        raise TypeError("order_dict must be a dict or defaultdict")
+
+    if not isinstance(output_path, Path):
+        output_path = Path(output_path)
+
     if not output_path.parent.exists():
         raise FileNotFoundError(f"Output directory does not exist: {output_path.parent}")
 
-    # Prepare a dict of remaining quantities
-    remaining = {k: v for k, v in order_dict.items() if v > 0}
-    json_index = 0
+    if max_per_item <= 0:
+        raise ValueError("max_per_item must be positive")
+    
+    print(order_dict)
 
-    while remaining:
-        chunk = []
-        for element_id in list(remaining.keys()):
-            qty = remaining[element_id]
-            take = min(qty, max_per_item)
-            chunk.append({"elementId": str(element_id), "quantity": take})
-            remaining[element_id] -= take
-            if remaining[element_id] <= 0:
-                del remaining[element_id]
+    # Step 1: build chunks per element
+    chunks_per_element = defaultdict(list)  # element_id -> list of ints (each <= max_per_item)
+    max_parts = 0
+    for element_id, qty in order_dict.items():
+        if qty <= 0:
+            continue
+        parts = ceil(qty / max_per_item)
+        remaining = qty
+        for _ in range(parts):
+            take = min(remaining, max_per_item)
+            chunks_per_element[element_id].append(take)
+            remaining -= take
+        max_parts = max(max_parts, len(chunks_per_element[element_id]))
 
-        # Save current chunk
-        if json_index == 0:
+    if max_parts == 0:
+        print("No items to write.")
+        return
+
+    # Step 2: produce files_needed = max_parts files
+    for file_index in range(max_parts):
+        out_items = defaultdict(int)
+        for element_id, parts in chunks_per_element.items():
+            if file_index < len(parts):
+                out_items[element_id] = parts[file_index]
+
+        # determine path
+        if file_index == 0:
             out_path = output_path
         else:
-            out_path = output_path.with_name(f"{output_path.stem}_{json_index}{output_path.suffix}")
+            out_path = output_path.with_name(f"{output_path.stem}_{file_index}{output_path.suffix}")
 
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(chunk, f, indent=4)
+            json.dump([{"elementId": str(k), "quantity": v} for k, v in out_items.items()],
+                      f, indent=4)
 
-        print(f"Saved {len(chunk)} items to {out_path}")
-        json_index += 1
-
-
+        print(f"Saved {len(out_items)} items to {out_path}")
 
 
