@@ -115,9 +115,9 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite):
     draw_frame_for_mosiac(fg_rgba.width, fg_rgba.height, step)
 
     #add frame around entire mosiac view
-    img, draw = get_img_and_draw(step, True) #True because we want a fresh image for frame
+    #img, draw = get_img_and_draw(step, True) #True because we want a fresh image for frame
     draw_finished_view(composite, draw)
-    save_img_and_increment_step(img, step) # Save current step
+    #save_img_and_increment_step(img, step) # Save current step
 
 
 def sample_column(img_np, blockW, blockH, col):
