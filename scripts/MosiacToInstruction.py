@@ -1,12 +1,19 @@
 from VisualMaker import generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions
 from PIL import Image, ImageDraw
 import numpy as np
+import shutil
+from pathlib import Path
 #take in ord list from MosiacToOrder to get pieces and counts
 #take in foreground and background RGBA images (ignore alpha channel in foreground because it allows background to show through)
 #build background first then foreground on top
 
 #function to generate instructions for creating the mosiac frame (stretch)
 
+
+def empty_instructions_folder():
+    folder = Path("instructions")
+    shutil.rmtree(folder)
+    folder.mkdir(parents=True, exist_ok=True)
 
 def count_colors(img_rgba):
     arr = np.asarray(img_rgba, dtype=np.uint8)
@@ -15,10 +22,11 @@ def count_colors(img_rgba):
     return len(np.unique(rgb, axis=0))
 
 #function to generate instrucctions for a RGBA image mosiac (pixel-perfect)
-
 def GenerateInstructions(fg_rgba, bg_rgba, composite):
     assert isinstance(fg_rgba, Image.Image)
     assert fg_rgba.mode == "RGBA"
+    #set up by clearing previous instructions and starting froms tep 1
+    empty_instructions_folder()
     step = 1
     fg_w, fg_h = fg_rgba.size
     blockWidth = (int)(fg_w / 16)
