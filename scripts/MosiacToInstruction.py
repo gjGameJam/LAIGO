@@ -1,4 +1,4 @@
-from VisualMaker import generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_for_mosiac, draw_finished_view
+from VisualMaker import generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions
 from PIL import Image, ImageDraw
 import numpy as np
 #take in ord list from MosiacToOrder to get pieces and counts
@@ -112,11 +112,11 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite):
                 step = save_img_and_increment_step(to_reuse, step) # Save current step
     
     #add frame instruction steps
-    draw_frame_for_mosiac(fg_rgba.width, fg_rgba.height, step)
+    draw_frame_instructions(fg_rgba.width, fg_rgba.height, step)
 
     #add frame around entire mosiac view
     #img, draw = get_img_and_draw(step, True) #True because we want a fresh image for frame
-    draw_finished_view(composite, draw)
+    #draw_finished_view(composite, draw)
     #save_img_and_increment_step(img, step) # Save current step
 
 

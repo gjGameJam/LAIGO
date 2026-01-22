@@ -142,6 +142,7 @@ def make_difference_transparent(orig, new):
 if __name__ == "__main__":
     
     try:
+        print("starting picture to lego mosaic conversion...")
         if len(sys.argv) < 3:
             raise ValueError("Usage: python picToMosiac.py width PercentOfBackgroundColors")
         studs_width = int(sys.argv[1])

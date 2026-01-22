@@ -1,4 +1,4 @@
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import random
 # -----------------------------
 # CONSTANTS
@@ -13,51 +13,38 @@ STUD_WIDTH = PLATE_WIDTH * 0.35
 STUD_HEIGHT = PLATE_HEIGHT * 0.30
 STUD_OFFSET_X = (PLATE_WIDTH - STUD_WIDTH) / 2   # centers the stud
 STUD_OFFSET_Y = 0
-
-
-
+STUD_NECK_HEIGHT = PLATE_HEIGHT * 0.3
+STUD_NECK_WIDTH  = STUD_WIDTH * 0.75
+STUD_NECK_OFFSET = (STUD_WIDTH - STUD_NECK_WIDTH) / 2
+STUD_NECK_RISE = STUD_HEIGHT * 0.35   # how high into the stud the neck starts
 
 def get_file_name(step_num):
     return f"instructions/{step_num}.png"
 
 
-
-
-
-
-
-
 def save_img_and_increment_step(img, step):
+    #draw step number on bottom middle
+    width, height = img.size
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype("arial.ttf", 32)
+    
+    #draw step number in center bottom
+    x_middle = width / 2
+    x_offset = -len(str(step)) * 5
+    offset = 50
+    draw.text((x_middle + x_offset, height - offset), str(step), fill="black", font=font)
+    #save and increment/return step
     saveName = get_file_name(step)
     img.save(saveName)
-    #print("Saved " + saveName)
-    return step + 1
-
-
-
-
-
-
+    return (step + 1)
 
 
 def to_rgb(color):
     return tuple(int(c * 255) for c in color)
 
 
-
-
-
-
-
-
 def to_pillow(x, y):
     return (x, 792 - y) #silly little me was using reportwhateveritwas canvas before and y is flipped
-
-
-
-
-
-
 
 
 def get_img_and_draw(step, wantClear):
@@ -72,20 +59,8 @@ def get_img_and_draw(step, wantClear):
     return img, ImageDraw.Draw(img) #return imagedraw to allow user to modify current step before saving
 
 
-
-
-
-
-
-
 def block_center_xy(bx, by, xOffset, yOffset):
     return get_block_xy(bx + xOffset + 0.5, by + yOffset + 0.5)
-
-
-
-
-
-
 
 
 def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
@@ -105,13 +80,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
     green_color = to_rgb((.647, .792, .09))
     red_color = to_rgb((0.8, 0.1, 0.1))
-
-
-
-
-
-
-
 
     # -----------------
     # Baseplate faces
@@ -140,12 +108,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     draw.polygon(front, front_color, outline=(10,10,10))
 
 
-
-
-
-
-
-
     islands = [
         (.5, .5),     # bottom-left
         (.5, 14.5),    # top-left
@@ -156,16 +118,7 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     # c.setLineWidth(1.25)
 
 
-
-
     iso_points = [block_center_xy(bx, by, xOffset, yOffset) for bx, by in islands]
-
-
-
-
-
-
-
 
     for i in range(len(iso_points)):
         x1, y1 = iso_points[i]
@@ -173,12 +126,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         px1, py1 = to_pillow(x1, y1)
         px2, py2 = to_pillow(x2, y2)
         draw.line([(px1, py1), (px2, py2)], fill=(10,10,10), width=1)
-
-
-
-
-
-
 
 
     bottom_left_square = [
@@ -189,31 +136,15 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     ]
     draw.polygon(bottom_left_square, top_color, outline=(10,10,10))
 
-
-
-
-
-
-
-
     dx = -PLATE_WIDTH * 7 #- PLATE_HALF_WIDTH
     dy = -PLATE_WIDTH * 4 + PLATE_HALF_WIDTH
     top_left_square = [(x - dx, y - dy) for x, y in bottom_left_square]
     draw.polygon(top_left_square, top_color, outline=(10,10,10))
 
-
-
-
-
-
-
-
     dx = -PLATE_WIDTH * 14 #- PLATE_HALF_WIDTH
     dy = 0
     top_right_square = [(x - dx, y - dy) for x, y in bottom_left_square]
     draw.polygon(top_right_square, top_color, outline=(10,10,10))
-
-
 
 
     dx = -PLATE_WIDTH * 7 #- PLATE_HALF_WIDTH
@@ -222,20 +153,14 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     draw.polygon(bottom_right_square, top_color, outline=(10,10,10))
 
 
-
-
     # -----------------
     # Big middle 3D square
     # -----------------
 
 
-
-
     middle = x + PLATE_WIDTH * 6
     top_hh = PLATE_HALF_WIDTH * 2
     depth = PLATE_HEIGHT * 0.8  # slightly thinner than a plate
-
-
 
 
     # --- Top face ---
@@ -247,8 +172,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     ]
 
 
-
-
     # --- Right face ---
     big_right = [
         to_pillow(middle + PLATE_WIDTH * 4, y + 0),
@@ -256,10 +179,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         to_pillow(middle + PLATE_WIDTH * 2, y - top_hh - depth),
         to_pillow(middle + PLATE_WIDTH * 4, y - depth),
     ]
-
-
-
-
 
 
 
@@ -275,15 +194,9 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
 
 
 
-
-
-
-
     draw.polygon(big_top,   top_color, outline=(10,10,10))
     draw.polygon(big_right, right_color, outline=(10,10,10))
     draw.polygon(big_front, front_color, outline=(10,10,10))
-
-
 
 
     # -----------------
@@ -300,8 +213,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     dx = 0.2
     dy = -0.2
     studs = [(x - dx, y - dy) for x, y in studs]
-
-
 
 
     for sx, sy in studs:
@@ -325,13 +236,9 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     ]
 
 
-
-
     green_holes = [
         (-1.3, 3.9), (-1.3, 12.9)
     ]
-
-
 
 
     red_holes = [
@@ -355,8 +262,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             fill=(25,25,25),
             outline=(10,10,10)
         )
-
-
 
 
     #case 0-3 for baseplate connections
@@ -395,10 +300,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
 
 
 
-
-
-
-
         # draw back of green connectors
         xSpot = x + 100
         ySpot = y + 1
@@ -409,8 +310,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
             (xSpot + 5,      ySpot + 13),       # bottom-left
         ]
         draw.polygon(greenPin, green_color, outline=(10,10,10))
-
-
 
 
         xSpot = x + 235
@@ -572,12 +471,6 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         return
 
 
-
-
-
-
-
-
 def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     """
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
@@ -585,18 +478,16 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     """
 
 
-
-
     if (case == 0):
         #red and green connectors
-        draw_plate_sized(draw, 16.5, 4.5, 2, 4, (.647, .792, .09))   # 2x4
-        draw_plate_sized(draw, 7.5, -2.5, 4, 2, (0.8, 0.1, 0.1))   # 4x2      
+        draw_plate_sized(draw, 16.5, 4.5, 2, 4, 1, (.647, .792, .09))   # 2x4
+        draw_plate_sized(draw, 7.5, -2.5, 4, 2, 1, (0.8, 0.1, 0.1))   # 4x2      
     if (case == 1):
         #red connectors no green
-        draw_plate_sized(draw, 7.5, -2.5, 4, 2, (0.8, 0.1, 0.1))   # 4x2
+        draw_plate_sized(draw, 7.5, -2.5, 4, 2, 1, (0.8, 0.1, 0.1))   # 4x2
     if (case == 2):
         #green connectors no red
-        draw_plate_sized(draw, 16.5, 4, 2, 4, (.647, .792, .09))   # 2x4
+        draw_plate_sized(draw, 16.5, 4, 2, 4, 1, (.647, .792, .09))   # 2x4
     if (case == 3):
         #no connectors (already handled)
         pass
@@ -604,14 +495,10 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
 
 
 
-
-
-
-
     #2x2 grey plates on bottom of plate
-    draw_plate_sized(draw, 1.5, -1.5, 2, 2, (0.44, 0.44, 0.44))
-    draw_plate_sized(draw, 15.5, -1.5, 2, 2, (0.44, 0.44, 0.44))
-    draw_plate_sized(draw, 15.5, 12.5, 2, 2, (0.44, 0.44, 0.44))
+    draw_plate_sized(draw, 1.5, -1.5, 2, 2, 1, (0.44, 0.44, 0.44))
+    draw_plate_sized(draw, 15.5, -1.5, 2, 2, 1, (0.44, 0.44, 0.44))
+    draw_plate_sized(draw, 15.5, 12.5, 2, 2, 1, (0.44, 0.44, 0.44))
    
     xOffset = .5
     yOffset = -.5
@@ -709,15 +596,9 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
 
 
 
-
-
-
-
     red_holes = [
         (-1.3, 3.9), (-1.3, 12.9)
     ]
-
-
 
 
     #case 0-3 for baseplate connections
@@ -742,8 +623,6 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
                 fill=red_color,
                 outline=(10,10,10)
             )
-
-
 
 
         #then do green holes
@@ -812,16 +691,8 @@ def draw_baseplate_top(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
         return
 
 
-
-
-
-
-
-
-def draw_plate_sized(draw, blockX, blockY, width, height, color):
-    PLATE_Z = PLATE_HEIGHT * 0.33
-
-
+def draw_plate_sized(draw, blockX, blockY, width, length, height, color):
+    PLATE_Z = PLATE_HEIGHT * 0.33 * height
 
 
     top_color = to_rgb(color)
@@ -829,15 +700,11 @@ def draw_plate_sized(draw, blockX, blockY, width, height, color):
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
 
 
-
-
     # --- Top corners ---
     p0 = get_block_xy(blockX, blockY)                   # front-left
     p1 = get_block_xy(blockX + width, blockY)           # front-right
-    p2 = get_block_xy(blockX + width, blockY + height)  # back-right
-    p3 = get_block_xy(blockX, blockY + height)          # back-left
-
-
+    p2 = get_block_xy(blockX + width, blockY + length)  # back-right
+    p3 = get_block_xy(blockX, blockY + length)          # back-left
 
 
     # --- Top ---
@@ -860,14 +727,10 @@ def draw_plate_sized(draw, blockX, blockY, width, height, color):
     draw.polygon(right, right_color, outline=(10,10,10))
 
 
-
-
     # --- Studs ---
-    for sy in range(height):
+    for sy in range(length):
         for sx in range(width):
             sx_iso, sy_iso = get_block_xy(blockX + sx, blockY + sy)
-
-
 
 
             cx = sx_iso + PLATE_HALF_WIDTH
@@ -875,23 +738,13 @@ def draw_plate_sized(draw, blockX, blockY, width, height, color):
             draw_stud_with_neck(draw, cx, cy, top_color, front_color, right_color)
 
 
-
-
-
-
-
-
 def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
     PLATE_Z = PLATE_HEIGHT * 0.33
-
-
 
 
     top_color = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
-
-
 
 
     blockX = blockX + .31
@@ -901,8 +754,6 @@ def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
     p1 = get_block_xy(blockX + width,   blockY + height)
     p2 = get_block_xy(blockX + width,   blockY)
     p3 = get_block_xy(blockX,           blockY)
-
-
 
 
     # --- Top ---
@@ -925,8 +776,6 @@ def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
     draw.polygon(right, right_color, outline=(10,10,10))
 
 
-
-
     # =====================
     # HOLES (stud-sized)
     # =====================
@@ -945,20 +794,6 @@ def draw_plate_sized_upside_down(draw, blockX, blockY, width, height, color):
                 fill=hole_color,
                 outline=(10,10,10)
             )
-
-
-
-
-
-
-
-
-STUD_NECK_HEIGHT = PLATE_HEIGHT * 0.3
-STUD_NECK_WIDTH  = STUD_WIDTH * 0.75
-STUD_NECK_OFFSET = (STUD_WIDTH - STUD_NECK_WIDTH) / 2
-STUD_NECK_RISE = STUD_HEIGHT * 0.35   # how high into the stud the neck starts
-
-
 
 
 def draw_stud_with_neck(draw, cx, cy, top_color, front_color, right_color):
@@ -990,17 +825,14 @@ def draw_stud_with_neck(draw, cx, cy, top_color, front_color, right_color):
 def draw_stud(draw, cx, cy, blockZ, color):
     # Convert stud center from stud coords -> pixel coords
 
-
     if blockZ != 0:
         cy += PLATE_HALF_HEIGHT * blockZ
-
 
     top_color   = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
 
-
-    #TODO: create updated stud and neck sizing
+    #create updated stud and neck sizing
     neck_left  = cx + STUD_WIDTH * 1.5
     neck_right = cx + STUD_WIDTH * 4.5
     neck_top = cy + STUD_NECK_HEIGHT * 5
@@ -1013,16 +845,11 @@ def draw_stud(draw, cx, cy, blockZ, color):
     ]
     draw.polygon(front, front_color, outline=(10,10,10))
 
-
     draw.ellipse(
         [neck_left, 786 - neck_top, neck_right, 786 - neck_bot],
         fill=top_color,
         outline=(10,10,10)
     )
-
-
-
-
 
 
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
@@ -1043,8 +870,6 @@ def generate_baseplate_setup(step, case):
     return step
 
 
-
-
 # -----------------------------
 # Convert block grid to isometric XY
 # -----------------------------
@@ -1060,8 +885,6 @@ def get_block_xy(blockX, blockY):
     return [baseX, baseY]
 
 
-
-
 #pass in array of 16 length to draw a column of plates on a specific column (if element is empty then no plate is needed)
 def draw_plate_column(draw, start_blockX, height, colors, highlight):
     if len(colors) != 16:
@@ -1072,8 +895,6 @@ def draw_plate_column(draw, start_blockX, height, colors, highlight):
         #print("DRAWING color:", colors[i])
         if (colors[i][3] != 0):
             draw_plate(draw, start_blockX, i, height, colors[i], highlight)
-
-
 
 
 def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
@@ -1109,9 +930,6 @@ def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
 
 
 
-
-
-
     #perform highlight if desired
     if highlight:
         yellow = (255, 255, 0)
@@ -1125,10 +943,6 @@ def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
             to_pillow(x + 0,               y + 0)
         ]
         draw.line(outline, fill=yellow, width=2)
-
-
-
-
 
 
 
@@ -1155,8 +969,6 @@ def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
     )
 
 
-
-
 # Helper: convert stud offsets to pixel coords
 def iso(dx, dy, x0, y0):
     return to_pillow(
@@ -1164,22 +976,18 @@ def iso(dx, dy, x0, y0):
         y0 + dy * PLATE_HALF_HEIGHT
     )
 
-
 def draw_corner_brick(draw, baseX, baseY, baseZ, color, highlight=False):
     # Convert base stud to pixel origin
     x0, y0 = get_block_xy(baseX, baseY)
-
 
     # Shading
     top_color   = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
 
-
     half_width = 4
     full_width = 8
     plate_height = 2
-
 
     # -----------------------------
     # TOP FACE (2x2 with 1x1 missing bottom-left)
@@ -1194,7 +1002,6 @@ def draw_corner_brick(draw, baseX, baseY, baseZ, color, highlight=False):
     ]
     draw.polygon(top, top_color, outline=(10,10,10))
 
-
     left = [
         iso(half_width, 0 - plate_height, x0, y0),
         iso(0, 0 - plate_height, x0, y0),
@@ -1203,8 +1010,7 @@ def draw_corner_brick(draw, baseX, baseY, baseZ, color, highlight=False):
     ]
     draw.polygon(left, front_color, outline=(10,10,10))
 
-
-   
+    
     right = [
         iso(half_width, 0, x0, y0),
         iso(full_width, 0, x0, y0),
@@ -1212,7 +1018,6 @@ def draw_corner_brick(draw, baseX, baseY, baseZ, color, highlight=False):
         iso(half_width, -half_width - plate_height, x0, y0)
     ]
     draw.polygon(right, front_color, outline=(10,10,10))
-
 
     # --- Studs (only where plate exists) ---
     for dx in range(2):
@@ -1223,29 +1028,24 @@ def draw_corner_brick(draw, baseX, baseY, baseZ, color, highlight=False):
             yOffset = dy * PLATE_HEIGHT * 2
             draw_stud(draw, x0 + xOffset, y0 + yOffset, baseZ, color)
 
-
     # --- Optional highlight ---
     if highlight:
         draw.line([top[1], top[2], top[3], left[1], left[0], right[3], right[2], right[1]], fill=(255,255,0), width=2)
-
-
 
 
 def draw_brick(draw, baseX, baseY, baseZ, color, highlight=False):
     # Convert base stud to pixel origin
     x0, y0 = get_block_xy(baseX, baseY)
 
-
     # Shading
     top_color   = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
 
-
     half_width = 2
     full_width = 4
     plate_height = 6
-   
+    
     top = [
         iso(0, 0, x0, y0),
         iso(full_width, 0, x0, y0),
@@ -1253,7 +1053,6 @@ def draw_brick(draw, baseX, baseY, baseZ, color, highlight=False):
         iso(0, full_width, x0, y0),
     ]
     draw.polygon(top, top_color, outline=(10,10,10))
-
 
     front = [
         iso(0, 0, x0, y0),
@@ -1263,109 +1062,90 @@ def draw_brick(draw, baseX, baseY, baseZ, color, highlight=False):
     ]
     draw.polygon(front, front_color, outline=(10,10,10))
 
-
     draw_stud(draw, x0, y0, baseZ, color)
-
 
     # --- Optional highlight ---
     if highlight:
         draw.line([top[1], top[2], top[3], front[3], front[2], top[2]], fill=(255,255,0), width=2)
 
 
-
-
-def draw_corner_plate(draw, baseX, baseY, baseZ, color, highlight=False):
+def draw_corner_plate(draw, baseX, baseY, baseZ, length, width, color, cutoffX, cutoffY, highlight=False):
     # Convert base stud to pixel origin
     x0, y0 = get_block_xy(baseX, baseY)
-
 
     # Shading
     top_color   = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
 
-
-    half_width = 8
-    full_width = 16
+    
+    full_width = length * 4
+    half_width = width * 4
     plate_height = 2
-
 
     # -----------------------------
     # TOP FACE (4x4 with 2x2 missing bottom-left)
     # -----------------------------
     top = [
-        iso(half_width, 0, x0, y0),
+        iso(full_width - half_width, 0, x0, y0),
         iso(full_width, 0, x0, y0),
         iso(full_width, full_width, x0, y0),
         iso(0, full_width, x0, y0),
-        iso(0, half_width, x0, y0),
-        iso(half_width, half_width, x0, y0)
+        iso(0, full_width - half_width, x0, y0),
+        iso(full_width - half_width, full_width - half_width, x0, y0)
     ]
     draw.polygon(top, top_color, outline=(10,10,10))
-
 
     # -----------------------------
     # LEFT FACE (vertical wall on left side)
     # This is the right wall of the 8x8 plate.
     # -----------------------------
     left = [
-        iso(0, half_width - plate_height, x0, y0),   # drop plate height
-        iso(half_width, half_width - plate_height, x0, y0),
-        iso(half_width, half_width, x0, y0),
-        iso(0, half_width, x0, y0),
+        iso(0, full_width - half_width - plate_height, x0, y0),   # drop plate height
+        iso(full_width - half_width, full_width - half_width - plate_height, x0, y0),
+        iso(full_width - half_width, full_width - half_width, x0, y0),
+        iso(0, full_width - half_width, x0, y0),
     ]
     draw.polygon(left, front_color, outline=(10,10,10))
-
 
     # -----------------------------
     # RIGHT FACE (vertical wall on right side)
     # This is the front wall of the 4x8 section.
     # -----------------------------
     right = [
-        iso(half_width, 0, x0, y0),
+        iso(full_width - half_width, 0, x0, y0),
         iso(full_width, 0, x0, y0),
         iso(full_width, 0 - plate_height, x0, y0),
-        iso(half_width, 0 - plate_height, x0, y0)
+        iso(full_width - half_width, 0 - plate_height, x0, y0)
     ]
     draw.polygon(right, front_color, outline=(10,10,10))
 
-
     # --- Studs (only where plate exists) ---
-    for dx in range(4):
-        for dy in range(4):
-            if dx < 2 and dy < 2:
+    for dx in range(length):
+        for dy in range(length):
+            if dx < cutoffX and dy < cutoffY:
                 continue  # missing quadrant
             xOffset = dx * PLATE_WIDTH * 2
             yOffset = dy * PLATE_HEIGHT * 2
             draw_stud(draw, x0 + xOffset, y0 + yOffset, baseZ, color)
-
 
     # --- Optional highlight ---
     if highlight:
         draw.line([top[1], top[2], top[3], left[0], left[1], right[3], right[2], right[1]], fill=(255,255,0), width=2)
 
 
-
-
-
-
-
-
-def draw_ortho_plate(draw, baseX, baseY, isAxle, width, depth, height, color, highlight=False):
+def draw_ortho_plate(draw, baseX, baseY, isAxle, width, depth, height, color, highlight=False, flat=False):
     # Convert base stud to pixel origin
     x0, y0 = get_block_xy(baseX, baseY)
-
 
     # Shading
     top_color   = to_rgb(color)
     right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
 
-
     full_width = width * 4
     half_width = depth * 4
     plate_height = height * 2
-
 
     top = [
         iso(full_width, 0, x0, y0),
@@ -1374,7 +1154,6 @@ def draw_ortho_plate(draw, baseX, baseY, isAxle, width, depth, height, color, hi
         iso(0, 0, x0, y0)
     ]
     draw.polygon(top, top_color, outline=(10,10,10))
-
 
     # -----------------------------
     # front FACE (vertical wall on left side)
@@ -1388,26 +1167,26 @@ def draw_ortho_plate(draw, baseX, baseY, isAxle, width, depth, height, color, hi
     ]
     draw.polygon(front, front_color, outline=(10,10,10))
 
-
     if isAxle:
         cx, cy = iso(full_width / 2, -plate_height / 2, x0, y0)
-
 
         vertical_size = 9  # pixel length of each arm of the plus
         horizontal_size = 12
         line_width = 4
 
-
         # horizontal line
         draw.line([(cx - horizontal_size, cy), (cx + horizontal_size, cy)], fill=(0,0,0), width=line_width)
-
 
         # vertical line
         draw.line([(cx, cy - vertical_size), (cx, cy + vertical_size)], fill=(0,0,0), width=line_width)
 
+    # --- Optional highlight ---
+    if highlight:
+        draw.line([top[2], front[0], front[1], top[1], top[2]], fill=(255,255,0), width=2)
 
-
-
+    #return early if flat (no need to draw studs)
+    if flat:
+        return
     # --- Studs (only where plate exists) ---
     for dx in range(width):
         for dy in range(depth):
@@ -1416,15 +1195,522 @@ def draw_ortho_plate(draw, baseX, baseY, isAxle, width, depth, height, color, hi
             draw_stud(draw, x0 + xOffset, y0 + yOffset, 0, color)
 
 
-    # --- Optional highlight ---
-    if highlight:
-        draw.line([top[2], front[0], front[1], top[1], top[2]], fill=(255,255,0), width=2)
+def draw_grid_setup_instruction(step):
+    img, draw = get_img_and_draw(step, True)
+    width, height = img.size
+    draw = ImageDraw.Draw(img)
+
+    blockWidth = (int)(width / 16)
+    blockHeight = (int)(height / 16)
+    
+    if blockHeight > 1:
+        #instruct user to connect columns via the red connectors going down
+        font = ImageFont.truetype("arial.ttf", 20)
+        margin = 25
+        placement = (margin, margin)
+        text = "connect baseplates via red connectors/plates to form columns"
+        draw.text(placement, text, fill="black", font=font)
+
+        #draw first cube
+        black = to_rgb((.2, .2, .2))
+        red = to_rgb((.8, .1, .1))
+        x_offset = 100
+        y_offset = 90
+        length = 100
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+        #draw second cube
+        y_offset = 260
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+        #draw arrow showing step
+        draw_arrow(draw, 275, 250, 100, 50, 50, 120)
+
+        #draw connectors
+        x_offset = 125
+        y_offset = 90 + length
+        length = 50
+        triangle = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length / 2, y_offset + length),
+        ]
+        draw.polygon(triangle, red, outline=(10,10,10))
+
+        #show completed step
+        x_offset = 475
+        y_offset = 150
+        length = 100
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+        #draw second cube so they look connected
+        y_offset = y_offset + length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+    if blockWidth > 1:
+        #instruct user to connect columns via the green connectors going right
+        font = ImageFont.truetype("arial.ttf", 20)
+        margin = 25
+        half_height = height / 2
+        placement = (margin, half_height)
+        text = "connect columns via green connectors/plates to form the grid"
+        draw.text(placement, text, fill="black", font=font)
+
+        #draw column
+        black = to_rgb((.2, .2, .2))
+        green = to_rgb((.1, .8, .1))
+        x_offset = margin
+        y_offset = half_height + 120
+        length = 80
+        #first column fist block
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+        #first column second block
+        y_offset = y_offset + length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+        #second column first block
+        x_offset = x_offset + length * 2
+        y_offset -= length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+        #second column second block
+        y_offset = y_offset + length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+        #third column first block
+        x_offset = 410
+        y_offset -= length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+        #third column second block
+        y_offset += length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+        #fourth column first block
+        x_offset += length
+        y_offset -= length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+
+        #fourth column second block
+        y_offset += length
+        cube = [
+            (x_offset, y_offset),
+            (x_offset + length, y_offset),
+            (x_offset + length, y_offset + length),
+            (x_offset, y_offset + length),
+        ]
+        draw.polygon(cube, black, outline=(10,10,10))
+        
+        #draw connectors
+        x_offset = margin + length
+        y_offset = half_height + 100 + (length / 2)
+        length = 50
+        triangle = [
+            (x_offset, y_offset),
+            (x_offset, y_offset + length),
+            (x_offset + length, y_offset + length / 2),
+        ]
+        draw.polygon(triangle, green, outline=(10,10,10))
+
+        y_offset += length + (length * .5)
+        triangle = [
+            (x_offset, y_offset),
+            (x_offset, y_offset + length),
+            (x_offset + length, y_offset + length / 2),
+        ]
+        draw.polygon(triangle, green, outline=(10,10,10))
 
 
+        #draw arrow showing step
+        draw_arrow(draw, 300, half_height + 200, 50, 25, 25, 60)
+
+    step = save_img_and_increment_step(img, step) # Save current step (with current step pieces highlighted)
+    return step
 
 
+def draw_arrow(draw, x, y, s_len, s_thick, h_len, h_wid, fill="black"):
+    """
+    Draws a right-pointing arrow using named geometry variables.
+
+    draw    : ImageDraw.Draw object
+    x, y    : starting point (left-middle of the arrow)
+    s_len   : shaft length
+    s_thick : shaft thickness
+    h_len   : arrowhead length
+    h_wid   : arrowhead width
+    fill    : color
+    """
+
+    # Shaft geometry
+    shaft_top    = y - s_thick / 2
+    shaft_bottom = y + s_thick / 2
+
+    # Arrowhead geometry
+    head_base_x = x + s_len
+    head_tip_x  = x + s_len + h_len
+    head_top    = y - h_wid / 2
+    head_bottom = y + h_wid / 2
+
+    # Polygon points (clockwise)
+    arrow = [
+        (x, shaft_top),           # left-top of shaft
+        (head_base_x, shaft_top),
+        (head_base_x, head_top),  # start of arrowhead
+        (head_tip_x, y),          # tip
+        (head_base_x, head_bottom),
+        (head_base_x, shaft_bottom),
+        (x, shaft_bottom)         # left-bottom of shaft
+    ]
+
+    draw.polygon(arrow, fill=fill)
 
 
+def draw_frame_setup_instruction(width, height, step):
+    img, draw = get_img_and_draw(step, True)
+    to_reuse = img.copy()
+    draw2 = ImageDraw.Draw(to_reuse)
+    im_w, im_h = img.size
+    middle_x_of_image = (int)(im_w / 2)
+    middle_y_of_image = (int)(im_h / 2)
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype("arial.ttf", 28)
+    small_font = ImageFont.truetype("arial.ttf", 22)
+    
+    blockWidth = (int)(width / 16)
+    blockHeight = (int)(height / 16)
+    perimeter = (blockWidth * 2) + (blockHeight * 2)
+
+    black = to_rgb((.3, .3, .3))
+    light_grey = to_rgb((.8, .8, .8))
+    red = to_rgb((.8, .1, .1))
+    blue = to_rgb((.1, .1, .8))
+    green = to_rgb((.1, .8, .1))
+    
+    length = 60
+    circle_radius = length / 4
+    x_offset = middle_x_of_image - ((blockWidth / 2) * length) #center on middle of page
+    y_offset = 350
+    edges = []
+    seams = []
+    #draw grid/corners and calculate frame piece placement
+    for w in range(0, blockWidth):
+        for h in range(0, blockHeight):
+            #draw light square to indicate mosiac
+            x = x_offset + length * w
+            y = y_offset + length * h
+            cube = [
+                (x, y),
+                (x + length, y),
+                (x + length, y + length),
+                (x, y + length),
+            ]
+            draw.polygon(cube, light_grey, outline=(10,10,10))
+            draw2.polygon(cube, light_grey, outline=(10,10,10))
+            #corners
+            if (w == 0 and h == 0) or (w == blockWidth - 1 and h == 0) or (w == 0 and h == blockHeight - 1) or (w == blockWidth - 1 and h == blockHeight - 1):
+                new_x = x
+                new_y = y
+                if w == blockWidth - 1:
+                    new_x += length
+                if h == blockHeight - 1:
+                    new_y += length
+                circle = [
+                    (new_x - circle_radius),
+                    (new_y - circle_radius),
+                    (new_x + circle_radius),
+                    (new_y + circle_radius),
+                ]
+                draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                #handle one width
+                if (blockWidth == 1 and h == 0):
+                    circle = [
+                        (x - circle_radius),
+                        (y - circle_radius),
+                        (x + circle_radius),
+                        (y + circle_radius),
+                    ]
+                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    circle = [
+                        (x - circle_radius + length),
+                        (y - circle_radius),
+                        (x + circle_radius + length),
+                        (y + circle_radius),
+                    ]
+                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                if (blockWidth == 1 and h == blockHeight - 1):
+                    circle = [
+                        (x - circle_radius),
+                        (y - circle_radius + length),
+                        (x + circle_radius),
+                        (y + circle_radius + length),
+                    ]
+                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    circle = [
+                        (x - circle_radius + length),
+                        (y - circle_radius + length),
+                        (x + circle_radius + length),
+                        (y + circle_radius + length),
+                    ]
+                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                #Handle one height
+                if (blockHeight == 1 and w == 0):
+                    circle = [
+                        (x - circle_radius),
+                        (y - circle_radius),
+                        (x + circle_radius),
+                        (y + circle_radius),
+                    ]
+                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                if (blockHeight == 1 and w == blockWidth - 1):
+                    circle = [
+                        (x - circle_radius + length),
+                        (y - circle_radius),
+                        (x + circle_radius + length),
+                        (y + circle_radius),
+                    ]
+                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+
+                #save two edges per corner (or if the width/heigh is 1) to the edges list
+                if w == 0 and h == 0:
+                    circle = [
+                        (x - circle_radius + length / 2),
+                        (y - circle_radius),
+                        (x + circle_radius + length / 2),
+                        (y + circle_radius),
+                    ]
+                    edges.append(circle)
+                    circle = [
+                        (x - circle_radius),
+                        (y - circle_radius + length / 2),
+                        (x + circle_radius),
+                        (y + circle_radius + length / 2),
+                    ]
+                    edges.append(circle)
+                if w == blockWidth - 1 and h == 0:
+                    circle = [
+                        (x - circle_radius + length / 2),
+                        (y - circle_radius),
+                        (x + circle_radius + length / 2),
+                        (y + circle_radius),
+                    ]
+                    edges.append(circle)
+                    circle = [
+                        (x - circle_radius + length),
+                        (y - circle_radius + length / 2),
+                        (x + circle_radius + length),
+                        (y + circle_radius + length / 2),
+                    ]
+                    edges.append(circle)
+                if w == 0 and h == blockHeight - 1:
+                    circle = [
+                        (x - circle_radius + length / 2),
+                        (y - circle_radius + length),
+                        (x + circle_radius + length / 2),
+                        (y + circle_radius + length),
+                    ]
+                    edges.append(circle)
+                    circle = [
+                        (x - circle_radius),
+                        (y - circle_radius + length / 2),
+                        (x + circle_radius),
+                        (y + circle_radius + length / 2),
+                    ]
+                    edges.append(circle)
+                if w == blockWidth - 1 and h == blockHeight - 1:
+                    circle = [
+                        (x - circle_radius + length / 2),
+                        (y - circle_radius + length),
+                        (x + circle_radius + length / 2),
+                        (y + circle_radius + length),
+                    ]
+                    edges.append(circle)
+                    circle = [
+                        (x - circle_radius + length),
+                        (y - circle_radius + length / 2),
+                        (x + circle_radius + length),
+                        (y + circle_radius + length / 2),
+                    ]
+                    edges.append(circle)
+            #perimeter edges that are not corners
+            if ((w == 0 or w == blockWidth - 1) and (h != 0 and h != blockHeight - 1)) or ((h == 0 or h == blockHeight - 1) and (w != 0 and w != blockWidth - 1)):
+                new_x = x
+                new_y = y
+                if h != blockHeight - 1 and h != 0:
+                    new_y += length / 2
+                if w != blockWidth - 1 and w != 0:
+                    new_x += length / 2
+                if w == blockWidth - 1:
+                    new_x += length
+                if h == blockHeight - 1:
+                    new_y += length
+                circle = [
+                    (new_x - circle_radius),
+                    (new_y - circle_radius),
+                    (new_x + circle_radius),
+                    (new_y + circle_radius),
+                   ]
+                edges.append(circle)
+                if (blockWidth == 1):
+                    #draw edges on other side
+                    circle = [
+                        (new_x - circle_radius - length),
+                        (new_y - circle_radius),
+                        (new_x + circle_radius - length),
+                        (new_y + circle_radius),
+                    ]
+                    edges.append(circle)
+                if (blockHeight == 1):
+                    #draw edges on other side
+                    circle = [
+                        (new_x - circle_radius),
+                        (new_y - circle_radius - length),
+                        (new_x + circle_radius),
+                        (new_y + circle_radius - length),
+                    ]
+                    edges.append(circle)
+    
+    for w in range(0, blockWidth + 1):
+        for h in range(0, blockHeight + 1):
+            x = x_offset + length * w
+            y = y_offset + length * h
+            #perimeter edges including corners
+            if (w == 0 or w == blockWidth or h == 0 or h == blockHeight):
+                #dont draw on corners
+                if (w == 0 and (h == 0 or h == blockHeight)) or (w == blockWidth and (h == 0 or h == blockHeight)):
+                    continue
+                circle = [
+                    (x - circle_radius),
+                    (y - circle_radius),
+                    (x + circle_radius),
+                    (y + circle_radius),
+                ]
+                seams.append(circle)
+
+
+    #instruct user to place corners on corners
+    draw2.text((30, 100), "Put frame corners below each corner", fill="black", font=font)
+    step = save_img_and_increment_step(to_reuse, step) # Save current step
+
+    
+    #instruct user to place 8x1 on baseplate centers
+    to_reuse = img.copy()
+    baseplate_middles = img.copy()
+    draw2 = ImageDraw.Draw(to_reuse)
+    draw3 = ImageDraw.Draw(baseplate_middles)
+    #draw 8x1 on each edge face
+    for edge in edges:
+        draw2.ellipse(edge, fill=green, outline=(10,10,10))
+        draw3.ellipse(edge, fill=green, outline=(10,10,10))
+
+    draw2.text((30, 100), "Put long frame parts below baseplate centers", fill="black", font=font)
+    draw2.text((30, 150), "(long frame pieces have axle bricks on each side)", fill="black", font=small_font)
+    step = save_img_and_increment_step(to_reuse, step) # Save current step
+    
+    #instruct user to place 4x1 on baseplate seams if numOfConnectors is not 0
+    numOfConnectors =  perimeter - 4
+    if numOfConnectors != 0:
+        to_reuse = img.copy()
+        draw2 = ImageDraw.Draw(to_reuse)
+        for seam in seams:
+            draw2.ellipse(seam, fill=blue, outline=(10,10,10))
+
+        draw2.text((30, 100), "Put short frame parts below baseplate seams", fill="black", font=font)
+        step = save_img_and_increment_step(to_reuse, step) # Save current step
+
+    #draw axle pins going into axle blocks
+    img, draw = get_img_and_draw(step, True)
+    to_reuse = img.copy()
+    draw2 = ImageDraw.Draw(to_reuse)
+
+    draw2.text((30, 100), "Push axle pins into holes all the way", fill="black", font=font)
+    draw2.text((30, middle_y_of_image), "The frame and mosaic should be connected", fill="black", font=font)
+    draw_ortho_plate(draw2, -12, 16, True, 2, 1, 3, (.3, .3, .3), False)
+    #draw axle pin below the axle pin text
+    axle_pin = Image.open("axle_pin.jpg").convert("RGBA") #TODO: update file path if needed
+    axle_pin = axle_pin.resize((100, 100))
+    to_reuse.paste(axle_pin, (300, 150), axle_pin)
+    step = save_img_and_increment_step(to_reuse, step) # Save current step
+
+    #display plate and brick layer (those layers should be complete now)
+    draw3.text((30, 100), "Place 16x1 bricks here to complete the layer", fill="black", font=font)
+    draw_plate_sized(draw3, -3, 10, 1, 16, 4, (.3, .3, .3))
+    step = save_img_and_increment_step(baseplate_middles, step) # Save current step
+
+    #add top layer of thin corner plates and flat 4x1 plates
+    img, draw = get_img_and_draw(step, True)
+    draw.text((30, 100), "Place corner plates on corners", fill="black", font=font)
+    draw_corner_plate(draw, 0, 8, 0, 3, 1, (.3, .3, .3), 2, 2, False) #3x3 corner
+    draw_ortho_plate(draw, 16, -8, False, 4, 1, 1, (.3, .3, .3), False, True) 
+    draw.text((30, middle_y_of_image), "Place all flat plates to fill the sides", fill="black", font=font)
+
+    step = save_img_and_increment_step(img, step) # Save current step
+
+    #step = save_img_and_increment_step(img, step) # Save current step (with current step pieces highlighted)
+    return step
 
 
 #function for drawing frame around mosiac, saving each step until frame is complete
@@ -1432,18 +1718,18 @@ def draw_frame_for_mosiac(width, height, step):
     blockWidth = (int)(width / 16)
     blockHeight = (int)(height / 16)
     black = (.3, .3, .3)
-   
+    font = ImageFont.truetype("arial.ttf", 60)
+    perimeter = (blockWidth * 2) + (blockHeight * 2)
+    
     #draw corner plate
     img, draw = get_img_and_draw(step, True) #want clean state for this
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
 
-
     # draw stuff (highlight on draw2 and no highlight on draw)
-    draw_corner_plate(draw, 4, 4, 0, black, False)
-    draw_corner_plate(draw2, 4, 4, 0, black, True)
+    draw_corner_plate(draw, 4, 4, 0, 4, 2, black, 2, 2, False)
+    draw_corner_plate(draw2, 4, 4, 0, 4, 2, black, 2, 2, True)
     step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
 
     #draw corner brick
     to_reuse = img.copy()
@@ -1451,7 +1737,6 @@ def draw_frame_for_mosiac(width, height, step):
     draw_corner_brick(draw, 1, 15, 0, black, False)
     draw_corner_brick(draw2, 1, 15, 0, black, True)
     step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
 
     #add 1x1 bricks (to side of corner brick and top edge of corner brick)
     to_reuse = img.copy()
@@ -1465,8 +1750,8 @@ def draw_frame_for_mosiac(width, height, step):
     #piece 3
     draw_brick(draw, -2, 22, 0, black, False)
     draw_brick(draw2, -2, 22, 0, black, True)
+    draw2.text((50, 75), "4X", fill="black", font=font) #draw quantity number so users know how many pieces to make
     step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
 
     #set up wider background to capture entire piece
     bg_color = (255, 255, 255, 255) # white background
@@ -1480,14 +1765,12 @@ def draw_frame_for_mosiac(width, height, step):
     draw_ortho_plate(draw2, 3, 0, False, 10, 2, 1, black, True)
     step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
 
-
     #8x1 brick: 1
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
     draw_ortho_plate(draw, 0, 7, False, 8, 1, 3, black, False)
     draw_ortho_plate(draw2, 0, 7, False, 8, 1, 3, black, True)
     step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
 
     #2x1 axle bricks: 2
     to_reuse = img.copy()
@@ -1498,91 +1781,44 @@ def draw_frame_for_mosiac(width, height, step):
     #right axle brick
     draw_ortho_plate(draw, 16, 23, True, 2, 1, 3, black, False)
     draw_ortho_plate(draw2, 16, 23, True, 2, 1, 3, black, True)
+    quantity = str(perimeter) + "X"
+    draw2.text((50, 75), quantity, fill="black", font=font) #draw quantity number so users know how many pieces to make
     step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
 
     #each block that is connected to another block should have a 4x1 brick and 6x2 plate
-    #6x2 plate
-    img, draw = get_img_and_draw(step, True) #get clean slate for this step
-    to_reuse = img.copy()
-    draw2 = ImageDraw.Draw(to_reuse)
-    draw_ortho_plate(draw, 4, 0, False, 6, 2, 1, black, False)
-    draw_ortho_plate(draw2, 4, 0, False, 6, 2, 1, black, True)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+    numOfConnectors = perimeter - 4
+    if numOfConnectors != 0:
+        #6x2 plate
+        img, draw = get_img_and_draw(step, True) #get clean slate for this step
+        to_reuse = img.copy()
+        draw2 = ImageDraw.Draw(to_reuse)
+        draw_ortho_plate(draw, 4, 0, False, 6, 2, 1, black, False)
+        draw_ortho_plate(draw2, 4, 0, False, 6, 2, 1, black, True)
+        step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
 
+        #4x1 brick
+        to_reuse = img.copy()
+        draw2 = ImageDraw.Draw(to_reuse)
+        draw_ortho_plate(draw, 1, 7, False, 4, 1, 3, black, False)
+        draw_ortho_plate(draw2, 1, 7, False, 4, 1, 3, black, True)
+        quantity = str(numOfConnectors) + "X"
+        draw2.text((50, 75), quantity, fill="black", font=font) #draw quantity number so users know how many pieces to make
+        step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
 
-    #4x1 brick
-    to_reuse = img.copy()
-    draw2 = ImageDraw.Draw(to_reuse)
-    draw_ortho_plate(draw, 1, 7, False, 4, 1, 3, black, False)
-    draw_ortho_plate(draw2, 1, 7, False, 4, 1, 3, black, True)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
-
-    #TODO: draw axle pins going into axle blocks
-
-
-    #display plate and brick layer (those layers should be complete now)
-    #TODO: add the 16x1 blocks on each exposed side
-
-
-    #TODO: add top layer of thin corner plates and flat 4x1 plates
-
-
+    #return step once all actions are taken
     return step
 
+#high level function to create instructions for the grid and frame setup that calls medium level functions                                                                                                                                                                                           
+def draw_frame_instructions(width, height, step):
+    #shows the connection of grid cells into columns and column into grid
+    step = draw_grid_setup_instruction(step)
+    #shows steps for making the pieces of the frame
+    step = draw_frame_for_mosiac(width, height, step)
+    #show steps for putting together frame pieces
+    step = draw_frame_setup_instruction(width, height, step)
+    return step #return step for any future use
+
+# draw_frame_instructions(64, 48, 2)
+# print("finished")
 
 
-def draw_finished_view(composite, step):
-    pass
-
-
-# step = generate_baseplate_setup(6, 0)
-#step = 2
-
-
-#step = draw_frame_for_mosiac(64, 48, step)
-#print("finished")
-
-
-
-
-# #img never has highlighting and to_reuse will be the same as img except the most recent step is highlighted
-# img, draw = get_img_and_draw(step, False) #use previous step to add onto for this step
-# to_reuse = img.copy()
-# draw2 = ImageDraw.Draw(to_reuse)
-# test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
-# #draw twice, once for highlight and once regularly, using the regular one for the next step's start and saving highlighted one as current step
-# #draw highlight on the step on reuse
-# #reuse gets set to image each step. image is the previous without highlighting
-# draw_plate_column(draw, 0, 0, test_array, False) #draw step without highlight
-# draw_plate_column(draw2, 0, 0, test_array, True) #draw highlight
-# step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
-
-
-
-
-
-
-
-# to_reuse = img.copy()
-# draw2 = ImageDraw.Draw(to_reuse)
-# test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
-# draw_plate_column(draw, 0, 1, test_array, False)
-# draw_plate_column(draw2, 0, 1, test_array, True)
-# step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
-
-
-
-
-
-
-
-
-# to_reuse = img.copy()
-# draw2 = ImageDraw.Draw(to_reuse)
-# test_array = [(random.random(), random.random(), random.random(), 255) for _ in range(16)]
-# draw_plate_column(draw, 4, 0, test_array, False)
-# draw_plate_column(draw2, 4, 0, test_array, True)
-# step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
