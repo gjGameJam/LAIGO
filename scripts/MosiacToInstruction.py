@@ -63,15 +63,6 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite):
     print("FG unique RGB colors:", fg_color_count)
     print("BG unique RGB colors:", bg_color_count)
 
-    #Split height into blockHeight chunks of 16 rows
-    #Split width into blockWidth chunks of 16 columns
-    #with four at end for rgba
-    # reshape with (blockH, blockW, 16 rows, 16 cols, 4)
-    # bg_blocks = bg.reshape(blockHeight, 16, blockWidth, 16, 4).transpose(0, 2, 1, 3, 4)
-    # fg_blocks = fg.reshape(blockHeight, 16, blockWidth, 16, 4).transpose(0, 2, 1, 3, 4)
-
-    #(blockWidth, blockHeight, 16, 16, 4)
-
 
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
@@ -120,12 +111,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite):
                 step = save_img_and_increment_step(to_reuse, step) # Save current step
     
     #add frame instruction steps
-    draw_frame_instructions(fg_rgba.width, fg_rgba.height, step)
-
-    #add frame around entire mosiac view
-    #img, draw = get_img_and_draw(step, True) #True because we want a fresh image for frame
-    #draw_finished_view(composite, draw)
-    #save_img_and_increment_step(img, step) # Save current step
+    step = draw_frame_instructions(fg_rgba.width, fg_rgba.height, step)
 
 
 def sample_column(img_np, blockW, blockH, col):
