@@ -146,4 +146,7 @@ def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 
 
         print(f"Saved {len(out_items)} items to {out_path}")
 
+def GetOutputPathDir():
+    return Path(__file__).resolve().parent.parent / "outputs"
+
 

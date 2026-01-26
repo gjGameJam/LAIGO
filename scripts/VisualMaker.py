@@ -1,5 +1,6 @@
 from PIL import Image, ImageDraw, ImageFont
 import random
+from Util import GetOutputPathDir
 # -----------------------------
 # CONSTANTS
 # -----------------------------
@@ -19,7 +20,7 @@ STUD_NECK_OFFSET = (STUD_WIDTH - STUD_NECK_WIDTH) / 2
 STUD_NECK_RISE = STUD_HEIGHT * 0.35   # how high into the stud the neck starts
 
 def get_file_name(step_num):
-    return f"instructions/{step_num}.png"
+    return f"{GetOutputPathDir()}/Instructions/{step_num}.png"
 
 
 def save_img_and_increment_step(img, step):

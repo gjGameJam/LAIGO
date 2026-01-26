@@ -11,7 +11,7 @@ import copy
 sys.path.append(str(Path(__file__).resolve().parent))
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
-from Util import GetPaletteRGBArray, SaveDictAsJsonsOptimized
+from Util import GetPaletteRGBArray
 
 
 # ------------------------------
@@ -187,18 +187,12 @@ if __name__ == "__main__":
         composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
         composite.show()
         
-        output_path = image_folder / f"{image_path.stem}_lego.png"
-        composite.save(output_path)
-        print(f"Saved mosaic to {output_path}")
+        img_output_path = image_folder / f"{image_path.stem}_lego.png"
+        composite.save(img_output_path)
+        print(f"Saved mosaic to {img_output_path}")
 
         print("generating order list...")
-        orderList = GenerateOrderList(fg_out_rgba, bg_rgba)
-        print("finished order list!")
-        print(orderList)
-        #save json of order list
-        output_json_path = image_folder / "OrderLists" / f"{image_path.stem}_order.json"
-        SaveDictAsJsonsOptimized(orderList, output_json_path)
-        print("Sum of all pieces:", sum(orderList.values()))
+        GenerateOrderList(fg_out_rgba, bg_rgba)
         GenerateInstructions(fg_out_rgba, bg_rgba, composite)
         print("finished instructions!")
     

@@ -3,6 +3,7 @@ from PIL import Image, ImageDraw
 import numpy as np
 import shutil
 from pathlib import Path
+from Util import GetOutputPathDir
 #take in ord list from MosiacToOrder to get pieces and counts
 #take in foreground and background RGBA images (ignore alpha channel in foreground because it allows background to show through)
 #build background first then foreground on top
@@ -11,7 +12,7 @@ from pathlib import Path
 
 
 def empty_instructions_folder():
-    folder = Path("instructions")
+    folder = Path(f"{GetOutputPathDir()}/Instructions")
     shutil.rmtree(folder)
     folder.mkdir(parents=True, exist_ok=True)
 

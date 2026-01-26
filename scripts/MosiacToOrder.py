@@ -1,18 +1,29 @@
 from collections import defaultdict
 import numpy as np
 from Util import GetPaletteDict
-PALETTE_DICT = GetPaletteDict()
 from collections import Counter
+from pathlib import Path
+import shutil
+from Util import GetOutputPathDir, SaveDictAsJsonsOptimized
 
+PALETTE_DICT = GetPaletteDict()
 
-# return list of all lego pieces needed for both layers
+def get_order_lists_file_path():
+    return GetOutputPathDir() / "OrderLists"
+
+def empty_order_list_folder():
+    folder = Path(get_order_lists_file_path())
+    shutil.rmtree(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+
+# saves list of all lego pieces needed for both layers
 def GenerateOrderList(fg_out_rgba, bg_rgba):
     """
     fg_out_rgba : PIL Image, mode RGBA
     bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
-    returns     : dict {lego_piece_id: count}
     """
-
+    print("clearing previous order lists...")
+    empty_order_list_folder()
     print("creating order list...")
     # -----------------
     # Layer 0: Base Layer (to place all plates on)
@@ -49,7 +60,12 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     print("returning order list...")
     frameList = GetFrameForSize(fg_out_rgba.width, fg_out_rgba.height)
     finalList = dict(Counter(order) + Counter(frameList))
-    return finalList
+
+    print("finished order list!:", finalList)
+    #save json of order list
+    output_json_path = get_order_lists_file_path() / f"order_list.json"
+    SaveDictAsJsonsOptimized(finalList, output_json_path)
+    print("Sum of all pieces:", sum(finalList.values()))
 
 
 
