@@ -7,12 +7,12 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import copy
+from enum import IntEnum
 
 sys.path.append(str(Path(__file__).resolve().parent))
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
 from Util import GetPaletteRGBArray
-
 
 # ------------------------------
 # Helper functions
@@ -24,20 +24,6 @@ def rgb_list_to_lab(arr_rgb):
 
 LEGO_PALETTE_RGB = GetPaletteRGBArray()
 PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
-
-def split_order_list(order: dict, max_quantity: int = 999) -> dict:
-    """
-    Takes a dict {elementId: quantity} and returns a new dict
-    with quantities capped at max_quantity per entry.
-    """
-    split_order = {}
-    for elementId, qty in order.items():
-        while qty > 0:
-            current_qty = min(qty, max_quantity)
-            # Use unique key for split pieces (optional) or accumulate into list of dicts later
-            split_order[elementId] = split_order.get(elementId, []) + [current_qty]
-            qty -= current_qty
-    return split_order
 
 def nearest_palette_index_lab(pixel_lab, palette_lab):
     pixel_lab_reshaped = pixel_lab.reshape((1, 1, 3))
@@ -136,6 +122,32 @@ def make_difference_transparent(orig, new):
     result[diff,3] = 0
     return Image.fromarray(result)
 
+class InputClassification(IntEnum):
+    Invalid = 0
+    TwoDimension = 1
+    ThreeDimension = 2
+
+def handle_input(args):
+    if len(args) < 3:
+        raise ValueError("Usage: python picToMosiac.py width PercentOfBackgroundColors")
+    width = int(args[1])
+    background_color_percent = int(args[2])
+    if not (0<width<=40):
+        raise ValueError("Block width must be positive number less than 100")
+    if not (0<background_color_percent<=100):
+        raise ValueError("Background color percent must be 1-100")
+    studs_width = width * 16 #there are 16 studs per baseplate block side
+
+    # return 2d for flat mosiac
+    return InputClassification.TwoDimension, studs_width, background_color_percent
+
+def open_image(image_path):
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+    
+    img = Image.open(image_path).convert("RGB")
+    return img
+
 # ------------------------------
 # Main script with error handling
 # ------------------------------
@@ -143,20 +155,12 @@ if __name__ == "__main__":
     
     try:
         print("starting picture to lego mosaic conversion...")
-        if len(sys.argv) < 3:
-            raise ValueError("Usage: python picToMosiac.py width PercentOfBackgroundColors")
-        studs_width = int(sys.argv[1])
-        background_color_percent = int(sys.argv[2])
-        if studs_width <= 0: raise ValueError("Studs width must be positive")
-        if not (0<background_color_percent<=100): raise ValueError("Background color percent must be 1-100")
+        mosiac_type, studs_width, background_color_percent = handle_input(sys.argv)
         
-        script_dir = Path(__file__).resolve().parent
-        image_folder = script_dir.parent / "images"
-        image_path = image_folder / "stella1.jpg"
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image file not found: {image_path}")
-        
-        img = Image.open(image_path).convert("RGB")
+        image_folder = Path(__file__).resolve().parent.parent / "images"
+        image_name = "stella1.jpg"
+        image_path = image_folder / image_name
+        img = open_image(image_path)
         fg_pil, bg_pil, fg_mask = remove_background(img)
         fg_alpha_pil = make_difference_transparent(img, fg_pil)
         fg_rgba = fg_alpha_pil.convert("RGBA")
