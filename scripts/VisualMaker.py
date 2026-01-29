@@ -1811,8 +1811,8 @@ def draw_frame_for_mosiac(width, height, step):
 
 #high level function to create instructions for the grid and frame setup that calls medium level functions                                                                                                                                                                                           
 def draw_frame_instructions(width, height, step):
-    #shows the connection of grid cells into columns and column into grid
-    step = draw_grid_setup_instruction(step)
+    #shows the connection of grid cells into columns and column into grid (now handled externally)
+    #step = draw_grid_setup_instruction(step)
     #shows steps for making the pieces of the frame
     step = draw_frame_for_mosiac(width, height, step)
     #show steps for putting together frame pieces

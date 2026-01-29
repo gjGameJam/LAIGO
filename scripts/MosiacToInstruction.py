@@ -1,4 +1,4 @@
-from VisualMaker import generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions
+from VisualMaker import generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
 from PIL import Image, ImageDraw
 import numpy as np
 import shutil
@@ -23,47 +23,49 @@ def count_colors(img_rgba):
     return len(np.unique(rgb, axis=0))
 
 #function to generate instrucctions for a RGBA image mosiac (pixel-perfect)
-def GenerateInstructions(fg_rgba, bg_rgba, composite):
-    assert isinstance(fg_rgba, Image.Image)
-    assert fg_rgba.mode == "RGBA"
+def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
+    assert isinstance(bg_rgba, Image.Image)
+    assert bg_rgba.mode == "RGBA"
     #set up by clearing previous instructions and starting froms tep 1
     empty_instructions_folder()
     step = 1
-    fg_w, fg_h = fg_rgba.size
-    blockWidth = (int)(fg_w / 16)
-    blockHeight = (int)(fg_h / 16)
+    bg_w, bg_h = bg_rgba.size
+    blockWidth = (int)(bg_w / 16)
+    blockHeight = (int)(bg_h / 16)
     #divide pixel width and height by 16 (length of backplate block) to determine row and column max
     print("creating instructions for width " + str(blockWidth) + " and height " + str(blockHeight))
     #convert fg and bg rgba into arrays for each block [width][height][16][16]
-
-    fg = np.asarray(fg_rgba, dtype=np.uint8)
+    if not fg_rgba is None:
+        fg = np.asarray(fg_rgba, dtype=np.uint8)
     bg = np.asarray(bg_rgba, dtype=np.uint8)
 
-    fg = fg.astype(np.float32) / 255.0
+    if not fg_rgba is None:
+        fg = fg.astype(np.float32) / 255.0
     bg = bg.astype(np.float32) / 255.0
 
 
     # Extract RGB only, ignore alpha
-    fg_colors = set(map(tuple, fg[:, :, :3].reshape(-1, 3)))
-    bg_colors = set(map(tuple, bg[:, :, :3].reshape(-1, 3)))
+    if not fg_rgba is None:
+        fg_colors = set(map(tuple, fg[:, :, :3].reshape(-1, 3)))
+        print(f"FG unique RGB colors ({len(fg_colors)}):")
+        print(fg_colors)
 
-    print(f"FG unique RGB colors ({len(fg_colors)}):")
-    print(fg_colors)
+    bg_colors = set(map(tuple, bg[:, :, :3].reshape(-1, 3)))
 
     print(f"\nBG unique RGB colors ({len(bg_colors)}):")
     print(bg_colors)
 
-    H, W, C = fg.shape
+    H, W, C = bg.shape
     assert C == 4
-    assert W == fg_w and H == fg_h
+    assert W == bg_w and H == bg_h
     assert W % 16 == 0 and H % 16 == 0
 
-    fg_color_count = count_colors(fg_rgba)
     bg_color_count = count_colors(bg_rgba)
-
-    print("FG unique RGB colors:", fg_color_count)
     print("BG unique RGB colors:", bg_color_count)
 
+    if not fg_rgba is None:
+        fg_color_count = count_colors(fg_rgba)
+        print("FG unique RGB colors:", fg_color_count)
 
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
@@ -79,7 +81,6 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite):
             y0, y1 = blockH*16, (blockH+1)*16
             x0, x1 = blockW*16, (blockW+1)*16
             bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
-            fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
             img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
             #print(f"bg size {len(bg_block)} x {len(bg_block[0])}")
             for col in range(0, len(bg_block[0])):
@@ -97,22 +98,26 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite):
             
             #layer 2: foreground
             #same thing as background but ignore alpha channel to allow background to show through
-            # #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
-            for col in range(0, len(fg_block[0])):
-                #img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
-                to_reuse = img.copy()
-                draw2 = ImageDraw.Draw(to_reuse)
-                # take the column and convert to a list of 3-element tuples (R,G,B,A)
-                column_rgba = [tuple(fg_block[15 - y, col]) for y in range(16)]
-                if all(pixel[3] == 0 for pixel in column_rgba):
-                    # Entire column is transparent, skip
-                    continue
-                draw_plate_column(draw, col, 1, column_rgba, False) #one height
-                draw_plate_column(draw2, col, 1, column_rgba, True) #one height
-                step = save_img_and_increment_step(to_reuse, step) # Save current step
+            if not fg_rgba is None:
+                fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
+                # #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
+                for col in range(0, len(fg_block[0])):
+                    #img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
+                    to_reuse = img.copy()
+                    draw2 = ImageDraw.Draw(to_reuse)
+                    # take the column and convert to a list of 3-element tuples (R,G,B,A)
+                    column_rgba = [tuple(fg_block[15 - y, col]) for y in range(16)]
+                    if all(pixel[3] == 0 for pixel in column_rgba):
+                        # Entire column is transparent, skip
+                        continue
+                    draw_plate_column(draw, col, 1, column_rgba, False) #one height
+                    draw_plate_column(draw2, col, 1, column_rgba, True) #one height
+                    step = save_img_and_increment_step(to_reuse, step) # Save current step
     
     #add frame instruction steps
-    step = draw_frame_instructions(fg_rgba.width, fg_rgba.height, step)
+    step = draw_grid_setup_instruction(step)
+    if want_frame:
+        step = draw_frame_instructions(bg_rgba.width, bg_rgba.height, step)
 
 
 def sample_column(img_np, blockW, blockH, col):

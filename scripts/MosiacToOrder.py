@@ -17,7 +17,7 @@ def empty_order_list_folder():
     folder.mkdir(parents=True, exist_ok=True)
 
 # saves list of all lego pieces needed for both layers
-def GenerateOrderList(fg_out_rgba, bg_rgba):
+def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame):
     """
     fg_out_rgba : PIL Image, mode RGBA
     bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
@@ -28,7 +28,7 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     # -----------------
     # Layer 0: Base Layer (to place all plates on)
     # -----------------
-    desiredSize = fg_out_rgba.size
+    desiredSize = bg_rgba.size
     #order = GetBaseplatesForSize(desiredSize[0], desiredSize[1])
     order = defaultdict(int, GetBaseplatesForSize(desiredSize[0], desiredSize[1]))
 
@@ -47,19 +47,23 @@ def GenerateOrderList(fg_out_rgba, bg_rgba):
     # -----------------
     # Layer 2: Foreground
     # -----------------
-    fg_pixels = fg_out_rgba.load()
-    for y in range(fg_out_rgba.height):
-        for x in range(fg_out_rgba.width):
-            r, g, b, a = fg_pixels[x, y]
-            if a == 0:
-                continue
-            piece_id = GetLegoPieceFromColor((r, g, b), PALETTE_DICT)
-            order[piece_id] += 1
+    if not (fg_out_rgba is None):
+        fg_pixels = fg_out_rgba.load()
+        for y in range(fg_out_rgba.height):
+            for x in range(fg_out_rgba.width):
+                r, g, b, a = fg_pixels[x, y]
+                if a == 0:
+                    continue
+                piece_id = GetLegoPieceFromColor((r, g, b), PALETTE_DICT)
+                order[piece_id] += 1
 
 
     print("returning order list...")
-    frameList = GetFrameForSize(fg_out_rgba.width, fg_out_rgba.height)
-    finalList = dict(Counter(order) + Counter(frameList))
+    finalList = dict(order)
+
+    if want_frame:
+        frameList = GetFrameForSize(bg_rgba.width, bg_rgba.height)
+        finalList = dict(Counter(order) + Counter(frameList))
 
     print("finished order list!:", finalList)
     #save json of order list
