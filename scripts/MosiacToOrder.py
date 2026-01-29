@@ -146,7 +146,7 @@ def GetBaseplatesForSize(width, height):
     nailHookConnectors = nailHooks * 2
 
 
-    blockID = 6306097
+    blockID = 6302092
     nailHookID = 6302094
     nailHookConnectorID = 6279875
     greenConnectorID = 6526672
