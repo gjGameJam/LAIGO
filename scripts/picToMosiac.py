@@ -21,12 +21,13 @@ def rgb_list_to_lab(arr_rgb):
     lab = color.rgb2lab(arr).reshape((-1,3))
     return lab
 
+
 LEGO_PALETTE_RGB = GetPaletteRGBArray()
 PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
 PALETTE_LAB_RESHAPED = PALETTE_LAB.reshape((-1, 1, 3))
 MAX_BLOCK_WIDTH = 40
 MIN_BLOCK_WIDTH = 1
-
+STUDS_PER_BLOCK = 16
 
 
 #gets the index of the closest color to the pixel from the palette by visual distance
@@ -34,8 +35,6 @@ def nearest_palette_index_lab(pixel_lab):
     pixel_lab_reshaped = pixel_lab.reshape((1, 1, 3)) #reshape in order to compare
     d = color.deltaE_ciede2000(PALETTE_LAB_RESHAPED, pixel_lab_reshaped)
     return int(np.argmin(d)) #return closest color index
-
-
 
 
 #optimizes the background to have a maximum number of k colors and returns array of indexes of colors
@@ -65,15 +64,22 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
     return simplified_idx
 
 
+def round_to_multiple(x, m):
+    """Round x to the nearest multiple of m."""
+    return int(m * round(x / m))
 
 
 #takes an image and lego stud width and returns lego image and array of lego image pixel colors
 def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
     img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=350, threshold=3))
-    #TODO: change stud height calculation such that it is always divisible by 16
+    #calculate stud height calculation such that it is always divisible by 16
     orig_w, orig_h = img.size
     aspect = orig_h / orig_w
-    studs_h = int(round(studs_w * aspect))
+    raw_h = studs_w * aspect  # float height implied by aspect ratio
+    studs_h = round_to_multiple(raw_h, STUDS_PER_BLOCK) #nearest multiple of 16 (recommended)
+    studs_h = max(STUDS_PER_BLOCK, studs_h) #ensure at least 16 (or 1*16) so you never hit 0
+
+
     img_small = img.resize((studs_w, studs_h), Image.NEAREST)
     rgb = np.asarray(img_small)/255.0
     lab = color.rgb2lab(rgb)
@@ -105,8 +111,6 @@ def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
     return out_img, out_idx
 
 
-
-
 #separates the background of an image, returning the foreground and background
 def remove_background(pil_img):
     mp_selfie = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
@@ -124,8 +128,6 @@ def remove_background(pil_img):
     return fg_pil, bg_pil, fg_mask
 
 
-
-
 #takes and returns PIL.Image.Image with delta lightness change
 def adjust_lightness_lab(img_pil, delta_L):
     #print(f"adjusting lightness by {delta_L} in Lab space...")
@@ -134,8 +136,6 @@ def adjust_lightness_lab(img_pil, delta_L):
     lab[...,0]=np.clip(lab[...,0]+delta_L,0,100)
     rgb_out = np.clip(color.lab2rgb(lab)*255,0,255).astype(np.uint8)
     return Image.fromarray(rgb_out)
-
-
 
 
 #makes the pixels that match on the original to the new one to be transparent
@@ -148,15 +148,11 @@ def make_difference_transparent(orig, new):
     return Image.fromarray(result)
 
 
-
-
 #helper enum for input handling
 class InputClassification(IntEnum):
     Invalid = 0
     TwoDimension = 1
     ThreeDimension = 2
-
-
 
 
 #processes system args and raises error if invalid
@@ -187,14 +183,13 @@ def handle_input(args):
     if not (1 <= background_color_percent <= 100):
         raise ValueError("PercentOfBackgroundColors must be 1-100 percent")
    
-    studs_width = width * 16 #there are 16 studs per baseplate block side (this ensures width of mosiac = width of baseplate(s))
+    studs_width = width * STUDS_PER_BLOCK #there are 16 studs per baseplate block side (this ensures width of mosiac = width of baseplate(s))
 
 
     if (dimension == "2D"): # return 2d for flat mosiac
         return InputClassification.TwoDimension, studs_width, background_color_percent, to_frame
    
     return InputClassification.ThreeDimension, studs_width, background_color_percent, to_frame # return 3d for mosiac with foreground and background
-   
 
 
 #gives the error name, type, and line location
@@ -208,8 +203,6 @@ def give_exception_message(e):
     raise
 
 
-
-
 #takes path and returns image rgb
 def open_image(image_path):
     if not image_path.exists():
@@ -217,8 +210,6 @@ def open_image(image_path):
    
     img = Image.open(image_path).convert("RGB")
     return img
-
-
 
 
 # ------------------------------
@@ -293,7 +284,7 @@ if __name__ == "__main__":
             out_img_rgba = out_img.convert("RGBA")
             #generate order list and instructions to create mosaic
             print("generating order list...")
-            #TODO: update GenerateOrderList and GenerateInstructions to handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
+            #GenerateOrderList and GenerateInstructions handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
             GenerateOrderList(None, out_img_rgba, to_frame)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame)
             print("finished instructions!")
