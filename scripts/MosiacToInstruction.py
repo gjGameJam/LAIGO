@@ -1,4 +1,4 @@
-from VisualMaker import generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
+from VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
 from PIL import Image, ImageDraw
 import numpy as np
 import shutil
@@ -117,7 +117,12 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
     #add frame instruction steps
     step = draw_grid_setup_instruction(step)
     if want_frame:
+        #show final view with frame (include frame building instructions)
         step = draw_frame_instructions(bg_rgba.width, bg_rgba.height, step)
+        step = draw_final_view(step, composite, True)
+    else:
+        #show final view without frame
+        step = draw_final_view(step, composite, False)
 
 
 def sample_column(img_np, blockW, blockH, col):

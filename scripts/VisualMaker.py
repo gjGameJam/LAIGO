@@ -1819,6 +1819,58 @@ def draw_frame_instructions(width, height, step):
     step = draw_frame_setup_instruction(width, height, step)
     return step #return step for any future use
 
+
+def draw_final_view(step, composite, want_frame):
+    img, draw = get_img_and_draw(step, True)
+    print("drawing final view...")
+    black = to_rgb((.2, .2, .2))
+    #aspect ratio of image
+    composite_aspect_ratio = composite.height / composite.width
+    #desired width of composite
+    desired_comp_width = 400
+    comp_h = int(round(desired_comp_width * (composite_aspect_ratio)))
+    #scale such that the composite/frame always take up certain portion of canvas
+    composite_resized = composite.resize((desired_comp_width, comp_h), Image.Resampling.LANCZOS)
+    #half heights to center drawings
+    half_comp_w = desired_comp_width / 2
+    half_comp_h = composite_resized.height / 2
+    frame_thickness = 15
+    start_y = (int)(img.height / 2)
+    start_x = (int)(img.width / 2)
+    #draw box before composite to simulate frame
+    if want_frame:
+        y1 = start_y - half_comp_h - frame_thickness
+        y2 = start_y + half_comp_h + frame_thickness
+        x1 = start_x - frame_thickness - half_comp_w
+        x2 = start_x + frame_thickness + half_comp_w
+        frame = [
+            (x1, y1), #top left
+            (x2, y1), #top right
+            (x2, y2), #bottom right
+            (x1, y2) #bottom left
+        ]
+        draw.polygon(frame, black, outline=(10,10,10))
+    #draw composite at start_x, start_y
+    composite_x = (int)(start_x - half_comp_w)
+    composite_y = (int)(start_y - half_comp_h)
+    img.paste(composite_resized, (composite_x, composite_y))
+
+
+    font = ImageFont.truetype("arial.ttf", 20)
+    margin = 50
+    placement = (margin, margin)
+    text = "Admire your artwork (add frame hooks to back is desired)"
+    draw.text(placement, text, fill="black", font=font)
+
+
+    print("finished drawing final view!")
+    step = save_img_and_increment_step(img, step)
+    return step
+
+
+
+
+
 # draw_frame_instructions(64, 48, 2)
 # print("finished")
 
