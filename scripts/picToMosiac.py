@@ -205,8 +205,9 @@ def open_image(image_path):
     return img
 
 
-def pic_to_mosiac(im, studs_width, mosiac_type, background_color_percent, to_frame):
+def pic_to_mosiac(img_path, studs_width, mosiac_type, background_color_percent, to_frame):
     try:
+        img = open_image(img_path) #gets RGB of image
         print("starting picture to lego mosaic conversion...")
         if mosiac_type == InputClassification.ThreeDimension:
             print("starting 3d mosaic process by differentiating between fg and bg...")
@@ -274,12 +275,11 @@ if __name__ == "__main__":
     try:
         print("starting picture to lego mosaic conversion...")
         mosiac_type, studs_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
-        print("toframe: ", to_frame)
+        #print("toframe: ", to_frame)
         image_folder = Path(__file__).resolve().parent.parent / "images"
         image_name = "stella1.jpg"
         image_path = image_folder / image_name
-        img = open_image(image_path) #gets RGB of image
-        pic_to_mosiac(img, studs_width, mosiac_type, background_color_percent, to_frame)
+        pic_to_mosiac(image_path, studs_width, mosiac_type, background_color_percent, to_frame)
         print("finished mosiac generation!")
     except Exception as e:
         give_exception_message(e)

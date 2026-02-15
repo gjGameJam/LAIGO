@@ -867,7 +867,7 @@ def generate_baseplate_setup(step, case):
     img, draw = get_img_and_draw(step, True) # use blank image to start top instructions on
     draw_baseplate_top(draw, 16, (0.2, 0.2, 0.2), case)
     step = save_img_and_increment_step(img, step) # Save current step
-    print("drew baseplate instruction")
+    #print("drew baseplate instruction")
     return step
 
 
