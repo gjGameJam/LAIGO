@@ -70,6 +70,7 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame):
     output_json_path = get_order_lists_file_path() / f"order_list.json"
     SaveDictAsJsonsOptimized(finalList, output_json_path)
     print("Sum of all pieces:", sum(finalList.values()))
+    return finalList
 
 
 

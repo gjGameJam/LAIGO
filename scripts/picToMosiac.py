@@ -79,7 +79,6 @@ def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
     studs_h = round_to_multiple(raw_h, STUDS_PER_BLOCK) #nearest multiple of 16 (recommended)
     studs_h = max(STUDS_PER_BLOCK, studs_h) #ensure at least 16 (or 1*16) so you never hit 0
 
-
     img_small = img.resize((studs_w, studs_h), Image.NEAREST)
     rgb = np.asarray(img_small)/255.0
     lab = color.rgb2lab(rgb)
@@ -160,31 +159,25 @@ def handle_input(args):
     if len(args) != 5:
         raise ValueError("Usage: python picToMosiac.py Width Dimension PercentOfBackgroundColors WantFrame")
 
-
     width = int(args[1])
     dimension = args[2].upper()
     background_color_percent = int(args[3])
-
 
     frame_str = args[4].strip().lower() # Parse boolean explicitly
     if frame_str not in ("true", "false"):
         raise ValueError("WantFrame must be 'True' or 'False' (not case sensitive)")
     to_frame = (frame_str == "true")
 
-
     if not (MIN_BLOCK_WIDTH <= width <= MAX_BLOCK_WIDTH): #ensure desired width is within bounds
         raise ValueError("Width must be 1-40 blocks")
 
-
     if dimension not in ("2D", "3D"):
         raise ValueError("Dimension must be '2D' or '3D' (not case sensitive)")
-
 
     if not (1 <= background_color_percent <= 100):
         raise ValueError("PercentOfBackgroundColors must be 1-100 percent")
    
     studs_width = width * STUDS_PER_BLOCK #there are 16 studs per baseplate block side (this ensures width of mosiac = width of baseplate(s))
-
 
     if (dimension == "2D"): # return 2d for flat mosiac
         return InputClassification.TwoDimension, studs_width, background_color_percent, to_frame
@@ -212,20 +205,9 @@ def open_image(image_path):
     return img
 
 
-# ------------------------------
-# Main script with error handling
-# ------------------------------
-if __name__ == "__main__":
+def pic_to_mosiac(im, studs_width, mosiac_type, background_color_percent, to_frame):
     try:
         print("starting picture to lego mosaic conversion...")
-        mosiac_type, studs_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
-       
-        image_folder = Path(__file__).resolve().parent.parent / "images"
-        image_name = "stella1.jpg"
-        image_path = image_folder / image_name
-        img = open_image(image_path) #gets RGB of image
-
-
         if mosiac_type == InputClassification.ThreeDimension:
             print("starting 3d mosaic process by differentiating between fg and bg...")
             fg_pil, bg_pil, fg_mask = remove_background(img) #separates foreground from background
@@ -253,24 +235,20 @@ if __name__ == "__main__":
             bg_rgba = bg_out_img.convert("RGBA").resize(fg_out_rgba.size, Image.NEAREST)
        
             print("size of foreground mosaic:", fg_out_rgba.size)
-            fg_out_rgba.show()
-            bg_rgba.show()
-
+            #fg_out_rgba.show()
+            #bg_rgba.show()
 
             #combine the background and foreground for the final 3d mosiac
             composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
-            composite.show()
+            #composite.show()
        
             img_output_path = image_folder / f"{image_path.stem}_lego.png"
             composite.save(img_output_path)
             print(f"Saved mosaic to {img_output_path}")
 
-
             print("generating order list...")
-            GenerateOrderList(fg_out_rgba, bg_rgba, to_frame)
+            OrderDict = GenerateOrderList(fg_out_rgba, bg_rgba, to_frame)
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame)
-            print("finished instructions!")
-
 
         else: #handle 2d mosiac case
             print("starting 2d mosaic process by adjusting lightness...")
@@ -278,16 +256,30 @@ if __name__ == "__main__":
             filtered_image = adjust_lightness_lab(img, delta_L=5)
             out_img, img_idx = image_to_lego_mosaic(filtered_image, studs_width)
             #show and save the image
-            out_img.show()
+            #out_img.show()
             img_output_path = image_folder / f"{image_path.stem}_lego.png"
             out_img.save(img_output_path)
             out_img_rgba = out_img.convert("RGBA")
             #generate order list and instructions to create mosaic
             print("generating order list...")
             #GenerateOrderList and GenerateInstructions handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
-            GenerateOrderList(None, out_img_rgba, to_frame)
+            OrderDict = GenerateOrderList(None, out_img_rgba, to_frame)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame)
-            print("finished instructions!")
    
+    except Exception as e:
+        give_exception_message(e)
+
+
+if __name__ == "__main__":
+    try:
+        print("starting picture to lego mosaic conversion...")
+        mosiac_type, studs_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
+        print("toframe: ", to_frame)
+        image_folder = Path(__file__).resolve().parent.parent / "images"
+        image_name = "stella1.jpg"
+        image_path = image_folder / image_name
+        img = open_image(image_path) #gets RGB of image
+        pic_to_mosiac(img, studs_width, mosiac_type, background_color_percent, to_frame)
+        print("finished mosiac generation!")
     except Exception as e:
         give_exception_message(e)
