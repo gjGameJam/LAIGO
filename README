@@ -1,5 +1,5 @@
-To Run Project:
-1) log into virtual envrionment and navigate to scripts folder:
+To Run Project Locally:
+1) enter virtual envrionment and navigate to scripts folder:
     A) .venv\Scripts\activate.bat
     B) cd scripts
 2) run picture to mosiac script
