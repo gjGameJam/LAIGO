@@ -13,3 +13,22 @@ To Run Project Locally:
     F) Check out and buy all the uploaded pieces from the order lists
 4) Follow the instructions
     A) go to the InstructionSets folder
+
+
+
+To Test/View API endpoints
+1) run uvicorn fastapi
+    A) uvicorn Main:app --reload
+2) go to fast api local ui
+    A) navigate to http://127.0.0.1:8000/docs#/ in a browser
+2) enter information into a endpoint
+    A) example: generate (POST) could accept the following:
+    {
+        "image_path": "C:/Users/bgern/Desktop/AIEng/LAIGO/images/stella1.jpg",
+        "settings": {
+            "mosiac_block_width": 1,
+            "mosaic_type": "2d",
+            "background_color_percent": 100,
+            "to_frame": true
+        }
+    }
