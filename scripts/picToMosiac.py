@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import copy
-from enum import IntEnum
+from enum import Enum
 import traceback
 sys.path.append(str(Path(__file__).resolve().parent)) #look in same folder for scripts
 from MosiacToOrder import GenerateOrderList
@@ -148,10 +148,9 @@ def make_difference_transparent(orig, new):
 
 
 #helper enum for input handling
-class InputClassification(IntEnum):
-    Invalid = 0
-    TwoDimension = 1
-    ThreeDimension = 2
+class MosaicType(str, Enum):
+    TWO_D = "2d"
+    THREE_D = "3d"
 
 
 #processes system args and raises error if invalid
@@ -180,9 +179,9 @@ def handle_input(args):
     studs_width = width * STUDS_PER_BLOCK #there are 16 studs per baseplate block side (this ensures width of mosiac = width of baseplate(s))
 
     if (dimension == "2D"): # return 2d for flat mosiac
-        return InputClassification.TwoDimension, studs_width, background_color_percent, to_frame
+        return MosaicType.TWO_D, studs_width, background_color_percent, to_frame
    
-    return InputClassification.ThreeDimension, studs_width, background_color_percent, to_frame # return 3d for mosiac with foreground and background
+    return MosaicType.THREE_D, studs_width, background_color_percent, to_frame # return 3d for mosiac with foreground and background
 
 
 #gives the error name, type, and line location
@@ -210,7 +209,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
         img = open_image(img_path) #gets RGB of image
         image_folder = Path(__file__).resolve().parent.parent / "images"
         print("starting picture to lego mosaic conversion...")
-        if mosiac_type == InputClassification.ThreeDimension:
+        if mosiac_type == MosaicType.THREE_D: #handle 3d mosiac case with foreground and background layers
             print("starting 3d mosaic process by differentiating between fg and bg...")
             fg_pil, bg_pil, fg_mask = remove_background(img) #separates foreground from background
             fg_alpha_pil = make_difference_transparent(img, fg_pil) #makes the background transparent on the foreground
@@ -276,7 +275,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
 if __name__ == "__main__":
     try:
-        print("starting picture to lego mosaic conversion...")
+        print("handling input...")
         mosiac_type, block_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
         #print("toframe: ", to_frame)
         image_folder = Path(__file__).resolve().parent.parent / "images"

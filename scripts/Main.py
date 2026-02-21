@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
-from picToMosiac import pic_to_mosaic
+from picToMosiac import pic_to_mosaic, MosaicType
 import uuid
 import os
 import shutil
@@ -51,11 +51,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
-
-class MosaicType(str, Enum):
-    TWO_D = "2d"
-    THREE_D = "3d"
 
 
 class MosaicSettings(BaseModel):
@@ -101,13 +96,17 @@ def run_job(job_id: str, request_dict: dict) -> dict:
         # Rehydrate types lost during JSON serialization
         image_path = Path(request_dict["image_path"])
         width = int(settings["mosaic_block_width"]) * 16  # convert block count to stud count
+        m_type = MosaicType(settings["mosaic_type"])
+        background_color_percent = float(settings["background_color_percent"])
+        frame = bool(settings["to_frame"])
+        
 
         result_dir = pic_to_mosaic(
             image_path,
             width,
-            settings["mosaic_type"],
-            settings["background_color_percent"],
-            settings["to_frame"],
+            m_type,
+            background_color_percent,
+            frame,
             output_dir=workspace,
             job_id=job_id,
         ) or workspace
