@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
-from picToMosiac import pic_to_mosiac
+from picToMosiac import pic_to_mosaic
 import uuid
 import os
 import shutil
@@ -59,16 +59,16 @@ class MosaicType(str, Enum):
 
 
 class MosaicSettings(BaseModel):
-    mosaic_block_width: int = Field(16, ge=1, alias="mosiac_block_width")
+    mosaic_block_width: int = Field(1, ge=1, alias="mosaic_block_width")
     mosaic_type: MosaicType
-    background_color_percent: float = Field(0, ge=0, le=100)
+    background_color_percent: float = Field(100, ge=1, le=100)
     to_frame: bool = True
 
     model_config = ConfigDict(populate_by_name=True)
 
 
 class GenerateRequest(BaseModel):
-    image_path: str
+    image_path: Path
     settings: MosaicSettings
 
 
@@ -98,9 +98,13 @@ def run_job(job_id: str, request_dict: dict) -> dict:
     try:
         settings = request_dict["settings"]
 
-        result_dir = pic_to_mosiac(
-            request_dict["image_path"],
-            settings["mosaic_block_width"],
+        # Rehydrate types lost during JSON serialization
+        image_path = Path(request_dict["image_path"])
+        width = int(settings["mosaic_block_width"]) * 16  # convert block count to stud count
+
+        result_dir = pic_to_mosaic(
+            image_path,
+            width,
             settings["mosaic_type"],
             settings["background_color_percent"],
             settings["to_frame"],
@@ -221,3 +225,15 @@ def cleanup_loop(app: FastAPI):
                     app.state.jobs.pop(job_id, None)
 
         time.sleep(CLEANUP_INTERVAL)
+
+
+#test schema:
+# {
+#   "image_path": "C:/Users/bgern/Desktop/AIEng/LAIGO/scripts/inputs/stella1.jpg",
+#   "settings": {
+#     "mosaic_block_width": 4,
+#     "mosaic_type": "3d",
+#     "background_color_percent": 100,
+#     "to_frame": true
+#   }
+# }

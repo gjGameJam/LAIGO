@@ -56,6 +56,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
     print(bg_colors)
 
     H, W, C = bg.shape
+    print(f"height: {H}, width: {W}")
     assert C == 4
     assert W == bg_w and H == bg_h
     assert W % 16 == 0 and H % 16 == 0

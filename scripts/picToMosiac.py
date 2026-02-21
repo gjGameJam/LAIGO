@@ -64,20 +64,20 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
     return simplified_idx
 
 
-def round_to_multiple(x, m):
-    """Round x to the nearest multiple of m."""
-    return int(m * round(x / m))
-
-
 #takes an image and lego stud width and returns lego image and array of lego image pixel colors
 def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
     img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=350, threshold=3))
     #calculate stud height calculation such that it is always divisible by 16
     orig_w, orig_h = img.size
     aspect = orig_h / orig_w
-    raw_h = studs_w * aspect  # float height implied by aspect ratio
-    studs_h = round_to_multiple(raw_h, STUDS_PER_BLOCK) #nearest multiple of 16 (recommended)
-    studs_h = max(STUDS_PER_BLOCK, studs_h) #ensure at least 16 (or 1*16) so you never hit 0
+    # Width is already LEGO-valid → convert to block count
+    blocks_w = studs_w // STUDS_PER_BLOCK   # exact integer
+
+    # Solve height in the SAME coordinate system
+    blocks_h = max(1, round(blocks_w * aspect))
+
+    # Convert back to studs (guaranteed divisible by 16)
+    studs_h = blocks_h * STUDS_PER_BLOCK
 
     img_small = img.resize((studs_w, studs_h), Image.NEAREST)
     rgb = np.asarray(img_small)/255.0
@@ -205,9 +205,10 @@ def open_image(image_path):
     return img
 
 
-def pic_to_mosiac(img_path, block_width, mosiac_type, background_color_percent, to_frame, output_dir=None, job_id=None):
+def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, to_frame, output_dir=None, job_id=None):
     try:
         img = open_image(img_path) #gets RGB of image
+        image_folder = Path(__file__).resolve().parent.parent / "images"
         print("starting picture to lego mosaic conversion...")
         if mosiac_type == InputClassification.ThreeDimension:
             print("starting 3d mosaic process by differentiating between fg and bg...")
@@ -243,13 +244,14 @@ def pic_to_mosiac(img_path, block_width, mosiac_type, background_color_percent, 
             composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
             #composite.show()
        
-            img_output_path = image_folder / f"{image_path.stem}_lego.png"
+            img_output_path = image_folder / f"{img_path.stem}_lego.png"
             composite.save(img_output_path)
             print(f"Saved mosaic to {img_output_path}")
 
             print("generating order list...")
-            OrderDict = GenerateOrderList(fg_out_rgba, bg_rgba, to_frame)
+            GenerateOrderList(fg_out_rgba, bg_rgba, to_frame)
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame)
+            print("finished mosiac generation!")
 
         else: #handle 2d mosiac case
             print("starting 2d mosaic process by adjusting lightness...")
@@ -258,7 +260,7 @@ def pic_to_mosiac(img_path, block_width, mosiac_type, background_color_percent, 
             out_img, img_idx = image_to_lego_mosaic(filtered_image, block_width)
             #show and save the image
             #out_img.show()
-            img_output_path = image_folder / f"{image_path.stem}_lego.png"
+            img_output_path = image_folder / f"{img_path.stem}_lego.png"
             out_img.save(img_output_path)
             out_img_rgba = out_img.convert("RGBA")
             #generate order list and instructions to create mosaic
@@ -266,6 +268,7 @@ def pic_to_mosiac(img_path, block_width, mosiac_type, background_color_percent, 
             #GenerateOrderList and GenerateInstructions handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
             GenerateOrderList(None, out_img_rgba, to_frame)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame)
+            print("finished mosiac generation!")
    
     except Exception as e:
         give_exception_message(e)
@@ -279,7 +282,6 @@ if __name__ == "__main__":
         image_folder = Path(__file__).resolve().parent.parent / "images"
         image_name = "stella1.jpg"
         image_path = image_folder / image_name
-        pic_to_mosiac(image_path, block_width, mosiac_type, background_color_percent, to_frame)
-        print("finished mosiac generation!")
+        pic_to_mosaic(image_path, block_width, mosiac_type, background_color_percent, to_frame)
     except Exception as e:
         give_exception_message(e)
