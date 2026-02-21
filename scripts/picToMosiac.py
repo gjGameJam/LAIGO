@@ -205,7 +205,7 @@ def open_image(image_path):
     return img
 
 
-def pic_to_mosiac(img_path, studs_width, mosiac_type, background_color_percent, to_frame):
+def pic_to_mosiac(img_path, block_width, mosiac_type, background_color_percent, to_frame, output_dir=None, job_id=None):
     try:
         img = open_image(img_path) #gets RGB of image
         print("starting picture to lego mosaic conversion...")
@@ -220,8 +220,8 @@ def pic_to_mosiac(img_path, studs_width, mosiac_type, background_color_percent, 
             bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
        
             print("converting processed image to lego mosiac...")
-            fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, studs_width, alpha_mask=fg_a)
-            bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, studs_width)
+            fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, block_width, alpha_mask=fg_a)
+            bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
        
             fg_mask_resized = fg_a.resize(bg_idx.shape[::-1], Image.NEAREST)
             fg_mask_np = np.array(fg_mask_resized)
@@ -230,8 +230,8 @@ def pic_to_mosiac(img_path, studs_width, mosiac_type, background_color_percent, 
             bg_rgb_simplified = LEGO_PALETTE_RGB[bg_idx_simplified]
             bg_out_img = Image.fromarray(bg_rgb_simplified.astype(np.uint8))
        
-            fg_alpha_resized = fg_a.resize((studs_width, fg_idx.shape[0]), Image.NEAREST)
-            fg_out_rgba = fg_out_img.convert("RGBA").resize((studs_width, fg_idx.shape[0]), Image.NEAREST)
+            fg_alpha_resized = fg_a.resize((block_width, fg_idx.shape[0]), Image.NEAREST)
+            fg_out_rgba = fg_out_img.convert("RGBA").resize((block_width, fg_idx.shape[0]), Image.NEAREST)
             fg_out_rgba.putalpha(fg_alpha_resized)
             bg_rgba = bg_out_img.convert("RGBA").resize(fg_out_rgba.size, Image.NEAREST)
        
@@ -255,7 +255,7 @@ def pic_to_mosiac(img_path, studs_width, mosiac_type, background_color_percent, 
             print("starting 2d mosaic process by adjusting lightness...")
             #adjust lightness then convert to lego mosiac (no need to handle alpha stuff for one layer)
             filtered_image = adjust_lightness_lab(img, delta_L=5)
-            out_img, img_idx = image_to_lego_mosaic(filtered_image, studs_width)
+            out_img, img_idx = image_to_lego_mosaic(filtered_image, block_width)
             #show and save the image
             #out_img.show()
             img_output_path = image_folder / f"{image_path.stem}_lego.png"
@@ -264,7 +264,7 @@ def pic_to_mosiac(img_path, studs_width, mosiac_type, background_color_percent, 
             #generate order list and instructions to create mosaic
             print("generating order list...")
             #GenerateOrderList and GenerateInstructions handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
-            OrderDict = GenerateOrderList(None, out_img_rgba, to_frame)
+            GenerateOrderList(None, out_img_rgba, to_frame)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame)
    
     except Exception as e:
@@ -274,12 +274,12 @@ def pic_to_mosiac(img_path, studs_width, mosiac_type, background_color_percent, 
 if __name__ == "__main__":
     try:
         print("starting picture to lego mosaic conversion...")
-        mosiac_type, studs_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
+        mosiac_type, block_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
         #print("toframe: ", to_frame)
         image_folder = Path(__file__).resolve().parent.parent / "images"
         image_name = "stella1.jpg"
         image_path = image_folder / image_name
-        pic_to_mosiac(image_path, studs_width, mosiac_type, background_color_percent, to_frame)
+        pic_to_mosiac(image_path, block_width, mosiac_type, background_color_percent, to_frame)
         print("finished mosiac generation!")
     except Exception as e:
         give_exception_message(e)
