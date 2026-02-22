@@ -1,3 +1,4 @@
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import random
 from Util import GetOutputPathDir
@@ -19,11 +20,17 @@ STUD_NECK_WIDTH  = STUD_WIDTH * 0.75
 STUD_NECK_OFFSET = (STUD_WIDTH - STUD_NECK_WIDTH) / 2
 STUD_NECK_RISE = STUD_HEIGHT * 0.35   # how high into the stud the neck starts
 
-def get_file_name(step_num):
-    return f"{GetOutputPathDir()}/Instructions/{step_num}.png"
+#TODO: test using output directory for saving in job specific folder
+def get_file_name(step_num, output_dir=None):
+    if output_dir is not None:
+        folder = Path(f"{output_dir}/Instructions")
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / f"{step_num}.png"
+    else:
+        return f"{GetOutputPathDir()}/Instructions/{step_num}.png"
 
 
-def save_img_and_increment_step(img, step):
+def save_img_and_increment_step(img, step, output_dir=None):
     #draw step number on bottom middle
     width, height = img.size
     draw = ImageDraw.Draw(img)
@@ -35,7 +42,8 @@ def save_img_and_increment_step(img, step):
     offset = 50
     draw.text((x_middle + x_offset, height - offset), str(step), fill="black", font=font)
     #save and increment/return step
-    saveName = get_file_name(step)
+    #TODO: might need to make a folder if it doesn't exist already?
+    saveName = get_file_name(step, output_dir)
     img.save(saveName)
     return (step + 1)
 
@@ -48,14 +56,14 @@ def to_pillow(x, y):
     return (x, 792 - y) #silly little me was using reportwhateveritwas canvas before and y is flipped
 
 
-def get_img_and_draw(step, wantClear):
+def get_img_and_draw(step, wantClear, output_dir=None):
     if (step == 1 or wantClear): #if on first step or user wants clear img, then make empty IMG
         # create image with specified size and background color
         bg_color = (255, 255, 255, 255) # white background
         image_size = (612, 792)
         img = Image.new("RGBA", image_size, bg_color)
     else: #already has previous step that user wants to use so just open previous step
-        fileName = get_file_name(step - 1)
+        fileName = get_file_name(step - 1, output_dir)
         img = Image.open(fileName).convert("RGBA")
     return img, ImageDraw.Draw(img) #return imagedraw to allow user to modify current step before saving
 
@@ -854,19 +862,19 @@ def draw_stud(draw, cx, cy, blockZ, color):
 
 
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
-def generate_baseplate_setup(step, case):
+def generate_baseplate_setup(step, case, output_dir = None):
     #draw empty plate to help user see next step requirements
-    img, draw = get_img_and_draw(step, True) # get blank image to start instructions
+    img, draw = get_img_and_draw(step, True, output_dir) # get blank image to start instructions
     draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), -1) #-1 case is where the baseplate piece is by itself
-    step = save_img_and_increment_step(img, step) # Save current step
+    step = save_img_and_increment_step(img, step, output_dir) # Save current step
     #draw bottom of baseplate with current case
-    img, draw = get_img_and_draw(step, False) # get previous image (blank if no previous) and draw object to draw on it
+    img, draw = get_img_and_draw(step, False, output_dir) # get previous image (blank if no previous) and draw object to draw on it
     draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), case)
-    step = save_img_and_increment_step(img, step) # Save current step
+    step = save_img_and_increment_step(img, step, output_dir) # Save current step
     #draw top of baseplate with current case
-    img, draw = get_img_and_draw(step, True) # use blank image to start top instructions on
+    img, draw = get_img_and_draw(step, True, output_dir) # use blank image to start top instructions on
     draw_baseplate_top(draw, 16, (0.2, 0.2, 0.2), case)
-    step = save_img_and_increment_step(img, step) # Save current step
+    step = save_img_and_increment_step(img, step, output_dir) # Save current step
     #print("drew baseplate instruction")
     return step
 
@@ -1196,8 +1204,8 @@ def draw_ortho_plate(draw, baseX, baseY, isAxle, width, depth, height, color, hi
             draw_stud(draw, x0 + xOffset, y0 + yOffset, 0, color)
 
 
-def draw_grid_setup_instruction(step):
-    img, draw = get_img_and_draw(step, True)
+def draw_grid_setup_instruction(step, output_dir=None):
+    img, draw = get_img_and_draw(step, True, output_dir)
     width, height = img.size
     draw = ImageDraw.Draw(img)
 
@@ -1389,7 +1397,7 @@ def draw_grid_setup_instruction(step):
         #draw arrow showing step
         draw_arrow(draw, 300, half_height + 200, 50, 25, 25, 60)
 
-    step = save_img_and_increment_step(img, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(img, step, output_dir) # Save current step (with current step pieces highlighted)
     return step
 
 
@@ -1429,9 +1437,9 @@ def draw_arrow(draw, x, y, s_len, s_thick, h_len, h_wid, fill="black"):
 
     draw.polygon(arrow, fill=fill)
 
-
-def draw_frame_setup_instruction(width, height, step):
-    img, draw = get_img_and_draw(step, True)
+#TODO: use output directory
+def draw_frame_setup_instruction(width, height, step, output_dir):
+    img, draw = get_img_and_draw(step, True, output_dir)
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
     im_w, im_h = img.size
@@ -1654,7 +1662,7 @@ def draw_frame_setup_instruction(width, height, step):
 
     #instruct user to place corners on corners
     draw2.text((30, 100), "Put frame corners below each corner", fill="black", font=font)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
     
     #instruct user to place 8x1 on baseplate centers
@@ -1669,7 +1677,7 @@ def draw_frame_setup_instruction(width, height, step):
 
     draw2.text((30, 100), "Put long frame parts below baseplate centers", fill="black", font=font)
     draw2.text((30, 150), "(long frame pieces have axle bricks on each side)", fill="black", font=small_font)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
     
     #instruct user to place 4x1 on baseplate seams if numOfConnectors is not 0
     numOfConnectors =  perimeter - 4
@@ -1680,10 +1688,10 @@ def draw_frame_setup_instruction(width, height, step):
             draw2.ellipse(seam, fill=blue, outline=(10,10,10))
 
         draw2.text((30, 100), "Put short frame parts below baseplate seams", fill="black", font=font)
-        step = save_img_and_increment_step(to_reuse, step) # Save current step
+        step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
     #draw axle pins going into axle blocks
-    img, draw = get_img_and_draw(step, True)
+    img, draw = get_img_and_draw(step, True, output_dir)
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
 
@@ -1694,28 +1702,27 @@ def draw_frame_setup_instruction(width, height, step):
     axle_pin = Image.open("axle_pin.jpg").convert("RGBA") #TODO: update file path if needed
     axle_pin = axle_pin.resize((100, 100))
     to_reuse.paste(axle_pin, (300, 150), axle_pin)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
     #display plate and brick layer (those layers should be complete now)
     draw3.text((30, 100), "Place 16x1 bricks here to complete the layer", fill="black", font=font)
     draw_plate_sized(draw3, -3, 10, 1, 16, 4, (.3, .3, .3))
-    step = save_img_and_increment_step(baseplate_middles, step) # Save current step
+    step = save_img_and_increment_step(baseplate_middles, step, output_dir) # Save current step
 
     #add top layer of thin corner plates and flat 4x1 plates
-    img, draw = get_img_and_draw(step, True)
+    img, draw = get_img_and_draw(step, True, output_dir)
     draw.text((30, 100), "Place corner plates on corners", fill="black", font=font)
     draw_corner_plate(draw, 0, 8, 0, 3, 1, (.3, .3, .3), 2, 2, False) #3x3 corner
     draw_ortho_plate(draw, 16, -8, False, 4, 1, 1, (.3, .3, .3), False, True) 
     draw.text((30, middle_y_of_image), "Place all flat plates to fill the sides", fill="black", font=font)
 
-    step = save_img_and_increment_step(img, step) # Save current step
-
-    #step = save_img_and_increment_step(img, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(img, step, output_dir) # Save current step
     return step
 
 
 #function for drawing frame around mosiac, saving each step until frame is complete
-def draw_frame_for_mosiac(width, height, step):
+#TODO: use output directory
+def draw_frame_for_mosiac(width, height, step, output_dir):
     blockWidth = (int)(width / 16)
     blockHeight = (int)(height / 16)
     black = (.3, .3, .3)
@@ -1723,21 +1730,21 @@ def draw_frame_for_mosiac(width, height, step):
     perimeter = (blockWidth * 2) + (blockHeight * 2)
     
     #draw corner plate
-    img, draw = get_img_and_draw(step, True) #want clean state for this
+    img, draw = get_img_and_draw(step, True, output_dir) #want clean state for this
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
 
     # draw stuff (highlight on draw2 and no highlight on draw)
     draw_corner_plate(draw, 4, 4, 0, 4, 2, black, 2, 2, False)
     draw_corner_plate(draw2, 4, 4, 0, 4, 2, black, 2, 2, True)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #draw corner brick
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
     draw_corner_brick(draw, 1, 15, 0, black, False)
     draw_corner_brick(draw2, 1, 15, 0, black, True)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #add 1x1 bricks (to side of corner brick and top edge of corner brick)
     to_reuse = img.copy()
@@ -1752,7 +1759,7 @@ def draw_frame_for_mosiac(width, height, step):
     draw_brick(draw, -2, 22, 0, black, False)
     draw_brick(draw2, -2, 22, 0, black, True)
     draw2.text((50, 75), "4X", fill="black", font=font) #draw quantity number so users know how many pieces to make
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #set up wider background to capture entire piece
     bg_color = (255, 255, 255, 255) # white background
@@ -1764,14 +1771,14 @@ def draw_frame_for_mosiac(width, height, step):
     #10x2 plate
     draw_ortho_plate(draw, 3, 0, False, 10, 2, 1, black, False)
     draw_ortho_plate(draw2, 3, 0, False, 10, 2, 1, black, True)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #8x1 brick: 1
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
     draw_ortho_plate(draw, 0, 7, False, 8, 1, 3, black, False)
     draw_ortho_plate(draw2, 0, 7, False, 8, 1, 3, black, True)
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #2x1 axle bricks: 2
     to_reuse = img.copy()
@@ -1784,18 +1791,18 @@ def draw_frame_for_mosiac(width, height, step):
     draw_ortho_plate(draw2, 16, 23, True, 2, 1, 3, black, True)
     quantity = str(perimeter) + "X"
     draw2.text((50, 75), quantity, fill="black", font=font) #draw quantity number so users know how many pieces to make
-    step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #each block that is connected to another block should have a 4x1 brick and 6x2 plate
     numOfConnectors = perimeter - 4
     if numOfConnectors != 0:
         #6x2 plate
-        img, draw = get_img_and_draw(step, True) #get clean slate for this step
+        img, draw = get_img_and_draw(step, True, output_dir) #get clean slate for this step
         to_reuse = img.copy()
         draw2 = ImageDraw.Draw(to_reuse)
         draw_ortho_plate(draw, 4, 0, False, 6, 2, 1, black, False)
         draw_ortho_plate(draw2, 4, 0, False, 6, 2, 1, black, True)
-        step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+        step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
         #4x1 brick
         to_reuse = img.copy()
@@ -1804,24 +1811,25 @@ def draw_frame_for_mosiac(width, height, step):
         draw_ortho_plate(draw2, 1, 7, False, 4, 1, 3, black, True)
         quantity = str(numOfConnectors) + "X"
         draw2.text((50, 75), quantity, fill="black", font=font) #draw quantity number so users know how many pieces to make
-        step = save_img_and_increment_step(to_reuse, step) # Save current step (with current step pieces highlighted)
+        step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #return step once all actions are taken
     return step
 
-#high level function to create instructions for the grid and frame setup that calls medium level functions                                                                                                                                                                                           
-def draw_frame_instructions(width, height, step):
+#high level function to create instructions for the grid and frame setup that calls medium level functions     
+#TODO: use output directory for output if not none                                                                                                                                                                                      
+def draw_frame_instructions(width, height, step, output_dir=None):
     #shows the connection of grid cells into columns and column into grid (now handled externally)
     #step = draw_grid_setup_instruction(step)
     #shows steps for making the pieces of the frame
-    step = draw_frame_for_mosiac(width, height, step)
+    step = draw_frame_for_mosiac(width, height, step, output_dir)
     #show steps for putting together frame pieces
-    step = draw_frame_setup_instruction(width, height, step)
+    step = draw_frame_setup_instruction(width, height, step, output_dir)
     return step #return step for any future use
 
-
-def draw_final_view(step, composite, want_frame):
-    img, draw = get_img_and_draw(step, True)
+#TODO: use output directory for output if not none  
+def draw_final_view(step, composite, want_frame, output_dir=None):
+    img, draw = get_img_and_draw(step, True, output_dir)
     print("drawing final view...")
     black = to_rgb((.2, .2, .2))
     #aspect ratio of image
@@ -1864,7 +1872,7 @@ def draw_final_view(step, composite, want_frame):
 
 
     print("finished drawing final view!")
-    step = save_img_and_increment_step(img, step)
+    step = save_img_and_increment_step(img, step, output_dir)
     return step
 
 

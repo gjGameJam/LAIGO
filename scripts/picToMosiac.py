@@ -248,8 +248,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             print(f"Saved mosaic to {img_output_path}")
 
             print("generating order list...")
-            GenerateOrderList(fg_out_rgba, bg_rgba, to_frame)
-            GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame)
+            GenerateOrderList(fg_out_rgba, bg_rgba, to_frame, output_dir)
+            GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir)
             print("finished mosiac generation!")
 
         else: #handle 2d mosiac case
@@ -265,8 +265,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             #generate order list and instructions to create mosaic
             print("generating order list...")
             #GenerateOrderList and GenerateInstructions handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
-            GenerateOrderList(None, out_img_rgba, to_frame)
-            GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame)
+            GenerateOrderList(None, out_img_rgba, to_frame, output_dir)
+            GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir)
             print("finished mosiac generation!")
    
     except Exception as e:

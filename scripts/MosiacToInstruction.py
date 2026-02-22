@@ -23,10 +23,11 @@ def count_colors(img_rgba):
     return len(np.unique(rgb, axis=0))
 
 #function to generate instrucctions for a RGBA image mosiac (pixel-perfect)
-def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
+#TODO: handle having specific output directory (already handling not having one)
+def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir):
     assert isinstance(bg_rgba, Image.Image)
     assert bg_rgba.mode == "RGBA"
-    #set up by clearing previous instructions and starting froms tep 1
+    #set up by clearing previous instructions and starting from step 1
     empty_instructions_folder()
     step = 1
     bg_w, bg_h = bg_rgba.size
@@ -73,7 +74,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
         for blockH in range(0, blockHeight):
             #layer 0: baseplate
             # grid of interlocking 16x16s to ensure solid foundation
-            step = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step)
+            step = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step, output_dir)
             #layer 1: background
             #here we loop over each row and column to get the color (should be contained in order list)
             #only place maximum of 16 pieces per instruction step to avoid overwhelming user
@@ -82,7 +83,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
             y0, y1 = blockH*16, (blockH+1)*16
             x0, x1 = blockW*16, (blockW+1)*16
             bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
-            img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
+            img, draw = get_img_and_draw(step, False, output_dir) #false because we want to pick off where we left off
             #print(f"bg size {len(bg_block)} x {len(bg_block[0])}")
             for col in range(0, len(bg_block[0])):
                 #loop over columns of 16x16 block (each column is 16 plates)
@@ -92,9 +93,9 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
                 column_rgb = [tuple(bg_block[15 - y, col]) for y in range(16)]
                 #print("RAW column colors:", len(set(column_rgb)), set(column_rgb))
                 #print(set(column_rgb))
-                draw_plate_column(draw, col, 0, column_rgb, False) #zero height
-                draw_plate_column(draw2, col, 0, column_rgb, True) #zero height
-                step = save_img_and_increment_step(to_reuse, step) # Save current step
+                draw_plate_column(draw, col, 0, column_rgb, False) #zero height with highlight
+                draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
+                step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
             
             #layer 2: foreground
@@ -113,19 +114,20 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame):
                         continue
                     draw_plate_column(draw, col, 1, column_rgba, False) #one height
                     draw_plate_column(draw2, col, 1, column_rgba, True) #one height
-                    step = save_img_and_increment_step(to_reuse, step) # Save current step
+                    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
     
     #add frame instruction steps
-    step = draw_grid_setup_instruction(step)
+    step = draw_grid_setup_instruction(step, output_dir)
     if want_frame:
         #show final view with frame (include frame building instructions)
-        step = draw_frame_instructions(bg_rgba.width, bg_rgba.height, step)
-        step = draw_final_view(step, composite, True)
+        step = draw_frame_instructions(bg_rgba.width, bg_rgba.height, step, output_dir)
+        step = draw_final_view(step, composite, True, output_dir)
     else:
         #show final view without frame
-        step = draw_final_view(step, composite, False)
+        step = draw_final_view(step, composite, False, output_dir)
 
 
+#helper test function
 def sample_column(img_np, blockW, blockH, col):
     return [
         tuple(img_np[blockH*16 + row, blockW*16 + col][:3])
@@ -133,7 +135,7 @@ def sample_column(img_np, blockW, blockH, col):
     ]
 
 
-def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step):
+def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step, output_dir=None):
     
     #case 0: red and green connectors 
     #case 1: red connectors no green (right most column)
@@ -158,7 +160,7 @@ def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step):
     #case 1: in middle of mosiac(all connections)
     #case 2: top/left side of mosiac (no top/left connections)
     #case 3: bottom/right mosiac (no bottom/right connections)
-    return generate_baseplate_setup(step, case)
+    return generate_baseplate_setup(step, case, output_dir)
 
 def block_column_to_rgb_tuples(block, col_idx):
     return [tuple(block[y, col_idx, :3]) for y in range(block.shape[0])]

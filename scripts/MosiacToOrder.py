@@ -17,7 +17,7 @@ def empty_order_list_folder():
     folder.mkdir(parents=True, exist_ok=True)
 
 # saves list of all lego pieces needed for both layers
-def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame):
+def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     """
     fg_out_rgba : PIL Image, mode RGBA
     bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
@@ -67,7 +67,10 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame):
 
     print("finished order list!:", finalList)
     #save json of order list
-    output_json_path = get_order_lists_file_path() / f"order_list.json"
+    if output_dir is not None:
+        output_json_path = output_dir / "OrderLists" / f"order_list.json"
+    else:
+        output_json_path = get_order_lists_file_path() / f"order_list.json"
     SaveDictAsJsonsOptimized(finalList, output_json_path)
     print("Sum of all pieces:", sum(finalList.values()))
     return finalList

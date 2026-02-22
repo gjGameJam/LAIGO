@@ -101,13 +101,13 @@ def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 
     if not isinstance(output_path, Path):
         output_path = Path(output_path)
 
-    if not output_path.parent.exists():
-        raise FileNotFoundError(f"Output directory does not exist: {output_path.parent}")
-
     if max_per_item <= 0:
         raise ValueError("max_per_item must be positive")
     
     print(order_dict)
+
+    # Ensure destination exists (safe under multiprocessing)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Step 1: build chunks per element
     chunks_per_element = defaultdict(list)  # element_id -> list of ints (each <= max_per_item)

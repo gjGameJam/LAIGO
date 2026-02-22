@@ -87,8 +87,9 @@ def run_job(job_id: str, request_dict: dict) -> dict:
     No shared state mutation.
     """
 
-    workspace = os.path.join(OUTPUT_DIR, job_id)
-    os.makedirs(workspace, exist_ok=True)
+    workspace = Path(OUTPUT_DIR) / job_id
+    workspace.mkdir(parents=True, exist_ok=True)
+
 
     try:
         settings = request_dict["settings"]
