@@ -18,7 +18,7 @@ import threading
 import json
 from pathlib import Path
 import traceback
-from Util import load_project_env
+from Util import load_project_env, log_debug, log_info, log_error
 load_project_env() #also being done in pic to mosaic but doing it here ensures env vars are loaded for the API process as well
 
 # -----------------------------

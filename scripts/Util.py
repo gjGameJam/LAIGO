@@ -7,6 +7,10 @@ from math import ceil
 from dotenv import load_dotenv
 from pathlib import Path
 import os
+from logger import logger
+
+#only print if environment variable DEBUG is set to true, otherwise be silent (for cleaner multiprocessing logs)
+DEBUG = bool(os.getenv("DEBUG"))
 
 def load_project_env():
     """
@@ -19,13 +23,21 @@ def load_project_env():
 
     if env_path.exists():
         load_dotenv(dotenv_path=env_path)
-        print(f".env loaded from {env_path}")
+        log_info(f".env loaded from {env_path}")
     else:
-        print(f"No .env found at {env_path}, using defaults or system environment")
+        log_error(f"No .env found at {env_path}, using defaults or system environment")
 
     # Optional: return project_root for convenience
     return project_root
 
+def log_info(message):
+    logger.info(message)
+
+def log_debug(message):
+    logger.debug(message)
+
+def log_error(message):
+    logger.error(message)
 
 # LEGO palette in rgb
 # got color codes from https://brickset.com/colours/family-Green
@@ -124,7 +136,7 @@ def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 
     if max_per_item <= 0:
         raise ValueError("max_per_item must be positive")
     
-    print(order_dict)
+    log_info(order_dict)
 
     # Ensure destination exists (safe under multiprocessing)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,7 +156,7 @@ def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 
         max_parts = max(max_parts, len(chunks_per_element[element_id]))
 
     if max_parts == 0:
-        print("No items to write.")
+        log_info("No items to write.")
         return
 
     # Step 2: produce files_needed = max_parts files
@@ -164,7 +176,7 @@ def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 
             json.dump([{"elementId": str(k), "quantity": v} for k, v in out_items.items()],
                       f, indent=4)
 
-        print(f"Saved {len(out_items)} items to {out_path}")
+        log_debug(f"Saved {len(out_items)} items to {out_path}")
 
 def GetOutputPathDir():
     return Path(__file__).resolve().parent.parent / "outputs"
