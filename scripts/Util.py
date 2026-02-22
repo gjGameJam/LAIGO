@@ -4,7 +4,27 @@ from collections import defaultdict
 import json
 from pathlib import Path
 from math import ceil
+from dotenv import load_dotenv
+from pathlib import Path
+import os
 
+def load_project_env():
+    """
+    Load .env file from project root.
+    Assumes this file is in scripts/ and .env is in project root.
+    """
+    # Project root is parent of scripts/
+    project_root = Path(__file__).parent.parent.resolve()
+    env_path = project_root / ".env"
+
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+        print(f".env loaded from {env_path}")
+    else:
+        print(f"No .env found at {env_path}, using defaults or system environment")
+
+    # Optional: return project_root for convenience
+    return project_root
 
 
 # LEGO palette in rgb

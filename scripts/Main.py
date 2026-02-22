@@ -18,22 +18,24 @@ import threading
 import json
 from pathlib import Path
 import traceback
-
+from Util import load_project_env
+load_project_env() #also being done in pic to mosaic but doing it here ensures env vars are loaded for the API process as well
 
 # -----------------------------
 # ROOT STORAGE DIRECTORIES
 # -----------------------------
-INPUT_DIR = Path("./inputs")
-OUTPUT_DIR = Path("./outputs")
+INPUT_DIR = Path(os.getenv("INPUT_DIR"))
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR"))
 
 INPUT_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-
 # Job retention configuration
-JOB_TTL_SECONDS = 3600
-CLEANUP_INTERVAL = 300
-
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS"))
+CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL"))
+max_worker_number = int(os.getenv("MAX_WORKERS"))
+max_mosaic_block_width = int(os.getenv("MAX_MOSAIC_BLOCK_WIDTH"))
+STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK"))
 
 # -----------------------------
 # FASTAPI LIFECYCLE
@@ -41,7 +43,7 @@ CLEANUP_INTERVAL = 300
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Executor exists ONLY in API process
-    app.state.executor = ProcessPoolExecutor(max_workers=2)
+    app.state.executor = ProcessPoolExecutor(max_workers=max_worker_number)
 
     # In-memory job registry
     app.state.jobs = {}
@@ -65,7 +67,7 @@ app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 # REQUEST MODELS
 # -----------------------------
 class MosaicSettings(BaseModel):
-    mosaic_block_width: int = Field(1, ge=1, alias="mosaic_block_width")
+    mosaic_block_width: int = Field(1, ge=1, le=max_mosaic_block_width, alias="mosaic_block_width")
     mosaic_type: MosaicType
     background_color_percent: float = Field(100, ge=1, le=100)
     to_frame: bool = True
@@ -111,7 +113,7 @@ def run_job(job_id: str, request_dict: dict) -> dict:
         settings = request_dict["settings"]
 
         image_path = Path(request_dict["image_path"])
-        width = int(settings["mosaic_block_width"]) * 16
+        width = int(settings["mosaic_block_width"]) * STUDS_PER_BLOCK
         m_type = MosaicType(settings["mosaic_type"])
         background_color_percent = float(settings["background_color_percent"])
         frame = bool(settings["to_frame"])

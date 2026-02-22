@@ -5,7 +5,6 @@ import shutil
 from pathlib import Path
 from Util import GetOutputPathDir
 
-
 def empty_instructions_folder():
     folder = Path(f"{GetOutputPathDir()}/Instructions")
     shutil.rmtree(folder)

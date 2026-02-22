@@ -128,7 +128,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+#.env actually exposing .env because it just has variables and no secrests
 .venv
 env/
 venv/

@@ -12,7 +12,7 @@ import traceback
 sys.path.append(str(Path(__file__).resolve().parent)) #look in same folder for scripts
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
-from Util import GetPaletteRGBArray
+from Util import GetPaletteRGBArray, load_project_env
 
 
 #converts a list of RGB colors into a NumPy array of Lab colors
@@ -22,12 +22,13 @@ def rgb_list_to_lab(arr_rgb):
     return lab
 
 
+load_project_env()
 LEGO_PALETTE_RGB = GetPaletteRGBArray()
 PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
 PALETTE_LAB_RESHAPED = PALETTE_LAB.reshape((-1, 1, 3))
-MAX_BLOCK_WIDTH = 40
+MAX_BLOCK_WIDTH = int(os.getenv("MAX_MOSAIC_BLOCK_WIDTH"))
 MIN_BLOCK_WIDTH = 1
-STUDS_PER_BLOCK = 16
+STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK"))
 
 
 #gets the index of the closest color to the pixel from the palette by visual distance
