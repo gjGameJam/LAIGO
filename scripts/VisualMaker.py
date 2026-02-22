@@ -20,7 +20,6 @@ STUD_NECK_WIDTH  = STUD_WIDTH * 0.75
 STUD_NECK_OFFSET = (STUD_WIDTH - STUD_NECK_WIDTH) / 2
 STUD_NECK_RISE = STUD_HEIGHT * 0.35   # how high into the stud the neck starts
 
-#TODO: test using output directory for saving in job specific folder
 def get_file_name(step_num, output_dir=None):
     if output_dir is not None:
         folder = Path(f"{output_dir}/Instructions")
@@ -29,12 +28,20 @@ def get_file_name(step_num, output_dir=None):
     else:
         return f"{GetOutputPathDir()}/Instructions/{step_num}.png"
 
+#helper function to get font (with fallback if arial doesn't exist on system)
+def get_font(size=32):
+    try:
+        # Try to load Arial TTF (Windows-friendly)
+        return ImageFont.truetype("arial.ttf", size)
+    except OSError:
+        # Fall back to PIL default bitmap font
+        return ImageFont.load_default()
 
 def save_img_and_increment_step(img, step, output_dir=None):
     #draw step number on bottom middle
     width, height = img.size
     draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype("arial.ttf", 32)
+    font = get_font(32)
     
     #draw step number in center bottom
     x_middle = width / 2
@@ -42,7 +49,6 @@ def save_img_and_increment_step(img, step, output_dir=None):
     offset = 50
     draw.text((x_middle + x_offset, height - offset), str(step), fill="black", font=font)
     #save and increment/return step
-    #TODO: might need to make a folder if it doesn't exist already?
     saveName = get_file_name(step, output_dir)
     img.save(saveName)
     return (step + 1)
@@ -1214,7 +1220,7 @@ def draw_grid_setup_instruction(step, output_dir=None):
     
     if blockHeight > 1:
         #instruct user to connect columns via the red connectors going down
-        font = ImageFont.truetype("arial.ttf", 20)
+        font = get_font(20)
         margin = 25
         placement = (margin, margin)
         text = "connect baseplates via red connectors/plates to form columns"
@@ -1280,7 +1286,7 @@ def draw_grid_setup_instruction(step, output_dir=None):
 
     if blockWidth > 1:
         #instruct user to connect columns via the green connectors going right
-        font = ImageFont.truetype("arial.ttf", 20)
+        font = get_font(20)
         margin = 25
         half_height = height / 2
         placement = (margin, half_height)
@@ -1437,7 +1443,7 @@ def draw_arrow(draw, x, y, s_len, s_thick, h_len, h_wid, fill="black"):
 
     draw.polygon(arrow, fill=fill)
 
-#TODO: use output directory
+
 def draw_frame_setup_instruction(width, height, step, output_dir):
     img, draw = get_img_and_draw(step, True, output_dir)
     to_reuse = img.copy()
@@ -1446,8 +1452,8 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
     middle_x_of_image = (int)(im_w / 2)
     middle_y_of_image = (int)(im_h / 2)
     draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype("arial.ttf", 28)
-    small_font = ImageFont.truetype("arial.ttf", 22)
+    font = get_font(28)
+    small_font = get_font(22)
     
     blockWidth = (int)(width / 16)
     blockHeight = (int)(height / 16)
@@ -1699,7 +1705,7 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
     draw2.text((30, middle_y_of_image), "The frame and mosaic should be connected", fill="black", font=font)
     draw_ortho_plate(draw2, -12, 16, True, 2, 1, 3, (.3, .3, .3), False)
     #draw axle pin below the axle pin text
-    axle_pin = Image.open("axle_pin.jpg").convert("RGBA") #TODO: update file path if needed
+    axle_pin = Image.open("axle_pin.jpg").convert("RGBA") #TODO: update file path if needed (probably will need to once hosting)
     axle_pin = axle_pin.resize((100, 100))
     to_reuse.paste(axle_pin, (300, 150), axle_pin)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
@@ -1721,12 +1727,11 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
 
 
 #function for drawing frame around mosiac, saving each step until frame is complete
-#TODO: use output directory
 def draw_frame_for_mosiac(width, height, step, output_dir):
     blockWidth = (int)(width / 16)
     blockHeight = (int)(height / 16)
     black = (.3, .3, .3)
-    font = ImageFont.truetype("arial.ttf", 60)
+    font = get_font(60)
     perimeter = (blockWidth * 2) + (blockHeight * 2)
     
     #draw corner plate
@@ -1816,8 +1821,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     #return step once all actions are taken
     return step
 
-#high level function to create instructions for the grid and frame setup that calls medium level functions     
-#TODO: use output directory for output if not none                                                                                                                                                                                      
+#high level function to create instructions for the grid and frame setup that calls medium level functions                                                                                                                                                                                          
 def draw_frame_instructions(width, height, step, output_dir=None):
     #shows the connection of grid cells into columns and column into grid (now handled externally)
     #step = draw_grid_setup_instruction(step)
@@ -1827,7 +1831,7 @@ def draw_frame_instructions(width, height, step, output_dir=None):
     step = draw_frame_setup_instruction(width, height, step, output_dir)
     return step #return step for any future use
 
-#TODO: use output directory for output if not none  
+#draws final views of completed mosiac (all put together) with frame if applicable
 def draw_final_view(step, composite, want_frame, output_dir=None):
     img, draw = get_img_and_draw(step, True, output_dir)
     print("drawing final view...")
@@ -1864,7 +1868,7 @@ def draw_final_view(step, composite, want_frame, output_dir=None):
     img.paste(composite_resized, (composite_x, composite_y))
 
 
-    font = ImageFont.truetype("arial.ttf", 20)
+    font = get_font(20)
     margin = 50
     placement = (margin, margin)
     text = "Admire your artwork (add frame hooks to back is desired)"

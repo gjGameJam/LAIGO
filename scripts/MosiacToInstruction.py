@@ -4,11 +4,6 @@ import numpy as np
 import shutil
 from pathlib import Path
 from Util import GetOutputPathDir
-#take in ord list from MosiacToOrder to get pieces and counts
-#take in foreground and background RGBA images (ignore alpha channel in foreground because it allows background to show through)
-#build background first then foreground on top
-
-#function to generate instructions for creating the mosiac frame (stretch)
 
 
 def empty_instructions_folder():
@@ -23,7 +18,6 @@ def count_colors(img_rgba):
     return len(np.unique(rgb, axis=0))
 
 #function to generate instrucctions for a RGBA image mosiac (pixel-perfect)
-#TODO: handle having specific output directory (already handling not having one)
 def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir):
     assert isinstance(bg_rgba, Image.Image)
     assert bg_rgba.mode == "RGBA"

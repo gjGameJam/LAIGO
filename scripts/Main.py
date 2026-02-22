@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # Static exposure for already-built artifacts (future CDN replacement point)
+# meaning access is possible like: http://<server_ip>:<port>/artifacts/<job_id>/artifact.zip
 app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 
 
