@@ -3,7 +3,7 @@ from PIL import Image, ImageDraw
 import numpy as np
 import shutil
 from pathlib import Path
-from Util import GetOutputPathDir
+from Util import GetOutputPathDir, log_info, log_debug, log_error
 
 def empty_instructions_folder():
     folder = Path(f"{GetOutputPathDir()}/Instructions")
@@ -27,7 +27,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir):
     blockWidth = (int)(bg_w / 16)
     blockHeight = (int)(bg_h / 16)
     #divide pixel width and height by 16 (length of backplate block) to determine row and column max
-    print("creating instructions for width " + str(blockWidth) + " and height " + str(blockHeight))
+    log_debug(f"creating instructions for width {blockWidth} and height {blockHeight}")
     #convert fg and bg rgba into arrays for each block [width][height][16][16]
     if not fg_rgba is None:
         fg = np.asarray(fg_rgba, dtype=np.uint8)
@@ -41,27 +41,26 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir):
     # Extract RGB only, ignore alpha
     if not fg_rgba is None:
         fg_colors = set(map(tuple, fg[:, :, :3].reshape(-1, 3)))
-        print(f"FG unique RGB colors ({len(fg_colors)}):")
-        print(fg_colors)
+        log_debug(f"FG unique RGB colors ({len(fg_colors)}):")
+        log_info(fg_colors)
 
     bg_colors = set(map(tuple, bg[:, :, :3].reshape(-1, 3)))
 
-    print(f"\nBG unique RGB colors ({len(bg_colors)}):")
-    print(bg_colors)
+    log_debug(f"\nBG unique RGB colors ({len(bg_colors)}):")
+    log_info(bg_colors)
 
     H, W, C = bg.shape
-    print(f"height: {H}, width: {W}")
+    log_debug(f"height: {H}, width: {W}")
     assert C == 4
     assert W == bg_w and H == bg_h
     assert W % 16 == 0 and H % 16 == 0
 
     bg_color_count = count_colors(bg_rgba)
-    print("BG unique RGB colors:", bg_color_count)
+    log_info(f"BG unique RGB colors: {bg_color_count}")
 
     if not fg_rgba is None:
         fg_color_count = count_colors(fg_rgba)
-        print("FG unique RGB colors:", fg_color_count)
-
+        log_info(f"FG unique RGB colors: {fg_color_count}")
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
         for blockH in range(0, blockHeight):
@@ -77,15 +76,12 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir):
             x0, x1 = blockW*16, (blockW+1)*16
             bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
             img, draw = get_img_and_draw(step, False, output_dir) #false because we want to pick off where we left off
-            #print(f"bg size {len(bg_block)} x {len(bg_block[0])}")
             for col in range(0, len(bg_block[0])):
                 #loop over columns of 16x16 block (each column is 16 plates)
                 to_reuse = img.copy()
                 draw2 = ImageDraw.Draw(to_reuse)
                 # take the column and convert to a list of 3-element tuples (R,G,B)
                 column_rgb = [tuple(bg_block[15 - y, col]) for y in range(16)]
-                #print("RAW column colors:", len(set(column_rgb)), set(column_rgb))
-                #print(set(column_rgb))
                 draw_plate_column(draw, col, 0, column_rgb, False) #zero height with highlight
                 draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
                 step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
@@ -95,7 +91,6 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir):
             #same thing as background but ignore alpha channel to allow background to show through
             if not fg_rgba is None:
                 fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
-                # #print(f"fg size {len(fg_block)} x {len(fg_block[0])}")
                 for col in range(0, len(fg_block[0])):
                     #img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
                     to_reuse = img.copy()
@@ -142,7 +137,7 @@ def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step, outp
     elif rowMax - 1 == blockRow:
         case = 2
 
-    print("creating baseplate instructions for width " + str(blockCol) + " and height " + str(blockRow) + " for max width " + str(colMax) + " and max height " + str(rowMax) + " case " + str(case))
+    log_debug(f"creating baseplate instructions for width {blockCol} and height {blockRow} for max width {colMax} and max height {rowMax} case {case}")
     #first step is to get 16x16 baseplate out
     #add green connectors on right side and red connectors along bottom side
     #add green plates on right side and red plates along bottom side

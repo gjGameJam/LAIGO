@@ -13,6 +13,8 @@ sys.path.append(str(Path(__file__).resolve().parent)) #look in same folder for s
 from MosiacToOrder import GenerateOrderList
 from MosiacToInstruction import GenerateInstructions
 from Util import GetPaletteRGBArray, load_project_env
+load_project_env() #a little jenky way to avoid circular imports
+from Util import log_debug, log_info, log_error
 
 
 #converts a list of RGB colors into a NumPy array of Lab colors
@@ -40,7 +42,7 @@ def nearest_palette_index_lab(pixel_lab):
 
 #optimizes the background to have a maximum number of k colors and returns array of indexes of colors
 def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
-    print(f"simplifying background to top {k} lego colors...")
+    log_info(f"simplifying background to top {k} lego colors...")
     if alpha_mask is not None:
         valid_pixels = bg_idx[alpha_mask == 255]
     else:
@@ -51,7 +53,7 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
     freq = dict(zip(unique, counts))
     top_colors = sorted(freq, key=freq.get, reverse=True)[:k]
     top_colors = np.array(top_colors, dtype=np.int32)
-    print("background dominant LEGO colors:", top_colors.tolist())
+    log_info(f"background dominant LEGO colors: {top_colors.tolist()}")
     top_lab = palette_lab[top_colors]
     simplified_idx = np.copy(bg_idx)
     H, W = bg_idx.shape
@@ -130,7 +132,7 @@ def remove_background(pil_img):
 
 #takes and returns PIL.Image.Image with delta lightness change
 def adjust_lightness_lab(img_pil, delta_L):
-    #print(f"adjusting lightness by {delta_L} in Lab space...")
+    log_debug(f"adjusting lightness by {delta_L} in Lab space...")
     rgb = np.asarray(img_pil).astype(np.float32)/255.0
     lab = color.rgb2lab(rgb)
     lab[...,0]=np.clip(lab[...,0]+delta_L,0,100)
@@ -188,11 +190,11 @@ def handle_input(args):
 #gives the error name, type, and line location
 def give_exception_message(e):
     tb = traceback.extract_tb(e.__traceback__)[-1] #get last frame of stack
-    print(f"[ERROR] {type(e).__name__}: {e}")
-    print(f"File: {tb.filename}")
-    print(f"Line: {tb.lineno}")
-    print(f"Function: {tb.name}")
-    print(f"Code: {tb.line}")
+    log_error(f"[ERROR] {type(e).__name__}: {e}")
+    log_error(f"File: {tb.filename}")
+    log_error(f"Line: {tb.lineno}")
+    log_error(f"Function: {tb.name}")
+    log_error(f"Code: {tb.line}")
     raise
 
 
@@ -209,9 +211,9 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
     try:
         img = open_image(img_path) #gets RGB of image
         image_folder = Path(__file__).resolve().parent.parent / "images"
-        print("starting picture to lego mosaic conversion...")
+        log_info("starting picture to lego mosaic conversion...")
         if mosiac_type == MosaicType.THREE_D: #handle 3d mosiac case with foreground and background layers
-            print("starting 3d mosaic process by differentiating between fg and bg...")
+            log_debug("starting 3d mosaic process by differentiating between fg and bg...")
             fg_pil, bg_pil, fg_mask = remove_background(img) #separates foreground from background
             fg_alpha_pil = make_difference_transparent(img, fg_pil) #makes the background transparent on the foreground
             fg_rgba = fg_alpha_pil.convert("RGBA")
@@ -220,7 +222,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=5)
             bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
        
-            print("converting processed image to lego mosiac...")
+            log_debug("converting processed image to lego mosiac...")
             fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, block_width, alpha_mask=fg_a)
             bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
        
@@ -236,7 +238,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             fg_out_rgba.putalpha(fg_alpha_resized)
             bg_rgba = bg_out_img.convert("RGBA").resize(fg_out_rgba.size, Image.NEAREST)
        
-            print("size of foreground mosaic:", fg_out_rgba.size)
+            log_debug(f"size of foreground mosaic: {fg_out_rgba.size}")
+            log_debug(f"size of background mosaic: {bg_rgba.size}")
             #fg_out_rgba.show()
             #bg_rgba.show()
 
@@ -246,15 +249,15 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
        
             img_output_path = image_folder / f"{img_path.stem}_lego.png"
             composite.save(img_output_path)
-            print(f"Saved mosaic to {img_output_path}")
+            log_info(f"Saved mosaic to {img_output_path}")
 
-            print("generating order list...")
+            log_debug("generating order list...")
             GenerateOrderList(fg_out_rgba, bg_rgba, to_frame, output_dir)
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir)
-            print("finished mosiac generation!")
+            log_debug("finished mosiac generation!")
 
         else: #handle 2d mosiac case
-            print("starting 2d mosaic process by adjusting lightness...")
+            log_debug("starting 2d mosaic process by adjusting lightness...")
             #adjust lightness then convert to lego mosiac (no need to handle alpha stuff for one layer)
             filtered_image = adjust_lightness_lab(img, delta_L=5)
             out_img, img_idx = image_to_lego_mosaic(filtered_image, block_width)
@@ -264,11 +267,11 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             out_img.save(img_output_path)
             out_img_rgba = out_img.convert("RGBA")
             #generate order list and instructions to create mosaic
-            print("generating order list...")
+            log_debug("generating order list...")
             #GenerateOrderList and GenerateInstructions handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
             GenerateOrderList(None, out_img_rgba, to_frame, output_dir)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir)
-            print("finished mosiac generation!")
+            log_debug("finished mosiac generation!")
    
     except Exception as e:
         give_exception_message(e)
@@ -276,9 +279,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
 if __name__ == "__main__":
     try:
-        print("handling input...")
+        log_info("handling input...")
         mosiac_type, block_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
-        #print("toframe: ", to_frame)
         image_folder = Path(__file__).resolve().parent.parent / "images"
         image_name = "stella1.jpg"
         image_path = image_folder / image_name

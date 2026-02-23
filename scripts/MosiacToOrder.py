@@ -4,7 +4,7 @@ from Util import GetPaletteDict
 from collections import Counter
 from pathlib import Path
 import shutil
-from Util import GetOutputPathDir, SaveDictAsJsonsOptimized
+from Util import GetOutputPathDir, SaveDictAsJsonsOptimized, log_info, log_debug, log_error
 
 PALETTE_DICT = GetPaletteDict()
 
@@ -22,9 +22,9 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     fg_out_rgba : PIL Image, mode RGBA
     bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
     """
-    print("clearing previous order lists...")
+    log_info("clearing previous order lists...")
     empty_order_list_folder()
-    print("creating order list...")
+    log_info("creating order list...")
     # -----------------
     # Layer 0: Base Layer (to place all plates on)
     # -----------------
@@ -58,21 +58,21 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
                 order[piece_id] += 1
 
 
-    print("returning order list...")
+    log_debug("returning order list...")
     finalList = dict(order)
 
     if want_frame:
         frameList = GetFrameForSize(bg_rgba.width, bg_rgba.height)
         finalList = dict(Counter(order) + Counter(frameList))
 
-    print("finished order list!:", finalList)
+    log_debug(f"finished order list! {finalList}")
     #save json of order list
     if output_dir is not None:
         output_json_path = output_dir / "OrderLists" / f"order_list.json"
     else:
         output_json_path = get_order_lists_file_path() / f"order_list.json"
     SaveDictAsJsonsOptimized(finalList, output_json_path)
-    print("Sum of all pieces:", sum(finalList.values()))
+    log_info(f"Sum of all pieces: {sum(finalList.values())}")
     return finalList
 
 

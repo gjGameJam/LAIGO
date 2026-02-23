@@ -1,7 +1,7 @@
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import random
-from Util import GetOutputPathDir
+from Util import GetOutputPathDir, log_debug, log_info, log_error
 # -----------------------------
 # CONSTANTS
 # -----------------------------
@@ -903,7 +903,7 @@ def get_block_xy(blockX, blockY):
 #pass in array of 16 length to draw a column of plates on a specific column (if element is empty then no plate is needed)
 def draw_plate_column(draw, start_blockX, height, colors, highlight):
     if len(colors) != 16:
-        print("need 16 color indexes")
+        log_error("need 16 color indexes")
         return
     for i in range(15, -1, -1): #go from 15 to 0
         #paint back to front to adhere to painters algorithm
@@ -1834,7 +1834,7 @@ def draw_frame_instructions(width, height, step, output_dir=None):
 #draws final views of completed mosiac (all put together) with frame if applicable
 def draw_final_view(step, composite, want_frame, output_dir=None):
     img, draw = get_img_and_draw(step, True, output_dir)
-    print("drawing final view...")
+    log_info("drawing final view...")
     black = to_rgb((.2, .2, .2))
     #aspect ratio of image
     composite_aspect_ratio = composite.height / composite.width
@@ -1875,15 +1875,6 @@ def draw_final_view(step, composite, want_frame, output_dir=None):
     draw.text(placement, text, fill="black", font=font)
 
 
-    print("finished drawing final view!")
+    log_debug("finished drawing final view!")
     step = save_img_and_increment_step(img, step, output_dir)
     return step
-
-
-
-
-
-# draw_frame_instructions(64, 48, 2)
-# print("finished")
-
-
