@@ -132,7 +132,7 @@ def remove_background(pil_img):
 
 #takes and returns PIL.Image.Image with delta lightness change
 def adjust_lightness_lab(img_pil, delta_L):
-    log_debug(f"adjusting lightness by {delta_L} in Lab space...")
+    #log_debug(f"adjusting lightness by {delta_L} in Lab space...")
     rgb = np.asarray(img_pil).astype(np.float32)/255.0
     lab = color.rgb2lab(rgb)
     lab[...,0]=np.clip(lab[...,0]+delta_L,0,100)
@@ -211,7 +211,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
     try:
         img = open_image(img_path) #gets RGB of image
         image_folder = Path(__file__).resolve().parent.parent / "images"
-        log_info("starting picture to lego mosaic conversion...")
+        #log_info("starting picture to lego mosaic conversion...")
         if mosiac_type == MosaicType.THREE_D: #handle 3d mosiac case with foreground and background layers
             log_debug("starting 3d mosaic process by differentiating between fg and bg...")
             fg_pil, bg_pil, fg_mask = remove_background(img) #separates foreground from background
@@ -238,8 +238,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             fg_out_rgba.putalpha(fg_alpha_resized)
             bg_rgba = bg_out_img.convert("RGBA").resize(fg_out_rgba.size, Image.NEAREST)
        
-            log_debug(f"size of foreground mosaic: {fg_out_rgba.size}")
-            log_debug(f"size of background mosaic: {bg_rgba.size}")
+            #log_debug(f"size of foreground mosaic: {fg_out_rgba.size}")
+            #log_debug(f"size of background mosaic: {bg_rgba.size}")
             #fg_out_rgba.show()
             #bg_rgba.show()
 
@@ -249,7 +249,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
        
             img_output_path = image_folder / f"{img_path.stem}_lego.png"
             composite.save(img_output_path)
-            log_info(f"Saved mosaic to {img_output_path}")
+            #log_info(f"Saved mosaic to {img_output_path}")
 
             log_debug("generating order list...")
             GenerateOrderList(fg_out_rgba, bg_rgba, to_frame, output_dir)

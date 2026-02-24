@@ -137,7 +137,7 @@ def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step, outp
     elif rowMax - 1 == blockRow:
         case = 2
 
-    log_debug(f"creating baseplate instructions for width {blockCol} and height {blockRow} for max width {colMax} and max height {rowMax} case {case}")
+    #log_debug(f"creating baseplate instructions for width {blockCol} and height {blockRow} for max width {colMax} and max height {rowMax} case {case}")
     #first step is to get 16x16 baseplate out
     #add green connectors on right side and red connectors along bottom side
     #add green plates on right side and red plates along bottom side

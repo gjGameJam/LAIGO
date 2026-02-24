@@ -1,55 +1,39 @@
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+import os
 
+# Resolve project root (works regardless of where called)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-class TruncatingFileHandler(logging.FileHandler):
-    """
-    FileHandler that keeps the log file under `max_lines` by
-    removing oldest lines when the file grows too large.
-    """
-    def __init__(self, filename, max_lines=10000, mode='a', encoding=None):
-        super().__init__(filename, mode=mode, encoding=encoding)
-        self.max_lines = max_lines
-        self.filename = Path(filename)
-        self.filename.parent.mkdir(parents=True, exist_ok=True)
+LOG_FILE = PROJECT_ROOT / os.getenv("LOG_FILE", "laigo.log")
 
-    def emit(self, record):
-        super().emit(record)
-        self.truncate_file()
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    def truncate_file(self):
-        # Read all lines
-        with open(self.filename, "r", encoding=self.encoding or "utf-8") as f:
-            lines = f.readlines()
+MAX_LOG_SIZE_MB = int(os.getenv("MAX_LOG_SIZE_MB", 10))  # rotate at 10MB
+MAX_BYTES = MAX_LOG_SIZE_MB * 1024 * 1024
 
-        # If exceeds max_lines, truncate from the start
-        if len(lines) > self.max_lines:
-            with open(self.filename, "w", encoding=self.encoding or "utf-8") as f:
-                f.writelines(lines[-self.max_lines:])
-
-
-# -----------------------------
-# Logger setup
-# -----------------------------
-HERE = Path(__file__).resolve().parent # Path to this file
-PROJECT_ROOT = HERE.parent # Project root = parent of scripts folder
-LOG_FILE = (PROJECT_ROOT / "laigoLOG.log").resolve()
-logger = logging.getLogger("laigo")
+logger = logging.getLogger("laigoLOG")
 logger.setLevel(logging.DEBUG)
 
-file_handler = TruncatingFileHandler(LOG_FILE, max_lines=10000)
-formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
+# Prevent duplicate handlers if imported multiple times
+if not logger.handlers:
 
-# Optional: also log to console
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=MAX_BYTES,
+        backupCount=1,   # keep only 1 old file (acts like truncation)
+        encoding="utf-8"
+    )
 
-# -----------------------------
-# Usage example
-# -----------------------------
-# logger.info("Logger initialized")
-# logger.debug("Debugging info")
-# logger.error("An error occurred")
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(process)d | %(message)s"
+    )
+
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # Optional console logging
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    logger.addHandler(console)
