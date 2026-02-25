@@ -247,8 +247,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
             #composite.show()
        
-            img_output_path = image_folder / f"{img_path.stem}_lego.png"
-            composite.save(img_output_path)
+            # img_output_path = image_folder / f"{img_path.stem}_lego.png"
+            # composite.save(img_output_path)
             #log_info(f"Saved mosaic to {img_output_path}")
 
             log_debug("generating order list...")
@@ -263,8 +263,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             out_img, img_idx = image_to_lego_mosaic(filtered_image, block_width)
             #show and save the image
             #out_img.show()
-            img_output_path = image_folder / f"{img_path.stem}_lego.png"
-            out_img.save(img_output_path)
+            # img_output_path = image_folder / f"{img_path.stem}_lego.png"
+            # out_img.save(img_output_path)
             out_img_rgba = out_img.convert("RGBA")
             #generate order list and instructions to create mosaic
             log_debug("generating order list...")

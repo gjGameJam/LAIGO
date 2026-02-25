@@ -1,15 +1,15 @@
-# run command: uvicorn main:app
+# run with:
+# uvicorn main:app --host 0.0.0.0 --port 8000
 
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)  # REQUIRED for Windows-safe multiprocessing
+mp.set_start_method("spawn", force=True)  # REQUIRED for Windows + Render
 
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ConfigDict
-from picToMosiac import pic_to_mosaic, MosaicType
+from pydantic import BaseModel
 import uuid
 import os
 import shutil
@@ -18,34 +18,35 @@ import threading
 import json
 from pathlib import Path
 import traceback
+from PIL import Image, UnidentifiedImageError
+from picToMosiac import pic_to_mosaic, MosaicType
 from Util import load_project_env
-load_project_env() #also being done in pic to mosaic but doing it here ensures env vars are loaded for the API process as well
+
+# Load .env BEFORE anything else
+load_project_env()
 
 # -----------------------------
-# ROOT STORAGE DIRECTORIES
+# ENV CONFIG (API PROCESS ONLY)
 # -----------------------------
-INPUT_DIR = Path(os.getenv("INPUT_DIR"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR"))
+INPUT_DIR = Path(os.getenv("INPUT_DIR", "./inputs")).resolve()
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
 
-INPUT_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 3600))
+CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 2))
+STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
+upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
+MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024 # convert MB to bytes
 
-# Job retention configuration
-JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS"))
-CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL"))
-max_worker_number = int(os.getenv("MAX_WORKERS"))
-max_mosaic_block_width = int(os.getenv("MAX_MOSAIC_BLOCK_WIDTH"))
-STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK"))
+INPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
 # FASTAPI LIFECYCLE
 # -----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Executor exists ONLY in API process
-    app.state.executor = ProcessPoolExecutor(max_workers=max_worker_number)
-
-    # In-memory job registry
+    app.state.executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
     app.state.jobs = {}
 
     cleanup_thread = threading.Thread(target=cleanup_loop, args=(app,), daemon=True)
@@ -58,115 +59,81 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Static exposure for already-built artifacts (future CDN replacement point)
-# meaning access is possible like: http://<server_ip>:<port>/artifacts/<job_id>/artifact.zip
+# Static serving of built artifacts (CDN-ready later)
 app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 
 
 # -----------------------------
-# REQUEST MODELS
+# WORKER FUNCTION (PURE)
 # -----------------------------
-class MosaicSettings(BaseModel):
-    mosaic_block_width: int = Field(1, ge=1, le=max_mosaic_block_width, alias="mosaic_block_width")
-    mosaic_type: MosaicType
-    background_color_percent: float = Field(100, ge=1, le=100)
-    to_frame: bool = True
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class GenerateRequest(BaseModel):
-    image_path: Path
-    settings: MosaicSettings
-
-
-# -----------------------------
-# INPUT PATH VALIDATION
-# -----------------------------
-def validate_input_path(path: str) -> Path:
+def run_job(job_id: str,
+            image_path: str,
+            settings: dict,
+            output_root: str,
+            studs_per_block: int) -> dict:
     """
-    Ensures user cannot escape INPUT_DIR via path tricks.
+    This function must be PURE.
+    No globals. Everything passed explicitly.
     """
-    root = INPUT_DIR.resolve(strict=True)
-    real = Path(path).resolve(strict=True)
 
-    if os.path.commonpath([str(real), str(root)]) != str(root):
-        raise ValueError("Image must be inside INPUT_DIR")
-
-    return real
-
-
-# -----------------------------
-# WORKER FUNCTION (SUBPROCESS)
-# -----------------------------
-def run_job(job_id: str, request_dict: dict) -> dict:
-    """
-    Fully isolated execution.
-    No shared filesystem assumptions.
-    """
+    OUTPUT_DIR = Path(output_root)
 
     job_root = OUTPUT_DIR / job_id
-    workspace = job_root / "workspace"     # build happens here
+    workspace = job_root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
     try:
-        settings = request_dict["settings"]
+        width = int(settings["mosaic_block_width"]) * studs_per_block
+        mosaic_type = MosaicType(settings["mosaic_type"])
+        background_pct = float(settings["background_color_percent"])
+        to_frame = bool(settings["to_frame"])
 
-        image_path = Path(request_dict["image_path"])
-        width = int(settings["mosaic_block_width"]) * STUDS_PER_BLOCK
-        m_type = MosaicType(settings["mosaic_type"])
-        background_color_percent = float(settings["background_color_percent"])
-        frame = bool(settings["to_frame"])
-
-        # -----------------------------
-        # YOUR ORIGINAL PIPELINE CALL (UNCHANGED)
-        # -----------------------------
         result_dir = pic_to_mosaic(
-            image_path,
+            Path(image_path),
             width,
-            m_type,
-            background_color_percent,
-            frame,
-            output_dir=workspace,   # <- critical isolation injection
+            mosaic_type,
+            background_pct,
+            to_frame,
+            output_dir=workspace,
             job_id=job_id,
         ) or workspace
 
-        # -----------------------------
-        # WRITE MANIFEST (job metadata)
-        # -----------------------------
         manifest = {
             "schema": "laigo.manifest.v1",
             "job_id": job_id,
             "created_at": time.time(),
-            "settings": request_dict
+            "settings": settings
         }
 
         with open(result_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
-        # -----------------------------
-        # ZIP CREATED OUTSIDE WORKSPACE
-        # -----------------------------
         archive_base = job_root / "artifact"
         archive_path = shutil.make_archive(str(archive_base), "zip", result_dir)
 
-        # Remove only the build workspace (leave final zip)
         shutil.rmtree(workspace, ignore_errors=True)
+
+        # Remove uploaded source image (no longer needed)
+        try:
+            Path(image_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
         return {
             "status": "complete",
-            "file": Path(archive_path).name,
-            "artifact_path": str(Path(archive_path)),
+            "artifact_path": archive_path,
             "finished_at": time.time()
         }
 
     except Exception as e:
         shutil.rmtree(job_root, ignore_errors=True)
-
+        try:
+            Path(image_path).unlink(missing_ok=True) # Remove uploaded source image (no longer needed) even if job failed
+        except Exception:
+            pass
         return {
             "status": "failed",
-            "error_type": type(e).__name__,
-            "error_message": str(e),
+            "error": str(e),
             "traceback": traceback.format_exc(),
             "finished_at": time.time()
         }
@@ -177,23 +144,65 @@ def run_job(job_id: str, request_dict: dict) -> dict:
 # -----------------------------
 @app.get("/health")
 async def health():
-    return {"service": "laigo", "status": "running"}
+    return {"status": "running"}
 
 
 @app.post("/generate")
-async def generate(request: GenerateRequest):
-    try:
-        validated_path = validate_input_path(request.image_path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+async def generate(
+    file: UploadFile = File(...),
+    mosaic_block_width: int = Form(...),
+    mosaic_type: str = Form(...),
+    background_color_percent: float = Form(100),
+    to_frame: bool = Form(True),
+):
+    """
+    Accepts an uploaded image file, validates it, and starts a processing job.
+    """
+    # --- 1. Read content and check size ---
+    contents = await file.read()
+    if len(contents) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Max {upload_mbs} MB."
+        )
 
+    # --- 2. Generate unique job ID ---
     job_id = str(uuid.uuid4())
 
-    payload = request.model_dump(mode="json")
-    payload["image_path"] = str(validated_path)
+    # --- 3. Save uploaded file safely ---
+    input_file = INPUT_DIR / f"{job_id}_{file.filename}"
+    with open(input_file, "wb") as f:
+        f.write(contents)
+        f.flush()
+        os.fsync(f.fileno())  # ensure fully written
 
-    future = app.state.executor.submit(run_job, job_id, payload)
+    # --- 4. Validate the image ---
+    try:
+        with Image.open(input_file) as img:
+            img.verify()  # check that file is an actual image
+    except UnidentifiedImageError:
+        input_file.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Invalid image file")
 
+    # --- 5. Prepare job settings ---
+    settings = {
+        "mosaic_block_width": mosaic_block_width,
+        "mosaic_type": mosaic_type,
+        "background_color_percent": background_color_percent,
+        "to_frame": to_frame
+    }
+
+    # --- 6. Submit job to ProcessPoolExecutor ---
+    future = app.state.executor.submit(
+        run_job,
+        job_id,
+        str(input_file),
+        settings,
+        str(OUTPUT_DIR),
+        STUDS_PER_BLOCK
+    )
+
+    # --- 7. Register job in in-memory registry ---
     app.state.jobs[job_id] = {
         "status": "running",
         "future": future,
@@ -209,10 +218,8 @@ async def get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    future = job["future"]
-
-    if future.done() and job["status"] == "running":
-        job.update(future.result())
+    if job["future"].done() and job["status"] == "running":
+        job.update(job["future"].result())
 
     return {k: v for k, v in job.items() if k != "future"}
 
@@ -221,11 +228,8 @@ async def get_job(job_id: str):
 async def download(job_id: str):
     job = app.state.jobs.get(job_id)
 
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    if job["status"] != "complete":
-        raise HTTPException(status_code=409, detail="Job not finished")
+    if not job or job["status"] != "complete":
+        raise HTTPException(status_code=404, detail="Artifact not ready")
 
     return FileResponse(
         job["artifact_path"],
@@ -235,7 +239,7 @@ async def download(job_id: str):
 
 
 # -----------------------------
-# BACKGROUND CLEANUP
+# CLEANUP THREAD
 # -----------------------------
 def cleanup_loop(app: FastAPI):
     while True:
@@ -248,14 +252,3 @@ def cleanup_loop(app: FastAPI):
                     app.state.jobs.pop(job_id, None)
 
         time.sleep(CLEANUP_INTERVAL)
-
-
-# {
-#   "image_path": "C:/Users/bgern/Desktop/AIEng/LAIGO/scripts/inputs/stella1.jpg",
-#   "settings": {
-#     "mosaic_block_width": 4,
-#     "mosaic_type": "3d",
-#     "background_color_percent": 100,
-#     "to_frame": true
-#   }
-# }
