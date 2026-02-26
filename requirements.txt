@@ -19,8 +19,6 @@ idna==3.11
 ImageIO==2.37.2
 importlib_metadata==8.7.0
 importlib_resources==6.5.2
-jax==0.4.30
-jaxlib==0.4.30
 joblib==1.5.2
 kiwisolver==1.4.7
 lazy_loader==0.4
