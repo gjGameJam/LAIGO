@@ -146,6 +146,9 @@ def run_job(job_id: str,
 async def health():
     return {"status": "running"}
 
+@app.get("/")
+async def root():
+    return {"status": "running", "message": "LAIGO API online. Use /health or /docs for info."}
 
 @app.post("/generate")
 async def generate(
