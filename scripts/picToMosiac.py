@@ -10,11 +10,11 @@ import copy
 from enum import Enum
 import traceback
 sys.path.append(str(Path(__file__).resolve().parent)) #look in same folder for scripts
-from MosiacToOrder import GenerateOrderList
-from MosiacToInstruction import GenerateInstructions
-from Util import GetPaletteRGBArray, load_project_env
+from .MosiacToOrder import GenerateOrderList
+from .MosiacToInstruction import GenerateInstructions
+from .Util import GetPaletteRGBArray, load_project_env
 load_project_env() #a little jenky way to avoid circular imports
-from Util import log_debug, log_info, log_error
+from .Util import log_debug, log_info, log_error
 
 
 #converts a list of RGB colors into a NumPy array of Lab colors

@@ -1,9 +1,9 @@
-from VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
+from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
 from PIL import Image, ImageDraw
 import numpy as np
 import shutil
 from pathlib import Path
-from Util import GetOutputPathDir, log_info, log_debug, log_error
+from .Util import GetOutputPathDir, log_info, log_debug, log_error
 
 def empty_instructions_folder():
     folder = Path(f"{GetOutputPathDir()}/Instructions")

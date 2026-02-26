@@ -19,8 +19,8 @@ import json
 from pathlib import Path
 import traceback
 from PIL import Image, UnidentifiedImageError
-from picToMosiac import pic_to_mosaic, MosaicType
-from Util import load_project_env
+from .picToMosiac import pic_to_mosaic, MosaicType
+from .Util import load_project_env
 
 # Load .env BEFORE anything else
 load_project_env()

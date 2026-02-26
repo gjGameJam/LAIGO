@@ -4,7 +4,7 @@ from Util import GetPaletteDict
 from collections import Counter
 from pathlib import Path
 import shutil
-from Util import GetOutputPathDir, SaveDictAsJsonsOptimized, log_info, log_debug, log_error
+from .Util import GetOutputPathDir, SaveDictAsJsonsOptimized, log_info, log_debug, log_error
 
 PALETTE_DICT = GetPaletteDict()
 
