@@ -37,7 +37,6 @@ CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", mp.cpu_count()))
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024 # convert MB to bytes
 
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,8 +66,7 @@ app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",          # local dev
-        FRONTEND_ORIGIN,  # add this once frontend is deployed
+        "https://laigo-frontend.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
