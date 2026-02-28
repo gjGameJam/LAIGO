@@ -13,7 +13,9 @@ sys.path.append(str(Path(__file__).resolve().parent)) #look in same folder for s
 from .MosiacToOrder import GenerateOrderList
 from .MosiacToInstruction import GenerateInstructions
 from .Util import GetPaletteRGBArray, load_project_env
-load_project_env() #a little jenky way to avoid circular imports
+# Only load .env when running locally
+if os.getenv("RENDER") is None:
+    load_project_env()
 from .Util import log_debug, log_info, log_error
 
 
@@ -24,7 +26,6 @@ def rgb_list_to_lab(arr_rgb):
     return lab
 
 
-load_project_env()
 LEGO_PALETTE_RGB = GetPaletteRGBArray()
 PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
 PALETTE_LAB_RESHAPED = PALETTE_LAB.reshape((-1, 1, 3))

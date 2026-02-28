@@ -23,8 +23,9 @@ from .picToMosiac import pic_to_mosaic, MosaicType
 from fastapi.middleware.cors import CORSMiddleware
 from .Util import load_project_env
 
-# Load .env BEFORE anything else
-load_project_env()
+# Only load .env when running locally
+if os.getenv("RENDER") is None:
+    load_project_env()
 
 # -----------------------------
 # ENV CONFIG (API PROCESS ONLY)
