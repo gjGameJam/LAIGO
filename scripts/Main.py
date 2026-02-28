@@ -1,4 +1,4 @@
-# run with:
+# run with: 
 # uvicorn main:app --host 0.0.0.0 --port 8000
 
 import multiprocessing as mp
@@ -20,6 +20,7 @@ from pathlib import Path
 import traceback
 from PIL import Image, UnidentifiedImageError
 from .picToMosiac import pic_to_mosaic, MosaicType
+from fastapi.middleware.cors import CORSMiddleware
 from .Util import load_project_env
 
 # Load .env BEFORE anything else
@@ -33,9 +34,10 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
 
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 3600))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", 2))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", mp.cpu_count()))
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024 # convert MB to bytes
 
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,6 +64,16 @@ app = FastAPI(lifespan=lifespan)
 # Static serving of built artifacts (CDN-ready later)
 app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",          # local dev
+        FRONTEND_ORIGIN,  # add this once frontend is deployed
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -----------------------------
 # WORKER FUNCTION (PURE)
@@ -161,33 +173,31 @@ async def generate(
     """
     Accepts an uploaded image file, validates it, and starts a processing job.
     """
-    # --- 1. Read content and check size ---
-    contents = await file.read()
-    if len(contents) > MAX_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Max {upload_mbs} MB."
-        )
-
-    # --- 2. Generate unique job ID ---
+    # --- Read content and check size ---
     job_id = str(uuid.uuid4())
+    input_file = INPUT_DIR / f"{job_id}.upload"
 
-    # --- 3. Save uploaded file safely ---
-    input_file = INPUT_DIR / f"{job_id}_{file.filename}"
+    size = 0
     with open(input_file, "wb") as f:
-        f.write(contents)
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks to avoid memory issues
+            size += len(chunk)
+            if size > MAX_UPLOAD_SIZE:
+                f.close()
+                input_file.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="File too large")
+            f.write(chunk)
         f.flush()
-        os.fsync(f.fileno())  # ensure fully written
+        os.fsync(f.fileno())  # ensure fully written before processing
 
-    # --- 4. Validate the image ---
+    # --- Validate the image ---
     try:
         with Image.open(input_file) as img:
-            img.verify()  # check that file is an actual image
+            img.load()  # fully decode to ensure valid image
     except UnidentifiedImageError:
         input_file.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # --- 5. Prepare job settings ---
+    # --- Prepare job settings ---
     settings = {
         "mosaic_block_width": mosaic_block_width,
         "mosaic_type": mosaic_type,
@@ -195,7 +205,7 @@ async def generate(
         "to_frame": to_frame
     }
 
-    # --- 6. Submit job to ProcessPoolExecutor ---
+    # ---  Submit job to ProcessPoolExecutor ---
     future = app.state.executor.submit(
         run_job,
         job_id,
@@ -205,7 +215,7 @@ async def generate(
         STUDS_PER_BLOCK
     )
 
-    # --- 7. Register job in in-memory registry ---
+    # --- Register job in in-memory registry ---
     app.state.jobs[job_id] = {
         "status": "running",
         "future": future,
@@ -246,12 +256,15 @@ async def download(job_id: str):
 # -----------------------------
 def cleanup_loop(app: FastAPI):
     while True:
-        now = time.time()
+        try:
+            now = time.time()
 
-        for job_id, job in list(app.state.jobs.items()):
-            if job.get("status") in ("complete", "failed"):
-                if now - job.get("finished_at", now) > JOB_TTL_SECONDS:
-                    shutil.rmtree(OUTPUT_DIR / job_id, ignore_errors=True)
-                    app.state.jobs.pop(job_id, None)
+            for job_id, job in list(app.state.jobs.items()):
+                if job.get("status") in ("complete", "failed"):
+                    if now - job.get("finished_at", now) > JOB_TTL_SECONDS:
+                        shutil.rmtree(OUTPUT_DIR / job_id, ignore_errors=True)
+                        app.state.jobs.pop(job_id, None)
+        except Exception:
+            traceback.print_exc()
 
         time.sleep(CLEANUP_INTERVAL)
