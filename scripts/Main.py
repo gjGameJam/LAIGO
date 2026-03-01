@@ -39,6 +39,7 @@ STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024 # convert MB to bytes
 
+#make directories if they don't exist
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
