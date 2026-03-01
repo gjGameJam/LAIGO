@@ -29,9 +29,9 @@ def rgb_list_to_lab(arr_rgb):
 LEGO_PALETTE_RGB = GetPaletteRGBArray()
 PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
 PALETTE_LAB_RESHAPED = PALETTE_LAB.reshape((-1, 1, 3))
-MAX_BLOCK_WIDTH = int(os.getenv("MAX_MOSAIC_BLOCK_WIDTH"))
+MAX_BLOCK_WIDTH = int(os.getenv("MAX_MOSAIC_BLOCK_WIDTH", 40))
 MIN_BLOCK_WIDTH = 1
-STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK"))
+STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 
 
 #gets the index of the closest color to the pixel from the palette by visual distance
