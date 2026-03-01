@@ -69,6 +69,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://laigo-frontend.onrender.com",
+        "http://localhost:5173", #TODO: remove this when not needed for local dev
     ],
     allow_credentials=True,
     allow_methods=["*"],
