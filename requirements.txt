@@ -6,7 +6,7 @@ pillow~=11.0
 scikit-image~=0.24
 
 opencv-python-headless~=4.11.0
-mediapipe~=0.10.32
+mediapipe==0.10.14
 
 reportlab~=4.4
 python-multipart~=0.0.20
