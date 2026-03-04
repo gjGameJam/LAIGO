@@ -21,7 +21,8 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir):
     assert isinstance(bg_rgba, Image.Image)
     assert bg_rgba.mode == "RGBA"
     #set up by clearing previous instructions and starting from step 1
-    empty_instructions_folder()
+    if output_dir is None: #only clear local folder if output_dir not provided
+        empty_instructions_folder()
     step = 1
     bg_w, bg_h = bg_rgba.size
     blockWidth = (int)(bg_w / 16)

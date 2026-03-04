@@ -23,7 +23,7 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
     """
     log_info("clearing previous order lists...")
-    if output_dir is None: #only clear local folder if output_dir not provided (to avoid deleting files in shared output when running with multiple workers)
+    if output_dir is None: #only clear local folder if output_dir not provided
         empty_order_list_folder()
     log_info("creating order list...")
     # -----------------
