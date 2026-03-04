@@ -134,7 +134,6 @@ def run_job(job_id: str,
 
         return {
             "status": "complete",
-            "artifact_path": archive_path,
             "finished_at": time.time()
         }
 
@@ -240,13 +239,13 @@ async def get_job(job_id: str):
 
 @app.get("/jobs/{job_id}/download")
 async def download(job_id: str):
-    job = app.state.jobs.get(job_id)
+    artifact = OUTPUT_DIR / job_id / "artifact.zip"
 
-    if not job or job["status"] != "complete":
-        raise HTTPException(status_code=404, detail="Artifact not ready")
+    if not artifact.exists():
+        raise HTTPException(status_code=404, detail="Artifact not found")
 
     return FileResponse(
-        job["artifact_path"],
+        artifact,
         filename=f"mosaic_{job_id}.zip",
         media_type="application/zip"
     )
