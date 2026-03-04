@@ -23,7 +23,8 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
     """
     log_info("clearing previous order lists...")
-    empty_order_list_folder()
+    if output_dir is None: #only clear local folder if output_dir not provided (to avoid deleting files in shared output when running with multiple workers)
+        empty_order_list_folder()
     log_info("creating order list...")
     # -----------------
     # Layer 0: Base Layer (to place all plates on)
