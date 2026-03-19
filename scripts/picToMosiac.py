@@ -226,15 +226,17 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             fg_alpha_pil = make_difference_transparent(img, fg_pil)
             fg_rgba = fg_alpha_pil.convert("RGBA")
             fg_a = fg_rgba.getchannel("A").point(lambda p:255 if p>0 else 0)
-
+    
+            report(15)
             fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=5)
             bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
 
+            report(20)
             log_debug("converting processed image to lego mosiac...")
             fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, block_width, alpha_mask=fg_a)
             bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
 
-            report(15)
+            report(25)
             fg_mask_resized = fg_a.resize(bg_idx.shape[::-1], Image.NEAREST)
             fg_mask_np = np.array(fg_mask_resized)
             color_quant = max(1,int((background_color_percent/100)*len(np.unique(bg_idx[fg_mask_np==255]))))
@@ -249,11 +251,11 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
             composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
 
-            report(20)
+            report(30)
             log_debug("generating order list...")
             GenerateOrderList(fg_out_rgba, bg_rgba, to_frame, output_dir)
 
-            report(25)
+            report(35)
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir, progress_callback=report)
             log_debug("finished mosiac generation!")
 
@@ -268,10 +270,10 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             out_img_rgba = out_img.convert("RGBA")
 
             log_debug("generating order list...")
-            report(20)
+            report(30)
             GenerateOrderList(None, out_img_rgba, to_frame, output_dir)
 
-            report(25)
+            report(35)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir, progress_callback=report)
             log_debug("finished mosiac generation!")
 
