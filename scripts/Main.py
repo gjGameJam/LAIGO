@@ -38,9 +38,8 @@ CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", mp.cpu_count()))
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
-MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024 # convert MB to bytes
+MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
 
-#make directories if they don't exist
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -49,8 +48,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # -----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    manager = mp.Manager()
     app.state.executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
     app.state.jobs = {}
+    app.state.progress = manager.dict()  # shared across processes
 
     cleanup_thread = threading.Thread(target=cleanup_loop, args=(app,), daemon=True)
     cleanup_thread.start()
@@ -58,18 +59,18 @@ async def lifespan(app: FastAPI):
     yield
 
     app.state.executor.shutdown()
+    manager.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)
 
-# Static serving of built artifacts (CDN-ready later)
 app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://laigo-frontend.onrender.com",
-        "http://localhost:5173", #TODO: remove this when not needed for local dev
+        "http://localhost:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -83,7 +84,8 @@ def run_job(job_id: str,
             image_path: str,
             settings: dict,
             output_root: str,
-            studs_per_block: int) -> dict:
+            studs_per_block: int,
+            progress: object) -> dict:
     """
     This function must be PURE.
     No globals. Everything passed explicitly.
@@ -109,6 +111,7 @@ def run_job(job_id: str,
             to_frame,
             output_dir=workspace,
             job_id=job_id,
+            progress_callback=lambda pct: progress.__setitem__(job_id, pct),
         ) or workspace
 
         manifest = {
@@ -126,11 +129,12 @@ def run_job(job_id: str,
 
         shutil.rmtree(workspace, ignore_errors=True)
 
-        # Remove uploaded source image (no longer needed)
         try:
             Path(image_path).unlink(missing_ok=True)
         except Exception:
             pass
+
+        progress[job_id] = 100
 
         return {
             "status": "complete",
@@ -140,7 +144,7 @@ def run_job(job_id: str,
     except Exception as e:
         shutil.rmtree(job_root, ignore_errors=True)
         try:
-            Path(image_path).unlink(missing_ok=True) # Remove uploaded source image (no longer needed) even if job failed
+            Path(image_path).unlink(missing_ok=True)
         except Exception:
             pass
         return {
@@ -170,16 +174,12 @@ async def generate(
     background_color_percent: float = Form(100),
     to_frame: bool = Form(True),
 ):
-    """
-    Accepts an uploaded image file, validates it, and starts a processing job.
-    """
-    # --- Read content and check size ---
     job_id = str(uuid.uuid4())
     input_file = INPUT_DIR / f"{job_id}.upload"
 
     size = 0
     with open(input_file, "wb") as f:
-        while chunk := await file.read(1024 * 1024):  # 1MB chunks to avoid memory issues
+        while chunk := await file.read(1024 * 1024):
             size += len(chunk)
             if size > MAX_UPLOAD_SIZE:
                 f.close()
@@ -187,17 +187,15 @@ async def generate(
                 raise HTTPException(status_code=413, detail="File too large")
             f.write(chunk)
         f.flush()
-        os.fsync(f.fileno())  # ensure fully written before processing
+        os.fsync(f.fileno())
 
-    # --- Validate the image ---
     try:
         with Image.open(input_file) as img:
-            img.load()  # fully decode to ensure valid image
+            img.load()
     except UnidentifiedImageError:
         input_file.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # --- Prepare job settings ---
     settings = {
         "mosaic_block_width": mosaic_block_width,
         "mosaic_type": mosaic_type,
@@ -205,17 +203,19 @@ async def generate(
         "to_frame": to_frame
     }
 
-    # ---  Submit job to ProcessPoolExecutor ---
+    # Initialise progress to 0 before submitting so the first poll has a value
+    app.state.progress[job_id] = 0
+
     future = app.state.executor.submit(
         run_job,
         job_id,
         str(input_file),
         settings,
         str(OUTPUT_DIR),
-        STUDS_PER_BLOCK
+        STUDS_PER_BLOCK,
+        app.state.progress,   # shared Manager dict
     )
 
-    # --- Register job in in-memory registry ---
     app.state.jobs[job_id] = {
         "status": "running",
         "future": future,
@@ -234,7 +234,10 @@ async def get_job(job_id: str):
     if job["future"].done() and job["status"] == "running":
         job.update(job["future"].result())
 
-    return {k: v for k, v in job.items() if k != "future"}
+    return {
+        **{k: v for k, v in job.items() if k != "future"},
+        "progress": app.state.progress.get(job_id, 0),
+    }
 
 
 @app.get("/jobs/{job_id}/download")
@@ -258,12 +261,12 @@ def cleanup_loop(app: FastAPI):
     while True:
         try:
             now = time.time()
-
             for job_id, job in list(app.state.jobs.items()):
                 if job.get("status") in ("complete", "failed"):
                     if now - job.get("finished_at", now) > JOB_TTL_SECONDS:
                         shutil.rmtree(OUTPUT_DIR / job_id, ignore_errors=True)
                         app.state.jobs.pop(job_id, None)
+                        app.state.progress.pop(job_id, None)  # clean up progress entry too
         except Exception:
             traceback.print_exc()
 

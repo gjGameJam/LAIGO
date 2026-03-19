@@ -133,7 +133,6 @@ def remove_background(pil_img):
 
 #takes and returns PIL.Image.Image with delta lightness change
 def adjust_lightness_lab(img_pil, delta_L):
-    #log_debug(f"adjusting lightness by {delta_L} in Lab space...")
     rgb = np.asarray(img_pil).astype(np.float32)/255.0
     lab = color.rgb2lab(rgb)
     lab[...,0]=np.clip(lab[...,0]+delta_L,0,100)
@@ -208,72 +207,78 @@ def open_image(image_path):
     return img
 
 
-def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, to_frame, output_dir=None, job_id=None):
+def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, to_frame, output_dir=None, job_id=None, progress_callback=None):
+    def report(pct):
+        if progress_callback:
+            progress_callback(pct)
+
     try:
-        img = open_image(img_path) #gets RGB of image
+        report(1)
+        img = open_image(img_path)
         image_folder = Path(__file__).resolve().parent.parent / "images"
-        #log_info("starting picture to lego mosaic conversion...")
-        if mosiac_type == MosaicType.THREE_D: #handle 3d mosiac case with foreground and background layers
+
+        if mosiac_type == MosaicType.THREE_D:
             log_debug("starting 3d mosaic process by differentiating between fg and bg...")
-            fg_pil, bg_pil, fg_mask = remove_background(img) #separates foreground from background
-            fg_alpha_pil = make_difference_transparent(img, fg_pil) #makes the background transparent on the foreground
+            report(5)
+            fg_pil, bg_pil, fg_mask = remove_background(img)
+
+            report(10)
+            fg_alpha_pil = make_difference_transparent(img, fg_pil)
             fg_rgba = fg_alpha_pil.convert("RGBA")
-            fg_a = fg_rgba.getchannel("A").point(lambda p:255 if p>0 else 0) #get alpha from foreground to use later
-            #brighten the foreground/background
+            fg_a = fg_rgba.getchannel("A").point(lambda p:255 if p>0 else 0)
+
             fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=5)
             bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
-       
+
             log_debug("converting processed image to lego mosiac...")
             fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, block_width, alpha_mask=fg_a)
             bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
-       
+
+            report(15)
             fg_mask_resized = fg_a.resize(bg_idx.shape[::-1], Image.NEAREST)
             fg_mask_np = np.array(fg_mask_resized)
             color_quant = max(1,int((background_color_percent/100)*len(np.unique(bg_idx[fg_mask_np==255]))))
             bg_idx_simplified = simplify_background_lego(bg_idx, PALETTE_LAB, k=color_quant, alpha_mask=(255-fg_mask_np))
             bg_rgb_simplified = LEGO_PALETTE_RGB[bg_idx_simplified]
             bg_out_img = Image.fromarray(bg_rgb_simplified.astype(np.uint8))
-       
+
             fg_alpha_resized = fg_a.resize((block_width, fg_idx.shape[0]), Image.NEAREST)
             fg_out_rgba = fg_out_img.convert("RGBA").resize((block_width, fg_idx.shape[0]), Image.NEAREST)
             fg_out_rgba.putalpha(fg_alpha_resized)
             bg_rgba = bg_out_img.convert("RGBA").resize(fg_out_rgba.size, Image.NEAREST)
-       
-            #log_debug(f"size of foreground mosaic: {fg_out_rgba.size}")
-            #log_debug(f"size of background mosaic: {bg_rgba.size}")
-            #fg_out_rgba.show()
-            #bg_rgba.show()
 
-            #combine the background and foreground for the final 3d mosiac
             composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
-            #composite.show()
-       
-            # img_output_path = image_folder / f"{img_path.stem}_lego.png"
-            # composite.save(img_output_path)
-            #log_info(f"Saved mosaic to {img_output_path}")
 
+            report(20)
             log_debug("generating order list...")
             GenerateOrderList(fg_out_rgba, bg_rgba, to_frame, output_dir)
-            GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir)
+
+            report(25)
+            GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir, progress_callback=report)
+            report(90)
             log_debug("finished mosiac generation!")
 
-        else: #handle 2d mosiac case
+        else:
             log_debug("starting 2d mosaic process by adjusting lightness...")
-            #adjust lightness then convert to lego mosiac (no need to handle alpha stuff for one layer)
+            report(5)
             filtered_image = adjust_lightness_lab(img, delta_L=5)
+
+            report(15)
             out_img, img_idx = image_to_lego_mosaic(filtered_image, block_width)
-            #show and save the image
-            #out_img.show()
-            # img_output_path = image_folder / f"{img_path.stem}_lego.png"
-            # out_img.save(img_output_path)
+
             out_img_rgba = out_img.convert("RGBA")
-            #generate order list and instructions to create mosaic
+
             log_debug("generating order list...")
-            #GenerateOrderList and GenerateInstructions handle 2d mosaics (if second param is None) and/or no frame (if last param is False)
+            report(20)
             GenerateOrderList(None, out_img_rgba, to_frame, output_dir)
-            GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir)
+
+            report(25)
+            GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir, progress_callback=report)
+            report(90)
             log_debug("finished mosiac generation!")
-   
+
+        report(95)
+
     except Exception as e:
         give_exception_message(e)
 
@@ -281,7 +286,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 if __name__ == "__main__":
     try:
         log_info("handling input...")
-        mosiac_type, block_width, background_color_percent, to_frame = handle_input(sys.argv) #handle console args
+        mosiac_type, block_width, background_color_percent, to_frame = handle_input(sys.argv)
         image_folder = Path(__file__).resolve().parent.parent / "images"
         image_name = "stella1.jpg"
         image_path = image_folder / image_name
