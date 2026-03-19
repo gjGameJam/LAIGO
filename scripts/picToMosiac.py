@@ -215,7 +215,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
     try:
         report(1)
         img = open_image(img_path)
-        image_folder = Path(__file__).resolve().parent.parent / "images"
+        #image_folder = Path(__file__).resolve().parent.parent / "images"
 
         if mosiac_type == MosaicType.THREE_D:
             log_debug("starting 3d mosaic process by differentiating between fg and bg...")
@@ -255,7 +255,6 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
             report(25)
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir, progress_callback=report)
-            report(90)
             log_debug("finished mosiac generation!")
 
         else:
@@ -274,10 +273,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
             report(25)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir, progress_callback=report)
-            report(90)
             log_debug("finished mosiac generation!")
 
-        report(95)
 
     except Exception as e:
         give_exception_message(e)

@@ -18,7 +18,7 @@ def count_colors(img_rgba):
 
 #function to generate instructions for a RGBA image mosiac (pixel-perfect)
 def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, progress_callback=None):
-    #progress is 25 when entering this function, we will get to 85 by the end of this function
+    #progress is 25 when entering this function, we will get to 99 by the end of this function
     def report(pct):
         if progress_callback:
             progress_callback(pct)
@@ -69,7 +69,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
 
     report(30)
     total_blocks = blockWidth * blockHeight
-    factor = 55 / total_blocks  # 55 progress points allocated for block processing
+    factor = 69 / total_blocks  # 69 progress points allocated for block processing
     block_count = 0
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
@@ -115,7 +115,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
             block_count += 1
-            report(45 + (int)(block_count * factor))
+            report(30 + (int)(block_count * factor))
     
     #add frame instruction steps
     step = draw_grid_setup_instruction(step, output_dir)
