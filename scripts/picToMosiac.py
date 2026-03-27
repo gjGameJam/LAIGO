@@ -229,14 +229,13 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
     
             report(15)
             fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=5)
+            report(20)
             bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
 
-            report(20)
+            report(25)
             log_debug("converting processed image to lego mosiac...")
             fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, block_width, alpha_mask=fg_a)
             bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
-
-            report(25)
             fg_mask_resized = fg_a.resize(bg_idx.shape[::-1], Image.NEAREST)
             fg_mask_np = np.array(fg_mask_resized)
             color_quant = max(1,int((background_color_percent/100)*len(np.unique(bg_idx[fg_mask_np==255]))))

@@ -153,7 +153,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
 
     report(40)
     total_blocks = blockWidth * blockHeight
-    factor = 59 / total_blocks  # 59 progress points allocated for block processing
+    factor = 55 / total_blocks  # 55 progress points allocated for block processing
     block_count = 0
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
@@ -218,6 +218,8 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
         raise RuntimeError("No instruction PNGs found — aborting PDF generation.")
 
     images_to_pdf(str(instructions_dir), str(pdf_path))
+
+    report(99)
 
     # verify PDF was actually created and non-empty
     if not pdf_path.exists() or pdf_path.stat().st_size == 0:
