@@ -208,8 +208,24 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
     # Save PDF
     instructions_dir = Path(output_dir) / "Instructions" if output_dir else Path(GetOutputPathDir()) / "Instructions"
     pdf_path = instructions_dir / "instructions.pdf"
+
+    png_files = sorted(
+        instructions_dir.glob("*.png"),
+        key=lambda p: int(p.stem.split("_")[-1]) if "_" in p.stem else 0
+    )
+
+    if not png_files:
+        raise RuntimeError("No instruction PNGs found — aborting PDF generation.")
+
     images_to_pdf(str(instructions_dir), str(pdf_path))
 
+    # verify PDF was actually created and non-empty
+    if not pdf_path.exists() or pdf_path.stat().st_size == 0:
+        raise RuntimeError("PDF generation failed — not deleting source images.")
+
+    # delete after success
+    for png_file in png_files:
+        png_file.unlink()
 
 #helper test function
 def sample_column(img_np, blockW, blockH, col):
