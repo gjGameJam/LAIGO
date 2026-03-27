@@ -2,19 +2,92 @@ from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_c
 from PIL import Image, ImageDraw
 import numpy as np
 import shutil
+import re
 from pathlib import Path
+from typing import Iterator, List
 from .Util import GetOutputPathDir, log_info, log_debug, log_error
+
 
 def empty_instructions_folder():
     folder = Path(f"{GetOutputPathDir()}/Instructions")
     shutil.rmtree(folder)
     folder.mkdir(parents=True, exist_ok=True)
 
+
 def count_colors(img_rgba):
     arr = np.asarray(img_rgba, dtype=np.uint8)
     assert arr.shape[2] == 4  # RGBA
     rgb = arr[:, :, :3].reshape(-1, 3)
     return len(np.unique(rgb, axis=0))
+
+
+# -------------------------------------------------------
+# PDF helpers (from Document 2)
+# -------------------------------------------------------
+
+def _extract_step_num(path: Path) -> int:
+    match = re.search(r'(\d+)', path.stem)
+    if not match:
+        raise ValueError(f"Invalid filename (no step number): {path.name}")
+    return int(match.group(1).zfill(4))
+
+
+def _get_ordered_pngs(input_dir: Path) -> List[Path]:
+    files = [f for f in input_dir.iterdir() if f.suffix.lower() == ".png"]
+    if not files:
+        raise ValueError(f"No PNG files found in: {input_dir}")
+    files.sort(key=_extract_step_num)
+    return files
+
+
+def _validate_sequence(files: List[Path]) -> None:
+    steps = [_extract_step_num(f) for f in files]
+    expected = list(range(min(steps), max(steps) + 1))
+    if steps != expected:
+        raise ValueError("Missing or duplicate step numbers detected")
+
+
+def _image_iterator(files: List[Path]) -> Iterator[Image.Image]:
+    for path in files:
+        img = Image.open(path)
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        yield img
+
+
+def images_to_pdf(input_folder: str, output_pdf: str) -> None:
+    input_dir = Path(input_folder)
+    output_path = Path(output_pdf)
+    if not input_dir.is_dir():
+        raise ValueError(f"Input folder does not exist: {input_dir}")
+
+    files = _get_ordered_pngs(input_dir)
+    _validate_sequence(files)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Convert all to RGB for PDF compatibility
+    images = [img.convert("RGB") for img in _image_iterator(files)]
+    if not images:
+        raise ValueError("No valid images to write")
+
+    first, *rest = images
+    try:
+        first.save(
+            output_path,
+            save_all=True,
+            append_images=rest,
+            resolution=100.0,
+        )
+    finally:
+        for img in images:
+            img.close()
+
+    log_info(f"Created PDF with {len(images)} pages at: {output_path}")
+
+
+# -------------------------------------------------------
+# Main instruction generator — Document 3 exactly, + PDF call
+# -------------------------------------------------------
 
 #function to generate instructions for a RGBA image mosiac (pixel-perfect)
 def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, progress_callback=None):
@@ -75,13 +148,8 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
     for blockW in range(0, blockWidth):
         for blockH in range(0, blockHeight):
             #layer 0: baseplate
-            # grid of interlocking 16x16s to ensure solid foundation
             step = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step, output_dir)
             #layer 1: background
-            #here we loop over each row and column to get the color (should be contained in order list)
-            #only place maximum of 16 pieces per instruction step to avoid overwhelming user
-            #16x16x4 blocks
-            # Slice out a 16x16 block
             y0, y1 = blockH*16, (blockH+1)*16
             x0, x1 = blockW*16, (blockW+1)*16
             bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
@@ -96,13 +164,10 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                 draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
                 step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
-            
             #layer 2: foreground
-            #same thing as background but ignore alpha channel to allow background to show through
             if not fg_rgba is None:
                 fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
                 for col in range(0, len(fg_block[0])):
-                    #img, draw = get_img_and_draw(step, False) #false because we want to pick off where we left off
                     to_reuse = img.copy()
                     draw2 = ImageDraw.Draw(to_reuse)
                     # take the column and convert to a list of 3-element tuples (R,G,B,A)
@@ -116,7 +181,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
 
             block_count += 1
             report(40 + (int)(block_count * factor))
-    
+
     #add frame instruction steps
     step = draw_grid_setup_instruction(step, output_dir)
     if want_frame:
@@ -126,6 +191,11 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
     else:
         #show final view without frame
         step = draw_final_view(step, composite, False, output_dir)
+
+    # Save PDF
+    instructions_dir = Path(output_dir) / "Instructions" if output_dir else Path(GetOutputPathDir()) / "Instructions"
+    pdf_path = instructions_dir / "instructions.pdf"
+    images_to_pdf(str(instructions_dir), str(pdf_path))
 
 
 #helper test function
@@ -137,11 +207,6 @@ def sample_column(img_np, blockW, blockH, col):
 
 
 def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step, output_dir=None):
-    
-    #case 0: red and green connectors 
-    #case 1: red connectors no green (right most column)
-    #case 2: green connectors no red (bottom row)
-    #case 3: no connectors (bottom right corner only)
     case = 0
     if rowMax - 1 == blockRow and colMax - 1 == blockCol:
         case = 3
@@ -149,19 +214,8 @@ def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step, outp
         case = 1
     elif rowMax - 1 == blockRow:
         case = 2
-
-    #log_debug(f"creating baseplate instructions for width {blockCol} and height {blockRow} for max width {colMax} and max height {rowMax} case {case}")
-    #first step is to get 16x16 baseplate out
-    #add green connectors on right side and red connectors along bottom side
-    #add green plates on right side and red plates along bottom side
-    #add 2x2 plates on middle and corners for extra stability
-    #add nail hooks on top edges (or direct middle) for hanging
-    #add nail hook connectors to nail hooks to allow connection to frame
-    #3 cases: 
-    #case 1: in middle of mosiac(all connections)
-    #case 2: top/left side of mosiac (no top/left connections)
-    #case 3: bottom/right mosiac (no bottom/right connections)
     return generate_baseplate_setup(step, case, output_dir)
+
 
 def block_column_to_rgb_tuples(block, col_idx):
     return [tuple(block[y, col_idx, :3]) for y in range(block.shape[0])]
