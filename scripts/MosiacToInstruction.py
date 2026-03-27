@@ -21,8 +21,20 @@ def count_colors(img_rgba):
     return len(np.unique(rgb, axis=0))
 
 
+def erase_step_number(img):
+    """White out the region where save_img_and_increment_step burns the step number.
+    save_img_and_increment_step draws at (width/2 + x_offset, height - 50) with font size 32.
+    We cover a generous rectangle around that area to ensure the old number is fully cleared."""
+    draw = ImageDraw.Draw(img)
+    width, height = img.size
+    draw.rectangle(
+        [(width // 2 - 80, height - 70), (width // 2 + 80, height - 20)],
+        fill=(255, 255, 255, 255)
+    )
+
+
 # -------------------------------------------------------
-# PDF helpers (from Document 2)
+# PDF helpers
 # -------------------------------------------------------
 
 def _extract_step_num(path: Path) -> int:
@@ -86,7 +98,7 @@ def images_to_pdf(input_folder: str, output_pdf: str) -> None:
 
 
 # -------------------------------------------------------
-# Main instruction generator — Document 3 exactly, + PDF call
+# Main instruction generator
 # -------------------------------------------------------
 
 #function to generate instructions for a RGBA image mosiac (pixel-perfect)
@@ -115,7 +127,6 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
         fg = fg.astype(np.float32) / 255.0
     bg = bg.astype(np.float32) / 255.0
 
-
     # Extract RGB only, ignore alpha
     if not fg_rgba is None:
         fg_colors = set(map(tuple, fg[:, :, :3].reshape(-1, 3)))
@@ -142,7 +153,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
 
     report(40)
     total_blocks = blockWidth * blockHeight
-    factor = 59 / total_blocks  # 69 progress points allocated for block processing
+    factor = 59 / total_blocks  # 59 progress points allocated for block processing
     block_count = 0
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
@@ -160,8 +171,9 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                 draw2 = ImageDraw.Draw(to_reuse)
                 # take the column and convert to a list of 3-element tuples (R,G,B)
                 column_rgb = [tuple(bg_block[15 - y, col]) for y in range(16)]
-                draw_plate_column(draw, col, 0, column_rgb, False) #zero height with highlight
+                draw_plate_column(draw, col, 0, column_rgb, False) #zero height no highlight
                 draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
+                erase_step_number(to_reuse)  # clear burned-in number from previous step
                 step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
             #layer 2: foreground
@@ -175,8 +187,9 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                     if all(pixel[3] == 0 for pixel in column_rgba):
                         # Entire column is transparent, skip
                         continue
-                    draw_plate_column(draw, col, 1, column_rgba, False) #one height
-                    draw_plate_column(draw2, col, 1, column_rgba, True) #one height
+                    draw_plate_column(draw, col, 1, column_rgba, False) #one height no highlight
+                    draw_plate_column(draw2, col, 1, column_rgba, True) #one height with highlight
+                    erase_step_number(to_reuse)  # clear burned-in number from previous step
                     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
             block_count += 1
