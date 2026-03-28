@@ -133,10 +133,35 @@ def remove_background(pil_img):
 
 #takes and returns PIL.Image.Image with delta lightness change
 def adjust_lightness_lab(img_pil, delta_L):
-    rgb = np.asarray(img_pil).astype(np.float32)/255.0
-    lab = color.rgb2lab(rgb)
-    lab[...,0]=np.clip(lab[...,0]+delta_L,0,100)
-    rgb_out = np.clip(color.lab2rgb(lab)*255,0,255).astype(np.uint8)
+    if delta_L == 0:
+        return img_pil
+
+    arr = np.asarray(img_pil)
+
+    # Handle RGBA by separating alpha
+    if arr.shape[-1] == 4:
+        rgb = arr[..., :3]
+        alpha = arr[..., 3:]
+    else:
+        rgb = arr
+        alpha = None
+
+    rgb = rgb.astype(np.float32) / 255.0 # Normalize once
+    lab = color.rgb2lab(rgb) # Convert to LAB
+    # Adjust lightness in-place
+    np.add(lab[..., 0], delta_L, out=lab[..., 0])
+    np.clip(lab[..., 0], 0, 100, out=lab[..., 0])
+
+    # Back to RGB
+    rgb_out = color.lab2rgb(lab)
+    np.clip(rgb_out, 0, 1, out=rgb_out)
+
+    rgb_out = (rgb_out * 255).astype(np.uint8)
+
+    # Reattach alpha if needed
+    if alpha is not None:
+        rgb_out = np.concatenate([rgb_out, alpha], axis=-1)
+
     return Image.fromarray(rgb_out)
 
 
@@ -145,9 +170,8 @@ def make_difference_transparent(orig, new):
     orig = np.array(orig.convert("RGBA"))
     fg = np.array(new.convert("RGBA"))
     diff = np.any(fg[...,:3] != orig[...,:3], axis=-1)
-    result = fg.copy()
-    result[diff,3] = 0
-    return Image.fromarray(result)
+    fg[diff, 3] = 0   # modify fg in place
+    return Image.fromarray(fg)
 
 
 #helper enum for input handling
@@ -229,10 +253,10 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
     
             report(15)
             fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=5)
-            report(20)
+            report(25)
             bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
 
-            report(25)
+            report(30)
             log_debug("converting processed image to lego mosiac...")
             fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, block_width, alpha_mask=fg_a)
             bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
@@ -250,11 +274,10 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
             composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
 
-            report(30)
+            report(35)
             log_debug("generating order list...")
             GenerateOrderList(fg_out_rgba, bg_rgba, to_frame, output_dir)
 
-            report(35)
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir, progress_callback=report)
             log_debug("finished mosiac generation!")
 
