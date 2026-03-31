@@ -1,35 +1,33 @@
-# run with: 
-# uvicorn main:app --host 0.0.0.0 --port 8000
+# run with: uvicorn main:app --host 0.0.0.0 --port 8000
 
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)  # REQUIRED for Windows + Render
+mp.set_start_method("spawn", force=True)
 
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
 import uuid
 import os
 import shutil
 import time
 import threading
 import json
-from pathlib import Path
 import traceback
 from PIL import Image, UnidentifiedImageError
 from .picToMosiac import pic_to_mosaic, MosaicType
-from fastapi.middleware.cors import CORSMiddleware
 from .Util import load_project_env
+import gc
 
-# Only load .env when running locally
+# -----------------------------
+# ENV SETUP
+# -----------------------------
 if os.getenv("RENDER") is None:
     load_project_env()
 
-# -----------------------------
-# ENV CONFIG (API PROCESS ONLY)
-# -----------------------------
 INPUT_DIR = Path(os.getenv("INPUT_DIR", "./inputs")).resolve()
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
 
@@ -51,7 +49,7 @@ async def lifespan(app: FastAPI):
     manager = mp.Manager()
     app.state.executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
     app.state.jobs = {}
-    app.state.progress = manager.dict()  # shared across processes
+    app.state.progress = manager.dict()
 
     cleanup_thread = threading.Thread(target=cleanup_loop, args=(app,), daemon=True)
     cleanup_thread.start()
@@ -63,7 +61,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
 app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 
 app.add_middleware(
@@ -78,7 +75,7 @@ app.add_middleware(
 )
 
 # -----------------------------
-# WORKER FUNCTION (PURE)
+# WORKER FUNCTION
 # -----------------------------
 def run_job(job_id: str,
             image_path: str,
@@ -86,16 +83,20 @@ def run_job(job_id: str,
             output_root: str,
             studs_per_block: int,
             progress: object) -> dict:
-    """
-    This function must be PURE.
-    No globals. Everything passed explicitly.
-    """
 
     OUTPUT_DIR = Path(output_root)
-
     job_root = OUTPUT_DIR / job_id
     workspace = job_root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+
+    last_update_time = 0
+
+    def throttled_progress(pct):
+        nonlocal last_update_time
+        now = time.time()
+        if now - last_update_time >= 2:
+            progress[job_id] = pct
+            last_update_time = now
 
     try:
         width = int(settings["mosaic_block_width"]) * studs_per_block
@@ -111,9 +112,10 @@ def run_job(job_id: str,
             to_frame,
             output_dir=workspace,
             job_id=job_id,
-            progress_callback=lambda pct: progress.__setitem__(job_id, pct),
+            progress_callback=throttled_progress,
         ) or workspace
 
+        # Write success manifest
         manifest = {
             "schema": "laigo.manifest.v1",
             "job_id": job_id,
@@ -125,8 +127,7 @@ def run_job(job_id: str,
             json.dump(manifest, f, indent=2)
 
         archive_base = job_root / "artifact"
-        archive_path = shutil.make_archive(str(archive_base), "zip", result_dir)
-
+        shutil.make_archive(str(archive_base), "zip", result_dir)
         shutil.rmtree(workspace, ignore_errors=True)
 
         try:
@@ -136,24 +137,40 @@ def run_job(job_id: str,
 
         progress[job_id] = 100
 
+        # Explicit memory cleanup
+        del result_dir
+        gc.collect()
+
         return {
             "status": "complete",
             "finished_at": time.time()
         }
 
     except Exception as e:
-        shutil.rmtree(job_root, ignore_errors=True)
-        try:
-            Path(image_path).unlink(missing_ok=True)
-        except Exception:
-            pass
-        return {
+        shutil.rmtree(workspace, ignore_errors=True)
+        error_info = {
             "status": "failed",
+            "progress": 0,
             "error": str(e),
             "traceback": traceback.format_exc(),
             "finished_at": time.time()
         }
 
+        # Write error manifest
+        error_path = job_root / "manifest_failed.json"
+        error_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(error_path, "w", encoding="utf-8") as f:
+            json.dump(error_info, f, indent=2)
+
+        try:
+            Path(image_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        progress[job_id] = -1
+        gc.collect()
+
+        return error_info
 
 # -----------------------------
 # ROUTES
@@ -184,14 +201,17 @@ async def generate(
             if size > MAX_UPLOAD_SIZE:
                 f.close()
                 input_file.unlink(missing_ok=True)
+                await file.close()
                 raise HTTPException(status_code=413, detail="File too large")
             f.write(chunk)
         f.flush()
         os.fsync(f.fileno())
 
+    await file.close()  # explicit descriptor cleanup
+
     try:
         with Image.open(input_file) as img:
-            img.load()
+            img.verify()  # no full decode
     except UnidentifiedImageError:
         input_file.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Invalid image file")
@@ -203,7 +223,6 @@ async def generate(
         "to_frame": to_frame
     }
 
-    # Initialise progress to 0 before submitting so the first poll has a value
     app.state.progress[job_id] = 0
 
     future = app.state.executor.submit(
@@ -213,7 +232,7 @@ async def generate(
         settings,
         str(OUTPUT_DIR),
         STUDS_PER_BLOCK,
-        app.state.progress,   # shared Manager dict
+        app.state.progress,
     )
 
     app.state.jobs[job_id] = {
@@ -228,16 +247,25 @@ async def generate(
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
     job = app.state.jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    progress_val = app.state.progress.get(job_id, 0)
 
-    if job["future"].done() and job["status"] == "running":
-        job.update(job["future"].result())
+    if job and job.get("status") == "running" and job["future"].done():
+        result = job["future"].result()
+        job.update(result)
+        del job["future"]
+        progress_val = app.state.progress.get(job_id, progress_val)
 
-    return {
-        **{k: v for k, v in job.items() if k != "future"},
-        "progress": app.state.progress.get(job_id, 0),
-    }
+    if job:
+        return {**{k: v for k, v in job.items() if k != "future"}, "progress": progress_val}
+
+    # fallback to error manifest on disk
+    error_manifest = OUTPUT_DIR / job_id / "manifest_failed.json"
+    if error_manifest.exists():
+        with open(error_manifest, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+
+    raise HTTPException(status_code=404, detail="Job not found")
 
 
 @app.get("/jobs/{job_id}/download")
@@ -253,7 +281,6 @@ async def download(job_id: str):
         media_type="application/zip"
     )
 
-
 # -----------------------------
 # CLEANUP THREAD
 # -----------------------------
@@ -265,8 +292,9 @@ def cleanup_loop(app: FastAPI):
                 if job.get("status") in ("complete", "failed"):
                     if now - job.get("finished_at", now) > JOB_TTL_SECONDS:
                         shutil.rmtree(OUTPUT_DIR / job_id, ignore_errors=True)
+                        job.pop("future", None)
                         app.state.jobs.pop(job_id, None)
-                        app.state.progress.pop(job_id, None)  # clean up progress entry too
+                        app.state.progress.pop(job_id, None)
         except Exception:
             traceback.print_exc()
 
