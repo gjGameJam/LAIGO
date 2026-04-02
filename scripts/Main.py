@@ -1,8 +1,7 @@
-# main.py
-# Run with: uvicorn main:app --host 0.0.0.0 --port 8000
+# run with: uvicorn main:app --host 0.0.0.0 --port 8000
 
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)  # Windows-safe
+mp.set_start_method("spawn", force=True)
 
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
@@ -20,14 +19,13 @@ import json
 import traceback
 import logging
 import sys
-import gc
-from PIL import Image, UnidentifiedImageError
-
+from PIL import Image
 from .picToMosiac import pic_to_mosaic, MosaicType
 from .Util import load_project_env
+import gc
 
 # -----------------------------
-# LOGGING
+# LOGGING SETUP
 # -----------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -45,18 +43,38 @@ if os.getenv("RENDER") is None:
 
 INPUT_DIR = Path(os.getenv("INPUT_DIR", "./inputs")).resolve()
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
+
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 600))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", mp.cpu_count()))
+MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", 1)), 2)
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
 
-for _dir in [INPUT_DIR, OUTPUT_DIR]:
-    _dir.mkdir(parents=True, exist_ok=True)
-    probe = _dir / ".write_probe"
-    probe.write_text("ok")
-    probe.unlink()
+# Fail loudly on startup if directories can't be created or written to
+try:
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    log.critical(f"Failed to create required directories: {e}")
+    raise
+
+for _dir, _name in [(INPUT_DIR, "INPUT_DIR"), (OUTPUT_DIR, "OUTPUT_DIR")]:
+    _probe = _dir / ".write_probe"
+    try:
+        _probe.write_text("ok")
+        _probe.unlink()
+    except Exception as e:
+        log.critical(f"{_name} ({_dir}) is not writable: {e}")
+        raise RuntimeError(f"{_name} is not writable") from e
+
+log.info(f"INPUT_DIR:        {INPUT_DIR}")
+log.info(f"OUTPUT_DIR:       {OUTPUT_DIR}")
+log.info(f"MAX_WORKERS:      {MAX_WORKERS}")
+log.info(f"JOB_TTL_SECONDS:  {JOB_TTL_SECONDS}")
+log.info(f"CLEANUP_INTERVAL: {CLEANUP_INTERVAL}")
+log.info(f"MAX_UPLOAD_MB:    {upload_mbs}")
+log.info(f"STUDS_PER_BLOCK:  {STUDS_PER_BLOCK}")
 
 # -----------------------------
 # FASTAPI LIFECYCLE
@@ -64,39 +82,90 @@ for _dir in [INPUT_DIR, OUTPUT_DIR]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting LAIGO API...")
-    manager = mp.Manager()
-    app.state.executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
-    app.state.jobs = {}
-    app.state.progress = manager.dict()  # Windows-safe shared dict
-    cleanup_thread = threading.Thread(target=cleanup_loop, args=(app,), daemon=True)
-    cleanup_thread.start()
+    try:
+        # max_tasks_per_child=1: worker exits and is respawned after every job,
+        # releasing all memory (numpy, skimage, PIL, cv2, mediapipe, palette globals)
+        # back to the OS. Requires Python 3.12+.
+        # No mp.Manager() needed — progress is tracked via small files on disk
+        # since workers are short-lived and don't need a persistent shared dict.
+        app.state.executor = ProcessPoolExecutor(
+            max_workers=MAX_WORKERS,
+            max_tasks_per_child=1
+        )
+        app.state.jobs = {}
+        # progress stores Path objects to per-job progress files
+        app.state.progress = {}
+        app.state.progress_lock = threading.Lock()
+        log.info(f"ProcessPoolExecutor started with {MAX_WORKERS} worker(s), max_tasks_per_child=1")
+    except Exception as e:
+        log.critical(f"Failed to initialise executor: {e}", exc_info=True)
+        raise
+
+    try:
+        cleanup_thread = threading.Thread(target=cleanup_loop, args=(app,), daemon=True)
+        cleanup_thread.start()
+        log.info("Cleanup thread started")
+    except Exception as e:
+        log.critical(f"Failed to start cleanup thread: {e}", exc_info=True)
+        raise
+
     log.info("LAIGO API ready")
     yield
+
     log.info("Shutting down LAIGO API...")
     try:
-        app.state.executor.shutdown(wait=True)
-        manager.shutdown()
-        log.info("Executor and manager shut down cleanly")
+        app.state.executor.shutdown()
+        log.info("Executor shut down cleanly")
     except Exception as e:
         log.error(f"Error during shutdown: {e}", exc_info=True)
 
+
 app = FastAPI(lifespan=lifespan)
-app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
+
+try:
+    app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
+except Exception as e:
+    log.critical(f"Failed to mount /artifacts static files: {e}", exc_info=True)
+    raise
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://laigo-frontend.onrender.com",
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -----------------------------
-# HELPER FUNCTIONS
+# GLOBAL EXCEPTION HANDLER
+# Catches any unhandled exception in a route so it never fails silently
 # -----------------------------
-def _write_error_manifest(job_root: Path, job_id: str, settings: dict, error: str, tb: str):
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    log.error(
+        f"Unhandled exception on {request.method} {request.url}: "
+        f"{type(exc).__name__}: {exc}",
+        exc_info=True
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"}
+    )
+
+
+# -----------------------------
+# WORKER HELPERS
+# -----------------------------
+def _write_error_manifest(job_root: Path, job_id: str, settings: dict,
+                           error: str, tb: str) -> None:
+    """Write failure details to disk so get_job can serve them after the job
+    is evicted from app.state.jobs. Accepts pre-captured traceback string so
+    this can safely be called outside an except block."""
     try:
-        manifest = {
+        error_info = {
             "status": "failed",
             "progress": 0,
             "job_id": job_id,
@@ -105,50 +174,93 @@ def _write_error_manifest(job_root: Path, job_id: str, settings: dict, error: st
             "finished_at": time.time(),
             "settings": settings,
         }
-        (job_root / "manifest_failed.json").write_text(json.dumps(manifest, indent=2))
-    except Exception as e:
-        print(f"[ERROR] Could not write error manifest for job {job_id}: {e}", file=sys.stderr, flush=True)
+        error_path = job_root / "manifest_failed.json"
+        error_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(error_path, "w", encoding="utf-8") as f:
+            json.dump(error_info, f, indent=2)
+    except Exception as write_err:
+        print(
+            f"[ERROR] Could not write error manifest for job {job_id}: {write_err}",
+            file=sys.stderr, flush=True
+        )
 
-def run_job(job_id: str, image_path: str, settings: dict, output_root: str, studs_per_block: int, progress_dict):
-    """Worker function executed in a separate process."""
-    import gc
-    import shutil
-    import time
-    import traceback
-    from pathlib import Path
-    from PIL import Image
 
-    job_root = Path(output_root) / job_id
+# -----------------------------
+# WORKER FUNCTION
+# -----------------------------
+def run_job(job_id: str,
+            image_path: str,
+            settings: dict,
+            output_root: str,
+            studs_per_block: int,
+            progress_path: str) -> dict:
+    """
+    Runs in a separate spawned process (max_tasks_per_child=1 so it exits
+    after this returns, freeing all memory at the OS level).
+    Progress is written to a small file on disk rather than a Manager dict,
+    since the Manager process has been eliminated.
+    """
+
+    # Worker is a separate spawned process — needs its own logging config
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] worker: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+    )
+    wlog = logging.getLogger(f"laigo.worker.{job_id[:8]}")
+    wlog.info(f"Job {job_id} started | settings: {settings}")
+
+    OUTPUT_DIR = Path(output_root)
+    job_root = OUTPUT_DIR / job_id
     workspace = job_root / "workspace"
-    last_update = 0
+    progress_file = Path(progress_path)
+    last_update_time = 0
 
-    def report(pct: int):
-        """Throttle progress updates to once every 1s"""
-        nonlocal last_update
+    def write_progress(pct):
+        nonlocal last_update_time
         now = time.time()
-        if now - last_update >= 1 or pct >= 100:
+        if now - last_update_time >= 2:
             try:
-                progress_dict[job_id] = pct
-            except Exception:
-                pass
-            last_update = now
+                progress_file.write_text(str(pct))
+            except Exception as prog_err:
+                wlog.warning(f"Job {job_id} could not write progress: {prog_err}")
+            last_update_time = now
 
-    def fail(msg: str, tb_str: str):
+    def delete_progress():
         try:
-            shutil.rmtree(workspace, ignore_errors=True)
+            progress_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def fail(msg: str, tb: str) -> dict:
+        """Single failure path: cleans up workspace, input file, and progress
+        file, writes the error manifest, and returns the failure dict.
+        tb must be pre-captured via traceback.format_exc() inside the except
+        block before calling this."""
+        shutil.rmtree(workspace, ignore_errors=True)
+        try:
             Path(image_path).unlink(missing_ok=True)
         except Exception:
             pass
-        report(0)
-        _write_error_manifest(job_root, job_id, settings, msg, tb_str)
+        delete_progress()
+        _write_error_manifest(job_root, job_id, settings, msg, tb)
         gc.collect()
-        return {"status": "failed", "progress": 0, "error": msg, "traceback": tb_str, "finished_at": time.time()}
+        return {
+            "status": "failed",
+            "progress": 0,
+            "error": msg,
+            "traceback": tb,
+            "finished_at": time.time(),
+        }
 
+    # --- Create workspace ---
     try:
         workspace.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        tb_str = traceback.format_exc()
-        return fail(f"Could not create workspace: {e}", tb_str)
+        tb = traceback.format_exc()
+        wlog.error(f"Job {job_id} failed to create workspace {workspace}: {e}", exc_info=True)
+        return fail(f"Could not create workspace: {e}", tb)
 
     # --- Parse settings ---
     try:
@@ -156,13 +268,15 @@ def run_job(job_id: str, image_path: str, settings: dict, output_root: str, stud
         mosaic_type = MosaicType(settings["mosaic_type"])
         background_pct = float(settings["background_color_percent"])
         to_frame = bool(settings["to_frame"])
-    except Exception as e:
-        tb_str = traceback.format_exc()
-        return fail(f"Invalid settings: {e}", tb_str)
+    except (KeyError, ValueError, TypeError) as e:
+        tb = traceback.format_exc()
+        wlog.error(f"Job {job_id} has invalid settings: {e}", exc_info=True)
+        return fail(f"Invalid job settings: {e}", tb)
 
     # --- Run mosaic generation ---
     try:
-        pic_to_mosaic(
+        wlog.info(f"Job {job_id} calling pic_to_mosaic | width={width} type={mosaic_type}")
+        result_dir = pic_to_mosaic(
             Path(image_path),
             width,
             mosaic_type,
@@ -170,13 +284,15 @@ def run_job(job_id: str, image_path: str, settings: dict, output_root: str, stud
             to_frame,
             output_dir=workspace,
             job_id=job_id,
-            progress_callback=report,
-        )
+            progress_callback=write_progress,
+        ) or workspace
+        wlog.info(f"Job {job_id} pic_to_mosaic complete | result_dir={result_dir}")
     except Exception as e:
-        tb_str = traceback.format_exc()
-        return fail(str(e), tb_str)
+        tb = traceback.format_exc()
+        wlog.error(f"Job {job_id} pic_to_mosaic raised: {type(e).__name__}: {e}", exc_info=True)
+        return fail(str(e), tb)
 
-    # --- Write manifest ---
+    # --- Write success manifest (non-fatal if it fails) ---
     try:
         manifest = {
             "schema": "laigo.manifest.v1",
@@ -184,29 +300,43 @@ def run_job(job_id: str, image_path: str, settings: dict, output_root: str, stud
             "created_at": time.time(),
             "settings": settings,
         }
-        (workspace / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    except Exception:
-        pass
-
-    # --- Archive artifact ---
-    try:
-        archive_path = job_root / "artifact"
-        shutil.make_archive(str(archive_path), "zip", workspace)
+        with open(result_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        wlog.info(f"Job {job_id} manifest written")
     except Exception as e:
-        tb_str = traceback.format_exc()
-        return fail(f"Archive creation failed: {e}", tb_str)
+        wlog.error(f"Job {job_id} failed to write manifest: {e}", exc_info=True)
 
-    # --- Cleanup ---
+    # --- Archive workspace ---
+    try:
+        archive_base = job_root / "artifact"
+        wlog.info(f"Job {job_id} archiving to {archive_base}.zip")
+        shutil.make_archive(str(archive_base), "zip", result_dir)
+        wlog.info(f"Job {job_id} archive created")
+    except Exception as e:
+        tb = traceback.format_exc()
+        wlog.error(f"Job {job_id} failed to create archive: {e}", exc_info=True)
+        return fail(f"Archive creation failed: {e}", tb)
+
+    # --- Success cleanup ---
     shutil.rmtree(workspace, ignore_errors=True)
+
     try:
         Path(image_path).unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as e:
+        wlog.warning(f"Job {job_id} could not delete input file {image_path}: {e}")
 
-    # --- Final progress ---
-    report(100)
+    # Delete progress file — job is done, no more reads needed
+    delete_progress()
+
+    del result_dir
     gc.collect()
-    return {"status": "complete", "progress": 100, "finished_at": time.time()}
+
+    wlog.info(f"Job {job_id} complete")
+    return {
+        "status": "complete",
+        "finished_at": time.time(),
+    }
+
 
 # -----------------------------
 # ROUTES
@@ -215,23 +345,37 @@ def run_job(job_id: str, image_path: str, settings: dict, output_root: str, stud
 async def health():
     return {"status": "running"}
 
+@app.get("/")
+async def root():
+    return {"status": "running", "message": "LAIGO API online. Use /health or /docs for info."}
+
 @app.post("/generate")
-async def generate(file: UploadFile = File(...),
-                   mosaic_block_width: int = Form(...),
-                   mosaic_type: str = Form(...),
-                   background_color_percent: float = Form(100),
-                   to_frame: bool = Form(True)):
+async def generate(
+    file: UploadFile = File(...),
+    mosaic_block_width: int = Form(...),
+    mosaic_type: str = Form(...),
+    background_color_percent: float = Form(100),
+    to_frame: bool = Form(True),
+):
     job_id = str(uuid.uuid4())
+    log.info(
+        f"Job {job_id} received | filename={file.filename} "
+        f"width={mosaic_block_width} type={mosaic_type} "
+        f"bg_pct={background_color_percent} frame={to_frame}"
+    )
+
     input_file = INPUT_DIR / f"{job_id}.upload"
 
     size = 0
     try:
         with open(input_file, "wb") as f:
-            while chunk := await file.read(1024*1024):
+            while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_UPLOAD_SIZE:
+                    f.close()
                     input_file.unlink(missing_ok=True)
                     await file.close()
+                    log.warning(f"Job {job_id} rejected — file too large ({size} bytes)")
                     raise HTTPException(status_code=413, detail="File too large")
                 f.write(chunk)
             f.flush()
@@ -239,15 +383,18 @@ async def generate(file: UploadFile = File(...),
     except HTTPException:
         raise
     except Exception as e:
+        log.error(f"Job {job_id} failed during file upload: {e}", exc_info=True)
         input_file.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
-    await file.close()
 
-    # Validate image
+    await file.close()
+    log.info(f"Job {job_id} file saved | size={size} bytes")
+
     try:
         with Image.open(input_file) as img:
             img.verify()
-    except UnidentifiedImageError:
+    except Exception as e:
+        log.warning(f"Job {job_id} rejected — invalid image: {type(e).__name__}: {e}")
         input_file.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Invalid image file")
 
@@ -258,65 +405,156 @@ async def generate(file: UploadFile = File(...),
         "to_frame": to_frame,
     }
 
-    app.state.progress[job_id] = 0
-    future = app.state.executor.submit(run_job, job_id, str(input_file), settings, str(OUTPUT_DIR), STUDS_PER_BLOCK, app.state.progress)
-    app.state.jobs[job_id] = {"status": "running", "future": future, "created_at": time.time()}
+    # Create progress file — worker writes to it, API reads it on poll
+    progress_file = INPUT_DIR / f"{job_id}.progress"
+    try:
+        progress_file.write_text("0")
+    except Exception as e:
+        log.error(f"Job {job_id} failed to create progress file: {e}", exc_info=True)
+        input_file.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Failed to initialise job")
 
+    with app.state.progress_lock:
+        app.state.progress[job_id] = progress_file
+
+    try:
+        future = app.state.executor.submit(
+            run_job,
+            job_id,
+            str(input_file),
+            settings,
+            str(OUTPUT_DIR),
+            STUDS_PER_BLOCK,
+            str(progress_file),
+        )
+    except Exception as e:
+        log.error(f"Job {job_id} failed to submit to executor: {e}", exc_info=True)
+        input_file.unlink(missing_ok=True)
+        progress_file.unlink(missing_ok=True)
+        with app.state.progress_lock:
+            app.state.progress.pop(job_id, None)
+        raise HTTPException(status_code=500, detail=f"Failed to queue job: {e}")
+
+    app.state.jobs[job_id] = {
+        "status": "running",
+        "future": future,
+        "created_at": time.time(),
+    }
+
+    log.info(f"Job {job_id} queued successfully")
     return {"job_id": job_id}
+
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
     job = app.state.jobs.get(job_id)
+
+    # Read progress from file — file may be gone if job just finished
+    with app.state.progress_lock:
+        progress_file = app.state.progress.get(job_id)
+    try:
+        progress_val = float(progress_file.read_text()) if progress_file else 0
+    except Exception:
+        progress_val = 0
+
     if job and job.get("status") == "running" and job["future"].done():
         try:
             result = job["future"].result()
         except Exception as e:
-            result = {"status": "failed", "progress": 0, "error": str(e), "traceback": traceback.format_exc(), "finished_at": time.time()}
+            # run_job catches all exceptions internally so this should never
+            # happen, but guard against it explicitly so it's never silent
+            log.error(f"Job {job_id} future raised unexpectedly: {e}", exc_info=True)
+            result = {
+                "status": "failed",
+                "progress": 0,
+                "error": f"Worker raised unexpectedly: {e}",
+                "traceback": traceback.format_exc(),
+                "finished_at": time.time(),
+            }
+
         job.update(result)
-        job.pop("future", None)
+        del job["future"]
+
+        # Infer final progress from result — progress file is already deleted
+        progress_val = 100 if result.get("status") == "complete" else 0
+
+        # Clean up progress dict entry immediately
+        with app.state.progress_lock:
+            app.state.progress.pop(job_id, None)
+
+        if result.get("status") == "complete":
+            log.info(f"Job {job_id} resolved as complete")
+        else:
+            log.warning(f"Job {job_id} resolved as failed | error={result.get('error')}")
 
     if job:
-        status = job["status"]
-        progress_val = app.state.progress.get(job_id, 0)
-        if status == "complete":
-            progress_val = 100
-        elif status == "failed":
-            progress_val = 0
         return {**{k: v for k, v in job.items() if k != "future"}, "progress": progress_val}
 
-    # Check disk manifest fallback
+    # Fallback to error manifest on disk
     error_manifest = OUTPUT_DIR / job_id / "manifest_failed.json"
     if error_manifest.exists():
-        return json.loads(error_manifest.read_text())
+        log.info(f"Job {job_id} served from error manifest on disk")
+        try:
+            with open(error_manifest, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data
+        except Exception as e:
+            log.error(f"Job {job_id} failed to read error manifest: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to read error manifest")
 
+    log.warning(f"Job {job_id} not found in memory or on disk")
     raise HTTPException(status_code=404, detail="Job not found")
+
 
 @app.get("/jobs/{job_id}/download")
 async def download(job_id: str):
     artifact = OUTPUT_DIR / job_id / "artifact.zip"
+
     if not artifact.exists():
+        log.warning(f"Download requested for job {job_id} but artifact not found")
         raise HTTPException(status_code=404, detail="Artifact not found")
-    return FileResponse(artifact, filename=f"mosaic_{job_id}.zip", media_type="application/zip")
+
+    log.info(f"Serving artifact for job {job_id}")
+    return FileResponse(
+        artifact,
+        filename=f"mosaic_{job_id}.zip",
+        media_type="application/zip",
+    )
+
 
 # -----------------------------
 # CLEANUP THREAD
 # -----------------------------
 def cleanup_loop(app: FastAPI):
-    clog = logging.getLogger("cleanup")
+    clog = logging.getLogger("laigo.cleanup")
     while True:
         try:
             now = time.time()
             for job_id, job in list(app.state.jobs.items()):
-                status = job.get("status")
-                if status in ("complete", "failed"):
+                if job.get("status") in ("complete", "failed"):
                     age = now - job.get("finished_at", now)
                     if age > JOB_TTL_SECONDS:
+                        clog.info(f"TTL expired for job {job_id} (age={int(age)}s) — cleaning up")
                         try:
                             shutil.rmtree(OUTPUT_DIR / job_id, ignore_errors=True)
                         except Exception as e:
-                            clog.error(f"Failed to remove output dir for job {job_id}: {e}", exc_info=True)
+                            clog.error(
+                                f"Failed to remove output dir for job {job_id}: {e}",
+                                exc_info=True
+                            )
+                        job.pop("future", None)
                         app.state.jobs.pop(job_id, None)
-                        app.state.progress.pop(job_id, None)
+                        with app.state.progress_lock:
+                            progress_file = app.state.progress.pop(job_id, None)
+                        # Progress file should already be deleted by run_job,
+                        # but unlink here as a safety net
+                        if progress_file:
+                            try:
+                                Path(progress_file).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                        clog.info(f"Job {job_id} cleaned up")
         except Exception:
             clog.error("Unexpected error in cleanup loop", exc_info=True)
+
         time.sleep(CLEANUP_INTERVAL)
