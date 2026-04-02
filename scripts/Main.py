@@ -46,7 +46,7 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
 
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 600))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
-MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", 1)), 2)
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 1))
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
