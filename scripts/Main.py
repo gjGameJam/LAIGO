@@ -49,7 +49,7 @@ JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 600))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
 # Keep single-worker behavior for now; queueing controls waiting jobs.
 MAX_WORKERS = 1
-MAX_QUEUE_SIZE = 1
+MAX_QUEUE_SIZE = 20
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
@@ -711,7 +711,7 @@ async def generate(
             app.state.progress.pop(job_id, None)
         with app.state.jobs_lock:
             app.state.jobs.pop(job_id, None)
-        raise HTTPException(status_code=429, detail="Server busy. Try again later.")
+        raise HTTPException(status_code=429, detail="Queue full. Try again once space opens.") #if over max queue size and new job is requested
     except Exception as e:
         log.error(f"Job {job_id} failed to queue: {e}", exc_info=True)
         input_file.unlink(missing_ok=True)
