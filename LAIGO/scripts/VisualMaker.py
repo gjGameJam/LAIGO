@@ -38,19 +38,16 @@ def get_font(size=32):
         return ImageFont.load_default()
 
 def save_img_and_increment_step(img, step, output_dir=None):
-    #draw step number on bottom middle
-    width, height = img.size
-    draw = ImageDraw.Draw(img)
+    save_copy = img.copy()
+    width, height = save_copy.size
+    draw = ImageDraw.Draw(save_copy)
     font = get_font(32)
-    
-    #draw step number in center bottom
     x_middle = width / 2
     x_offset = -len(str(step)) * 5
     offset = 50
     draw.text((x_middle + x_offset, height - offset), str(step), fill="black", font=font)
-    #save and increment/return step
     saveName = get_file_name(step, output_dir)
-    img.save(saveName)
+    save_copy.save(saveName)
     return (step + 1)
 
 
@@ -868,33 +865,20 @@ def draw_stud(draw, cx, cy, blockZ, color):
 
 
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
-def generate_baseplate_setup(step, case, output_dir = None):
-    #draw empty plate to help user see next step requirements
-    img, draw = get_img_and_draw(step, True, output_dir) # get blank image to start instructions
-    draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), -1) #-1 case is where the baseplate piece is by itself
-    step = save_img_and_increment_step(img, step, output_dir) # Save current step
-    #draw bottom of baseplate with current case
-    img, draw = get_img_and_draw(step, False, output_dir) # get previous image (blank if no previous) and draw object to draw on it
-    erase_step_number(img) # erase step number from previous step so it doesn't get burned into the new image with the new step number
+def generate_baseplate_setup(step, case, output_dir=None):
+    # Step 1: blank canvas, show the standalone baseplate piece
+    img, draw = get_img_and_draw(step, True, output_dir)
+    draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), -1)
+    step = save_img_and_increment_step(img, step, output_dir)
+    # Step 2: same canvas (img is clean — save_img_and_increment_step does not mutate it),
+    # draw the positioned baseplate on top to show placement
     draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), case)
-    step = save_img_and_increment_step(img, step, output_dir) # Save current step
-    #draw top of baseplate with current case
-    img, draw = get_img_and_draw(step, True, output_dir) # use blank image to start top instructions on
+    step = save_img_and_increment_step(img, step, output_dir)
+    # Step 3: fresh canvas for the top-of-baseplate view
+    img, draw = get_img_and_draw(step, True, output_dir)
     draw_baseplate_top(draw, 16, (0.2, 0.2, 0.2), case)
-    step = save_img_and_increment_step(img, step, output_dir) # Save current step
-    #print("drew baseplate instruction")
-    return step
-
-def erase_step_number(img):
-    """White out the region where save_img_and_increment_step burns the step number.
-    save_img_and_increment_step draws at (width/2 + x_offset, height - 50) with font size 32.
-    We cover a generous rectangle around that area to ensure the old number is fully cleared."""
-    draw = ImageDraw.Draw(img)
-    width, height = img.size
-    draw.rectangle(
-        [(width // 2 - 80, height - 70), (width // 2 + 80, height - 20)],
-        fill=(255, 255, 255, 255)
-    )
+    step = save_img_and_increment_step(img, step, output_dir)
+    return step, img  # return canvas so caller avoids a disk read
 
 # -----------------------------
 # Convert block grid to isometric XY

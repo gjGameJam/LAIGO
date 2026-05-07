@@ -47,6 +47,7 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
 
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 600))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
+JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", 1800))
 # Keep single-worker behavior for now; queueing controls waiting jobs.
 MAX_WORKERS = 1
 MAX_QUEUE_SIZE = 20
@@ -77,6 +78,7 @@ log.info(f"MAX_WORKERS:      {MAX_WORKERS}")
 log.info(f"MAX_QUEUE_SIZE:   {MAX_QUEUE_SIZE}")
 log.info(f"JOB_TTL_SECONDS:  {JOB_TTL_SECONDS}")
 log.info(f"CLEANUP_INTERVAL: {CLEANUP_INTERVAL}")
+log.info(f"JOB_TIMEOUT:      {JOB_TIMEOUT_SECONDS}s")
 log.info(f"MAX_UPLOAD_MB:    {upload_mbs}")
 log.info(f"STUDS_PER_BLOCK:  {STUDS_PER_BLOCK}")
 
@@ -434,6 +436,48 @@ def _mark_submission_failed(app: FastAPI, item: dict, error: str, tb: str) -> No
     log.error(f"Job {job_id} failed before execution: {error}")
 
 
+def _check_timed_out_jobs(app: FastAPI, slog) -> None:
+    """Called from the scheduler loop to forcibly fail jobs that exceed JOB_TIMEOUT_SECONDS.
+
+    The watchdog pops 'future' from the job dict as a sentinel so _job_done_callback
+    can detect the job was already finalized and skip its own decrement.
+    """
+    now = time.time()
+    timed_out = []
+    with app.state.jobs_lock:
+        for job_id, job in list(app.state.jobs.items()):
+            if job.get("status") == "running":
+                deadline = job.get("deadline")
+                future = job.get("future")
+                if deadline and now > deadline and future is not None and not future.done():
+                    timed_out.append((job_id, future, job.get("settings", {})))
+
+    for job_id, future, settings in timed_out:
+        slog.error(f"Job {job_id} exceeded timeout of {JOB_TIMEOUT_SECONDS}s — forcing failure")
+        tb_str = f"Job exceeded timeout of {JOB_TIMEOUT_SECONDS}s"
+        _write_error_manifest(OUTPUT_DIR / job_id, job_id, settings, "Job timed out", tb_str)
+
+        with app.state.jobs_lock:
+            job = app.state.jobs.get(job_id)
+            if job is not None and job.get("status") == "running":
+                job.update({
+                    "status": "failed",
+                    "progress": 0,
+                    "error": f"Job timed out after {JOB_TIMEOUT_SECONDS}s",
+                    "traceback": tb_str,
+                    "finished_at": now,
+                })
+                job.pop("future", None)   # sentinel: _job_done_callback skips if "future" absent
+                job.pop("deadline", None)
+
+        with app.state.progress_lock:
+            app.state.progress.pop(job_id, None)
+
+        with app.state.scheduler_cv:
+            app.state.active_jobs = max(0, app.state.active_jobs - 1)
+            app.state.scheduler_cv.notify_all()
+
+
 def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
     """Finalizes a completed worker future in the main process.
 
@@ -460,19 +504,26 @@ def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
             "finished_at": time.time(),
         }
 
+    # If _check_timed_out_jobs already finalized this job (it pops "future" as a sentinel),
+    # skip both the state update and the active_jobs decrement to avoid double-counting.
+    already_finalized = False
     with app.state.jobs_lock:
         job = app.state.jobs.get(job_id)
         if job is not None:
-            job.update(result)
-            job["finished_at"] = result.get("finished_at", time.time())
-            job.pop("future", None)
+            if job.get("status") in ("complete", "failed") and "future" not in job:
+                already_finalized = True
+            else:
+                job.update(result)
+                job["finished_at"] = result.get("finished_at", time.time())
+                job.pop("future", None)
 
     with app.state.progress_lock:
         app.state.progress.pop(job_id, None)
 
-    with app.state.scheduler_cv:
-        app.state.active_jobs = max(0, app.state.active_jobs - 1)
-        app.state.scheduler_cv.notify_all()
+    if not already_finalized:
+        with app.state.scheduler_cv:
+            app.state.active_jobs = max(0, app.state.active_jobs - 1)
+            app.state.scheduler_cv.notify_all()
 
 
 def scheduler_loop(app: FastAPI):
@@ -486,6 +537,8 @@ def scheduler_loop(app: FastAPI):
     while True:
         if app.state.scheduler_shutdown.is_set():
             break
+
+        _check_timed_out_jobs(app, slog)
 
         with app.state.scheduler_cv:
             while not app.state.scheduler_shutdown.is_set() and app.state.active_jobs >= MAX_WORKERS:
@@ -561,6 +614,7 @@ def scheduler_loop(app: FastAPI):
                 job["status"] = "running"
                 job["started_at"] = time.time()
                 job["future"] = future
+                job["deadline"] = time.time() + JOB_TIMEOUT_SECONDS
 
         future.add_done_callback(lambda fut, jid=job_id: _job_done_callback(app, jid, fut))
         with app.state.scheduler_cv:

@@ -1,4 +1,4 @@
-from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, get_img_and_draw, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
+from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas as rl_canvas
 import numpy as np
@@ -21,17 +21,6 @@ def count_colors(img_rgba):
     rgb = arr[:, :, :3].reshape(-1, 3)
     return len(np.unique(rgb, axis=0))
 
-
-def erase_step_number(img):
-    """White out the region where save_img_and_increment_step burns the step number.
-    save_img_and_increment_step draws at (width/2 + x_offset, height - 50) with font size 32.
-    We cover a generous rectangle around that area to ensure the old number is fully cleared."""
-    draw = ImageDraw.Draw(img)
-    width, height = img.size
-    draw.rectangle(
-        [(width // 2 - 80, height - 70), (width // 2 + 80, height - 20)],
-        fill=(255, 255, 255, 255)
-    )
 
 
 # -------------------------------------------------------
@@ -138,13 +127,13 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
     #for each baseplate in the mosiac:
     for blockW in range(0, blockWidth):
         for blockH in range(0, blockHeight):
-            #layer 0: baseplate
-            step = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step, output_dir)
+            #layer 0: baseplate — returns canvas so we skip the disk read below
+            step, img = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step, output_dir)
+            draw = ImageDraw.Draw(img)
             #layer 1: background
             y0, y1 = blockH*16, (blockH+1)*16
             x0, x1 = blockW*16, (blockW+1)*16
             bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
-            img, draw = get_img_and_draw(step, False, output_dir) #false because we want to pick off where we left off
             for col in range(0, len(bg_block[0])):
                 #loop over columns of 16x16 block (each column is 16 plates)
                 to_reuse = img.copy()
@@ -153,8 +142,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                 column_rgb = [tuple(c / 255.0 for c in bg_block[15 - y, col]) for y in range(16)]
                 draw_plate_column(draw, col, 0, column_rgb, False) #zero height no highlight
                 draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
-                erase_step_number(to_reuse)  # clear burned-in number from previous step
-                step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
+                step = save_img_and_increment_step(to_reuse, step, output_dir)
 
             #layer 2: foreground
             if not fg_rgba is None:
@@ -169,8 +157,7 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                         continue
                     draw_plate_column(draw, col, 1, column_rgba, False) #one height no highlight
                     draw_plate_column(draw2, col, 1, column_rgba, True) #one height with highlight
-                    erase_step_number(to_reuse)  # clear burned-in number from previous step
-                    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
+                    step = save_img_and_increment_step(to_reuse, step, output_dir)
 
             block_count += 1
             report(40 + (int)(block_count * factor))
