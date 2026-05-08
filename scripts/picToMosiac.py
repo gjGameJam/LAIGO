@@ -56,15 +56,18 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
     top_colors = np.array(top_colors, dtype=np.int32)
     log_info(f"background dominant LEGO colors: {top_colors.tolist()}")
     top_lab = palette_lab[top_colors]
-    simplified_idx = np.copy(bg_idx)
-    H, W = bg_idx.shape
-    for y in range(H):
-        for x in range(W):
-            if alpha_mask is not None and alpha_mask[y, x] == 0:
-                continue
-            lab = palette_lab[bg_idx[y, x]]
-            d = color.deltaE_ciede2000(top_lab.reshape(-1,1,3), lab.reshape(1,1,3))
-            simplified_idx[y, x] = top_colors[np.argmin(d)]
+
+    # Compute nearest top-color for each unique palette index that appears in
+    # valid pixels (at most 43 iterations) then apply the remap in one vectorized op.
+    index_remap = np.arange(len(palette_lab), dtype=np.int32)
+    for idx in unique:
+        lab = palette_lab[idx]
+        d = color.deltaE_ciede2000(top_lab.reshape(-1, 1, 3), lab.reshape(1, 1, 3))
+        index_remap[idx] = top_colors[int(np.argmin(d))]
+
+    simplified_idx = index_remap[bg_idx]
+    if alpha_mask is not None:
+        simplified_idx[alpha_mask == 0] = bg_idx[alpha_mask == 0]
     return simplified_idx
 
 

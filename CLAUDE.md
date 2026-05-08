@@ -150,8 +150,8 @@ Each column step draws all 16 plates twice — once unhighlighted on `img`, once
 ### Floyd-Steinberg dithering: pure Python per-pixel loop (`picToMosiac.py:97–111`)
 At max mosaic size (~307,000 iterations), each iteration calls `deltaE_ciede2000` against 43 palette entries. The error propagation makes full vectorization non-trivial, but the inner `nearest_palette_index_lab` call could be batched and the loop ported to Cython/Numba for a 50–100× speedup.
 
-### `simplify_background_lego`: pure Python per-pixel, but fully vectorizable (`picToMosiac.py:60–67`)
-Every pixel is independent. Fix: compute the nearest top-color for each of the (at most 43) unique palette indices once, build a lookup array, then replace all values in `bg_idx` with a single NumPy indexed assignment. Reduces O(H×W) Python to O(43) + one vectorized op.
+### ~~`simplify_background_lego`: pure Python per-pixel~~ — **fixed**
+Builds an `index_remap` array by running `deltaE_ciede2000` once per unique palette index in the image (≤43 iterations). Applies the remap to the full image with a single NumPy indexed assignment; masked pixels are restored in one vectorized step.
 
 ### UnsharpMask applied at full input resolution before resize (`picToMosiac.py:73`)
 `img.filter(ImageFilter.UnsharpMask(...))` runs on the original photo (potentially megapixels) before `img.resize(studs_w, studs_h)` immediately discards most of that work. Resize first, then sharpen the small image.
