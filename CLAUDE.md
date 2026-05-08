@@ -139,34 +139,90 @@ The function never returns a path. `run_job` handles this with `result_dir = pic
 
 ---
 
-## Performance issues
+## Image quality / detail preservation
+
+### ~~Initial resize uses `Image.NEAREST`, discarding most source detail~~ — **fixed** (`picToMosiac.py:88`)
+`Image.NEAREST` samples a single pixel from the source block and discards the rest. For a 40-block mosaic from a 4000px-wide phone photo (6.25× downscale), each stud's color was determined by 1 out of every ~39 source pixels — ~97% of source color information thrown away before dithering. For smaller mosaics (10 blocks, 25× downscale) this worsened to 99.8% loss. Now uses `Image.LANCZOS`, which averages all source pixels in each stud's footprint with a weighted filter. The dithering now sees a representative color for each stud rather than a random sample.
+
+### UnsharpMask tuned to match resize method (`picToMosiac.py:89`)
+Previously `UnsharpMask(radius=1, percent=350, threshold=3)` ran at full input resolution before NEAREST resize — the sharpening was almost entirely discarded by the sampling. After the LANCZOS fix, the filter now runs on the downscaled image at 150% intensity (reduced from 350%), restoring perceptual crispness that LANCZOS softens without creating haloing artifacts that distort palette matching.
+
+### `adjust_lightness_lab` runs at full input resolution (`picToMosiac.py:258–290`)
+`adjust_lightness_lab` is called on the full-resolution image before it is passed to `image_to_lego_mosaic`, which immediately resizes it. The function does a full RGB→LAB→RGB round-trip on megapixel data just to add +5 to the L channel. Eliminating the separate call and applying the L* shift directly to the LAB array after the LANCZOS resize (already computed for dithering) would be cheaper and equivalent. Reverted from a previous attempt due to visual regression concerns — re-examine after LANCZOS change is validated.
+
+### `remove_background` channel swap corrupts background colors in 3D mode (`picToMosiac.py:124`)
+Documented in Known bugs above. PIL gives an RGB array; `cv2.cvtColor(img, cv2.COLOR_BGR2RGB)` treats it as BGR, swapping R and B before the segmentation mask is produced. Segmentation is shape-based so the mask is usable, but the background image returned to the pipeline has its R and B channels swapped before palette matching — causing e.g. reds to match blue LEGO colors in the background layer.
+
+---
+
+## CPU performance
+
+Current single-job CPU load on Render: **~70% of 1 vCPU**. Goal: ≤50% per job so two jobs can run concurrently. Running two workers requires Render **Standard tier (2 GB RAM)** minimum — each worker holds mediapipe + numpy + PIL + cv2 in memory (~400–550 MB RSS).
+
+### Hotspot map
+
+| Priority | Location | Operation | Why expensive | Status |
+|----------|----------|-----------|---------------|--------|
+| 1 | `picToMosiac.py:100–116` | Floyd-Steinberg dithering loop | Pure Python O(W×H), sequential by design | **open** |
+| 2 | `picToMosiac.py:37–41` | `nearest_palette_index_lab` | Called per pixel; runs full `deltaE_ciede2000` against all 43 palette entries | **open** |
+| 3 | `picToMosiac.py:258–290` | `adjust_lightness_lab` on full-res image | Full-res RGB→LAB→RGB round-trip before resize | **open** |
+| 4 | `picToMosiac.py:123–134` | MediaPipe segmentation at full resolution | Model inference on megapixel image; mask only needs mosaic resolution | **open** |
+| 5 | `MosiacToInstruction.py:137–160` | Double `draw_plate_column` per step | Column drawn twice per instruction step (unhighlighted + highlighted) | **open** |
+| 6 | `Main.py:99` | `max_tasks_per_child=1` | Worker cold-starts after every job; 3–5s import overhead per job | **open** |
+| 7 | `Main.py:52` | `MAX_WORKERS=1` | No concurrency; second job waits for first to complete | **open** |
+| 8 | `MosiacToOrder.py:40–56` | Brick-count pixel loops | ~~O(W×H) Python pixel accessor~~ | **fixed** |
+| 9 | `picToMosiac.py:115` | Rebuild `out_rgb` | ~~Python list comprehension over all pixels~~ | **fixed** |
+| 10 | `picToMosiac.py:88–89` | UnsharpMask at full resolution | ~~Ran on megapixel image before resize~~ | **fixed** |
+
+### Open items — detail and estimated impact
+
+**#1 — Floyd-Steinberg dithering loop** (`picToMosiac.py:100–116`)
+O(W×H) iterations. At max mosaic size (~409,600 pixels for a 40-block job), this is the dominant CPU cost. Error propagation makes full numpy vectorization non-trivial. Two approaches:
+- **KDTree nearest-color** (`scipy.spatial.KDTree` over the 43 palette LAB entries): replaces `deltaE_ciede2000` (complex perceptual math in Python) with Euclidean LAB distance in C. No new dependency (scipy is already a transitive dep of scikit-image). Estimated 25–35% reduction in total job time. Trade-off: Euclidean LAB ≈ deltaE76, not CIEDE2000 — tested and reverted once due to visual concerns; worth re-testing on more images before dismissing.
+- **Numba JIT** (`@numba.njit` on the whole loop + inlined distance math): eliminates Python interpreter overhead entirely. Estimated 50–60% reduction in total job time. Requires new dependency (~200 MB), JIT warm-up call at worker startup, and inlining the distance calculation. Only pursue if KDTree is insufficient.
+
+**#2 — `adjust_lightness_lab` at full resolution** (`picToMosiac.py:258–290`)
+Called on full-res images (e.g. 4000×3000) before passing to `image_to_lego_mosaic`, which immediately resizes. Fix: add `delta_L=0` parameter to `image_to_lego_mosaic`, apply `lab[..., 0] = np.clip(lab[..., 0] + delta_L, 0, 100)` immediately after `color.rgb2lab(rgb)`, and remove the separate call sites. Estimated 8–12% reduction in total job time. Risk: previous attempt caused visual regression; re-examine after LANCZOS change is validated.
+
+**#3 — MediaPipe at full input resolution** (`picToMosiac.py:123–134`)
+`SelfieSegmentation` runs on whatever size PIL image is passed in. The mask only needs to be as fine as the mosaic (e.g. 640×480 for a 40-block job). Fix: downscale the input to ~2× mosaic resolution before calling MediaPipe, then upscale the resulting mask back to full resolution before use. Estimated 10–20% reduction in total job time (MediaPipe inference cost scales with pixel count).
+
+**#4 — Double `draw_plate_column` per instruction step** (`MosiacToInstruction.py:137–160`)
+For each column, the pattern is: (1) draw column without highlight on `img`, (2) copy `img` to `to_reuse`, (3) draw same column again with highlight on `to_reuse`. The geometry is identical except for a yellow outline added by `draw_plate` when `highlight=True` (lines 943–955 in `VisualMaker.py`). Fix: draw the column once, copy, then apply only the highlight outline to the copy via a new `draw_highlight_column` helper. Estimated 12–18% reduction in total job time.
+
+**#5 — Worker cold-start overhead** (`Main.py:99`)
+`max_tasks_per_child=1` respawns the worker process after every job. Each startup imports numpy, PIL, scikit-image, mediapipe, and cv2 — roughly 3–5 seconds of pure overhead per job. Fix: raise to `max_tasks_per_child=3–5`. Memory stays bounded by `MAX_WORKERS × peak-per-worker`. Requires Python 3.12+ (already true).
+
+**#6 — Single-worker concurrency** (`Main.py:52`)
+`MAX_WORKERS=1` means jobs are serialized. To run two concurrent jobs, raise to `MAX_WORKERS=2`. Memory prerequisite: 2 workers × ~500 MB RSS + main process ~150 MB ≈ 1.15 GB peak. Render free/starter tiers (512 MB) will OOM. Requires **Render Standard tier (2 GB RAM)** or higher.
+
+### CPU reduction estimates (cumulative)
+
+| Changes applied | Estimated single-job CPU |
+|-----------------|--------------------------|
+| Baseline (today before fixes) | ~70% |
+| + `adjust_lightness_lab` fix (item #2) | ~58–62% |
+| + MediaPipe resolution fix (item #3) | ~46–52% |
+| + Double draw_plate_column fix (item #4) | ~35–42% |
+| + KDTree nearest-color (item #1 partial) | ~22–30% |
+| + max_workers=2 + max_tasks_per_child=3 | two jobs at ~25–35% each |
+
+### ~~Fixed CPU items~~
 
 ### ~~Instruction generation: disk used as inter-step shared memory~~ — **fixed**
-`save_img_and_increment_step` now draws the step number on a `img.copy()` and saves that, leaving the in-memory canvas untouched. `generate_baseplate_setup` reuses the same `img` across its three steps (no disk read between steps 1 and 2) and returns `(step, img)` so the caller skips its own `get_img_and_draw(False)` disk read. `erase_step_number` and all its call sites removed as dead code.
-
-### Double-draw of identical geometry per column step (`MosiacToInstruction.py:154–157`)
-Each column step draws all 16 plates twice — once unhighlighted on `img`, once highlighted on `to_reuse`. The highlight is only a yellow outline. Fix: draw the column once on `img`, copy, then draw only the outline on the copy.
-
-### Floyd-Steinberg dithering: pure Python per-pixel loop (`picToMosiac.py:103–117`)
-At max mosaic size (~307,000 iterations), the error propagation makes full vectorization non-trivial. The inner `nearest_palette_index_lab` call still uses `deltaE_ciede2000` against all 43 palette entries. A `scipy.spatial.KDTree` (Euclidean LAB distance) could cut this cost substantially but was reverted pending visual QA — it can select different palette entries than CIEDE2000 for some colors. Porting the outer loop to Numba JIT would yield an additional 50–100× speedup.
+`save_img_and_increment_step` now draws the step number on an `img.copy()` and saves that, leaving the in-memory canvas untouched. `generate_baseplate_setup` reuses the same `img` across its three steps and returns `(step, img)` so the caller skips the disk read. `erase_step_number` and all call sites removed.
 
 ### ~~`simplify_background_lego`: pure Python per-pixel~~ — **fixed**
-Builds an `index_remap` array by running `deltaE_ciede2000` once per unique palette index in the image (≤43 iterations). Applies the remap to the full image with a single NumPy indexed assignment; masked pixels are restored in one vectorized step.
+Builds an `index_remap` array by running `deltaE_ciede2000` once per unique palette index (≤43 iterations). Applies the remap to the full image with a single NumPy indexed assignment; masked pixels are restored in one vectorized step.
 
-### ~~UnsharpMask applied at full input resolution before resize~~ — **fixed**
-`img_small.filter(ImageFilter.UnsharpMask(...))` now runs on the already-resized small image inside `image_to_lego_mosaic` (`picToMosiac.py:90`), not on the full input photo.
+### ~~Brick-count pixel loops in MosiacToOrder.py~~ — **fixed** (`MosiacToOrder.py:40–56`)
+Background and foreground pixel loops replaced with `np.unique(axis=0, return_counts=True)` on numpy arrays. O(W×H) Python iterations reduced to a single vectorized call. The foreground path masks by alpha channel before counting (`fg_arr[:, :, 3] > 0`).
 
-### MediaPipe segmentation at full input resolution (`picToMosiac.py:123–134`)
-The segmentation mask only needs to be as fine as the mosaic resolution (max 640×480). Downscaling to ~2× mosaic resolution before calling MediaPipe, then upscaling the mask, gives near-identical results with a fraction of the compute and memory.
+### ~~`out_rgb` rebuilt with a Python list comprehension~~ — **fixed** (`picToMosiac.py:115`)
+`[LEGO_PALETTE_RGB[i] for i in out_idx.flatten()]` replaced with `LEGO_PALETTE_RGB[out_idx]` — numpy fancy indexing; exact same output, no Python iteration.
 
-### ~~`adjust_lightness_lab` does two full-resolution RGB↔LAB round-trips for a +5 L* shift~~ — **fixed**
-The +5 L* shift is now applied inline inside `image_to_lego_mosaic` via a `delta_L` parameter (`picToMosiac.py:93–94`), directly on the LAB array that is computed for dithering anyway. The separate `adjust_lightness_lab` call sites in `pic_to_mosaic` are removed. The helper function still exists but is no longer called by the pipeline.
-
-### ~~Brick-count pixel loops in MosiacToOrder.py~~ — **fixed**
-Background and foreground pixel loops replaced with `np.unique(axis=0, return_counts=True)` on numpy arrays (`MosiacToOrder.py:40–56`). Reduces O(W×H) Python iterations to a single vectorized call.
-
-### Worker process cold-start overhead (`Main.py:95–98`)
-`max_tasks_per_child=1` respawns the worker after every job. Each startup imports numpy, PIL, scikit-image, mediapipe, and cv2 — roughly 3–5 seconds of import overhead per job. Consider raising to `max_tasks_per_child=3–5` once memory usage is better characterized, so imports are amortized over several jobs per worker lifetime.
+### ~~UnsharpMask ran at full input resolution before resize~~ — **fixed** (`picToMosiac.py:88–89`)
+Filter now runs on the already-resized small image at 150% intensity. Intensity reduced from 350% because 350% on a NEAREST-downscaled blocky image created haloing that distorted palette selection; 150% after LANCZOS is a mild perceptual sharpness restoration.
 
 ---
 

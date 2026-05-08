@@ -1837,8 +1837,7 @@ def draw_final_view(step, composite, want_frame, output_dir=None):
     desired_comp_width = 400
     comp_h = int(round(desired_comp_width * (composite_aspect_ratio)))
     #scale such that the composite/frame always take up certain portion of canvas
-    composite_resized = composite.resize((desired_comp_width, comp_h), Image.Resampling.LANCZOS)
-    composite_resized = composite_resized.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=2))
+    composite_resized = composite.resize((desired_comp_width, comp_h), Image.Resampling.NEAREST)
     #half heights to center drawings
     half_comp_w = desired_comp_width / 2
     half_comp_h = composite_resized.height / 2
