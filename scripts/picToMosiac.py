@@ -36,9 +36,9 @@ STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 
 #gets the index of the closest color to the pixel from the palette by visual distance
 def nearest_palette_index_lab(pixel_lab):
-    pixel_lab_reshaped = pixel_lab.reshape((1, 1, 3)) #reshape in order to compare
+    pixel_lab_reshaped = pixel_lab.reshape((1, 1, 3))
     d = color.deltaE_ciede2000(PALETTE_LAB_RESHAPED, pixel_lab_reshaped)
-    return int(np.argmin(d)) #return closest color index
+    return int(np.argmin(d))
 
 
 #optimizes the background to have a maximum number of k colors and returns array of indexes of colors
@@ -73,7 +73,6 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
 
 #takes an image and lego stud width and returns lego image and array of lego image pixel colors
 def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
-    img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=350, threshold=3))
     #calculate stud height calculation such that it is always divisible by 16
     orig_w, orig_h = img.size
     aspect = orig_h / orig_w
@@ -86,7 +85,8 @@ def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
     # Convert back to studs (guaranteed divisible by 16)
     studs_h = blocks_h * STUDS_PER_BLOCK
 
-    img_small = img.resize((studs_w, studs_h), Image.NEAREST)
+    img_small = img.resize((studs_w, studs_h), Image.LANCZOS)
+    img_small = img_small.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=2))
     rgb = np.asarray(img_small)/255.0
     lab = color.rgb2lab(rgb)
     out_idx = np.zeros((studs_h, studs_w), dtype=np.int32)
@@ -112,7 +112,7 @@ def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
                 if alpha_np[y+1,x]!=0: err[y+1,x]=np.clip(err[y+1,x]+e*5/16,-128,128)
                 if x+1<studs_w and alpha_np[y+1,x+1]!=0: err[y+1,x+1]=np.clip(err[y+1,x+1]+e*1/16,-128,128)
         err[y, alpha_np[y]==0] = 0
-    out_rgb = np.array([LEGO_PALETTE_RGB[i] for i in out_idx.flatten()]).reshape((studs_h, studs_w, 3)).astype(np.uint8)
+    out_rgb = LEGO_PALETTE_RGB[out_idx].astype(np.uint8)
     out_img = Image.fromarray(out_rgb).resize((studs_w, studs_h), Image.NEAREST)
     return out_img, out_idx
 

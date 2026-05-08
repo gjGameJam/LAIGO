@@ -37,26 +37,23 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     # -----------------
     # Layer 1: Background
     # -----------------
-    bg_pixels = bg_rgba.load()
-    for y in range(bg_rgba.height):
-        for x in range(bg_rgba.width):
-            rgb = bg_pixels[x, y][:3]
-            piece_id = GetLegoPieceFromColor(rgb, PALETTE_DICT)
-            order[piece_id] += 1
-
+    bg_arr = np.asarray(bg_rgba)[:, :, :3].reshape(-1, 3)
+    unique_rgb, counts = np.unique(bg_arr, axis=0, return_counts=True)
+    for rgb_row, count in zip(unique_rgb, counts):
+        piece_id = GetLegoPieceFromColor(tuple(int(c) for c in rgb_row), PALETTE_DICT)
+        order[piece_id] += int(count)
 
     # -----------------
     # Layer 2: Foreground
     # -----------------
     if not (fg_out_rgba is None):
-        fg_pixels = fg_out_rgba.load()
-        for y in range(fg_out_rgba.height):
-            for x in range(fg_out_rgba.width):
-                r, g, b, a = fg_pixels[x, y]
-                if a == 0:
-                    continue
-                piece_id = GetLegoPieceFromColor((r, g, b), PALETTE_DICT)
-                order[piece_id] += 1
+        fg_arr = np.asarray(fg_out_rgba)
+        visible = fg_arr[:, :, 3] > 0
+        fg_rgb = fg_arr[visible, :3]
+        unique_rgb, counts = np.unique(fg_rgb, axis=0, return_counts=True)
+        for rgb_row, count in zip(unique_rgb, counts):
+            piece_id = GetLegoPieceFromColor(tuple(int(c) for c in rgb_row), PALETTE_DICT)
+            order[piece_id] += int(count)
 
 
     log_debug("returning order list...")

@@ -1,5 +1,5 @@
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import random
 from .Util import GetOutputPathDir, log_debug, log_info, log_error
 # -----------------------------
@@ -1838,6 +1838,7 @@ def draw_final_view(step, composite, want_frame, output_dir=None):
     comp_h = int(round(desired_comp_width * (composite_aspect_ratio)))
     #scale such that the composite/frame always take up certain portion of canvas
     composite_resized = composite.resize((desired_comp_width, comp_h), Image.Resampling.LANCZOS)
+    composite_resized = composite_resized.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=2))
     #half heights to center drawings
     half_comp_w = desired_comp_width / 2
     half_comp_h = composite_resized.height / 2

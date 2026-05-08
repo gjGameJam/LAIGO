@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(Test-Path *)"
+      "Bash(Test-Path *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\" -Recurse -Include \"*.py\")",
+      "Bash(Select-Object -ExpandProperty FullName)"
     ]
   }
 }
