@@ -2,10 +2,8 @@ import numpy as np
 from pathlib import Path 
 from collections import defaultdict
 import json
-from pathlib import Path
 from math import ceil
 from dotenv import load_dotenv
-from pathlib import Path
 import os
 from logger import logger
 
@@ -119,13 +117,12 @@ def GetPaletteRGBArray():
 #this function should return output of json string with following format
 def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 999):
     """
-    Split order_dict values into chunks <= max_per_item and write multiple JSONs
-    while keeping the output as defaultdict(int).
-
-    Args:
-        order_dict: defaultdict(int) or dict {element_id: quantity}
-        output_path: Path to the first output JSON
-        max_per_item: maximum quantity per item per JSON
+    Split order_dict values into chunks <= max_per_item and write multiple JSONs.
+    
+    Optimizations:
+    - Pre-calculates max_parts to avoid building intermediate chunk lists.
+    - Implements a "Fast Path" for the common single-file case.
+    - Uses a single pass per file to build the JSON structure.
     """
     if not isinstance(order_dict, (dict, defaultdict)):
         raise TypeError("order_dict must be a dict or defaultdict")
@@ -135,48 +132,56 @@ def SaveDictAsJsonsOptimized(order_dict, output_path: Path, max_per_item: int = 
 
     if max_per_item <= 0:
         raise ValueError("max_per_item must be positive")
-    
-    log_info(order_dict)
 
-    # Ensure destination exists (safe under multiprocessing)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Step 0: Filter out non-positive quantities immediately to save CPU later
+    # This prevents 'empty' entries in the JSON.
+    active_items = {str(k): v for k, v in order_dict.items() if v > 0}
 
-    # Step 1: build chunks per element
-    chunks_per_element = defaultdict(list)  # element_id -> list of ints (each <= max_per_item)
-    max_parts = 0
-    for element_id, qty in order_dict.items():
-        if qty <= 0:
-            continue
-        parts = ceil(qty / max_per_item)
-        remaining = qty
-        for _ in range(parts):
-            take = min(remaining, max_per_item)
-            chunks_per_element[element_id].append(take)
-            remaining -= take
-        max_parts = max(max_parts, len(chunks_per_element[element_id]))
-
-    if max_parts == 0:
+    if not active_items:
         log_info("No items to write.")
         return
 
-    # Step 2: produce files_needed = max_parts files
-    for file_index in range(max_parts):
-        out_items = defaultdict(int)
-        for element_id, parts in chunks_per_element.items():
-            if file_index < len(parts):
-                out_items[element_id] = parts[file_index]
+    # Step 1: Determine if we need more than one file
+    max_qty = max(active_items.values())
+    max_parts = ceil(max_qty / max_per_item)
 
-        # determine path
+    # Ensure destination exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- Case A: Fast Path (Single File) ---
+    if max_parts <= 1:
+        file_items = [{"elementId": k, "quantity": v} for k, v in active_items.items()]
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(file_items, f, indent=4)
+        log_debug(f"Saved {len(file_items)} items to {output_path}")
+        return
+
+    # --- Case B: Multi-file Math Split ---
+    for file_index in range(max_parts):
+        file_items = []
+        offset = file_index * max_per_item
+        
+        for element_id, total_qty in active_items.items():
+            # Calculate how much of this specific element belongs in this file
+            # Logic: Subtract the offset (already sent) and cap at max_per_item
+            qty_for_this_file = min(max(total_qty - offset, 0), max_per_item)
+            
+            if qty_for_this_file > 0:
+                file_items.append({
+                    "elementId": element_id, 
+                    "quantity": qty_for_this_file
+                })
+
+        # Determine path (file.json, file_1.json, file_2.json, etc.)
         if file_index == 0:
             out_path = output_path
         else:
             out_path = output_path.with_name(f"{output_path.stem}_{file_index}{output_path.suffix}")
 
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump([{"elementId": str(k), "quantity": v} for k, v in out_items.items()],
-                      f, indent=4)
+            json.dump(file_items, f, indent=4)
 
-        log_debug(f"Saved {len(out_items)} items to {out_path}")
+        log_debug(f"Saved {len(file_items)} items to {out_path}")
 
 def GetOutputPathDir():
     return Path(__file__).resolve().parent.parent / "outputs"

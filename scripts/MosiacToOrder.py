@@ -1,10 +1,19 @@
 from collections import defaultdict
 import numpy as np
-from Util import GetPaletteDict
-from collections import Counter
-from pathlib import Path
 import shutil
-from .Util import GetOutputPathDir, SaveDictAsJsonsOptimized, log_info, log_debug, log_error
+import os
+from pathlib import Path
+from math import ceil
+
+# Assuming these are in your Util.py
+from Util import (
+    GetPaletteDict, 
+    GetOutputPathDir, 
+    SaveDictAsJsonsOptimized, 
+    log_info, 
+    log_debug, 
+    log_error
+)
 
 PALETTE_DICT = GetPaletteDict()
 
@@ -13,232 +22,132 @@ def get_order_lists_file_path():
 
 def empty_order_list_folder():
     folder = Path(get_order_lists_file_path())
-    shutil.rmtree(folder)
+    # missing_ok=True is safer, but if using older Python:
+    if folder.exists():
+        shutil.rmtree(folder)
     folder.mkdir(parents=True, exist_ok=True)
 
-# saves list of all lego pieces needed for both layers
 def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     """
-    fg_out_rgba : PIL Image, mode RGBA
-    bg_rgba     : PIL Image, mode RGBA (or RGB, alpha ignored)
+    Analyzes images to produce a consolidated LEGO piece order.
+    Optimized for CPU efficiency and minimal memory allocation.
     """
     log_info("clearing previous order lists...")
-    if output_dir is None: #only clear local folder if output_dir not provided
+    if output_dir is None:
         empty_order_list_folder()
+    
     log_info("creating order list...")
-    # -----------------
-    # Layer 0: Base Layer (to place all plates on)
-    # -----------------
-    desiredSize = bg_rgba.size
-    #order = GetBaseplatesForSize(desiredSize[0], desiredSize[1])
-    order = defaultdict(int, GetBaseplatesForSize(desiredSize[0], desiredSize[1]))
 
+    # 1. Initialize with Baseplates
+    # We wrap the result in a defaultdict(int) to allow safe += operations later
+    width, height = bg_rgba.size
+    order = defaultdict(int, GetBaseplatesForSize(width, height))
 
-    # -----------------
-    # Layer 1: Background
-    # -----------------
+    # 2. Layer: Background
+    # Reshape (H, W, 3) -> (N, 3) for fast unique counting
     bg_arr = np.asarray(bg_rgba)[:, :, :3].reshape(-1, 3)
     unique_rgb, counts = np.unique(bg_arr, axis=0, return_counts=True)
+    
     for rgb_row, count in zip(unique_rgb, counts):
-        piece_id = GetLegoPieceFromColor(tuple(int(c) for c in rgb_row), PALETTE_DICT)
-        order[piece_id] += int(count)
-
-    # -----------------
-    # Layer 2: Foreground
-    # -----------------
-    if not (fg_out_rgba is None):
-        fg_arr = np.asarray(fg_out_rgba)
-        visible = fg_arr[:, :, 3] > 0
-        fg_rgb = fg_arr[visible, :3]
-        unique_rgb, counts = np.unique(fg_rgb, axis=0, return_counts=True)
-        for rgb_row, count in zip(unique_rgb, counts):
-            piece_id = GetLegoPieceFromColor(tuple(int(c) for c in rgb_row), PALETTE_DICT)
+        color_tuple = tuple(rgb_row)
+        try:
+            piece_id = PALETTE_DICT[color_tuple]
             order[piece_id] += int(count)
+        except KeyError:
+            log_error(f"Background color {color_tuple} not found in LEGO palette")
 
+    # 3. Layer: Foreground
+    if fg_out_rgba is not None:
+        fg_arr = np.asarray(fg_out_rgba)
+        # Process only pixels with Alpha > 0
+        visible_mask = fg_arr[:, :, 3] > 0
+        fg_rgb = fg_arr[visible_mask, :3]
+        
+        unique_fg, fg_counts = np.unique(fg_rgb, axis=0, return_counts=True)
+        for rgb_row, count in zip(unique_fg, fg_counts):
+            color_tuple = tuple(rgb_row)
+            try:
+                piece_id = PALETTE_DICT[color_tuple]
+                order[piece_id] += int(count)
+            except KeyError:
+                log_error(f"Foreground color {color_tuple} not found in LEGO palette")
 
-    log_debug("returning order list...")
-    finalList = dict(order)
-
+    # 4. Layer: Frame
     if want_frame:
-        frameList = GetFrameForSize(bg_rgba.width, bg_rgba.height)
-        finalList = dict(Counter(order) + Counter(frameList))
+        frame_parts = GetFrameForSize(width, height)
+        for pid, qty in frame_parts.items():
+            order[pid] += qty
 
-    log_debug(f"finished order list! {finalList}")
-    #save json of order list
+    # 5. Save Output
     if output_dir is not None:
-        output_json_path = output_dir / "OrderLists" / f"order_list.json"
+        output_json_path = output_dir / "OrderLists" / "order_list.json"
     else:
-        output_json_path = get_order_lists_file_path() / f"order_list.json"
-    SaveDictAsJsonsOptimized(finalList, output_json_path)
-    log_info(f"Sum of all pieces: {sum(finalList.values())}")
-    return finalList
+        output_json_path = get_order_lists_file_path() / "order_list.json"
 
+    # Pass the defaultdict directly to the utility
+    SaveDictAsJsonsOptimized(order, output_json_path)
+    
+    log_info(f"Sum of all pieces: {sum(order.values())}")
+    return order
 
-
-#helper function for determining piece from color
-#all plates (1x1) are piece number 3024
-#returns lego piece number for given rgb color via dictionary lookup
-def GetLegoPieceFromColor(rgb, palette_dict=PALETTE_DICT):
-
-    rgb = tuple(int(c) for c in rgb)
-
-    try:
-        return palette_dict[rgb]
-    except KeyError:
-        raise ValueError(f"RGB color {rgb} not found in LEGO palette")
-   
-
-# plate_id_by_size = {
-#     (32, 32): 6139364,
-#     (16, 32): 4269651,
-#     (16, 16): 6004927,
-#     (8, 16): 4654613,
-#     (8, 8): 4210802,
-#     (6, 16): 4226358,
-#     (6, 14): 4210720,
-#     (6, 12): 4256149,
-#     (6, 10): 4211114,
-#     (6, 8): 4210794,
-#     (6, 6): 4211134,
-#     (4, 12): 4210706,
-#     (4, 10): 4211122,
-#     (4, 8): 4211061,
-#     (4, 6): 4211115,
-#     (4, 4): 4243831,
-#     (3, 3): 6039176,
-#     (2, 16): 4210796,
-#     (2, 14): 6000970,
-#     (2, 12): 4211067,
-#     (2, 10): 4210678,
-#     (2, 8): 4210997,
-#     (2, 4): 4211065,
-#     (2, 3): 4211043,
-#     (2, 2): 4211094,
-#     (1, 12): 6133611,
-#     (1, 10): 4257526,
-#     (1, 8): 4210998,
-#     (1, 6): 4211056,
-#     (1, 5): 6413109,
-#     (1, 4): 4211001,
-#     (1, 3): 4211133,
-#     (1, 2): 4211063,
-#     (1, 1): 4210719,
-# }
-
-
-
-
-# this function has input of width and height in studs
-# returns a dictionary of id and quantity for lego pieces required for the back plate grid
 def GetBaseplatesForSize(width, height):
+    """Calculates structural baseplate components."""
+    # Floor division (//) is faster than float division + int() cast
+    blockWidth = width // 16
+    blockHeight = height // 16
 
-
-    blockWidth = width / 16
-    blockHeight = height / 16
-
-
-    #calculate quantities
-    numOfBlocks = int(blockWidth * blockHeight)
-    numOfGreenConnectors = (int)((2 * (blockWidth - 1)) * blockHeight)
-    numOfGreenPlates = (int)((blockWidth - 1) * blockHeight)
-    numOfRedConnectors = (int)((2 * (blockHeight - 1)) * blockWidth)
-    numOfRedPlates = (int)((blockHeight - 1) * blockWidth)
+    numOfBlocks = blockWidth * blockHeight
+    numOfGreenConnectors = (2 * (blockWidth - 1)) * blockHeight
+    numOfGreenPlates = (blockWidth - 1) * blockHeight
+    numOfRedConnectors = (2 * (blockHeight - 1)) * blockWidth
+    numOfRedPlates = (blockHeight - 1) * blockWidth
     twoxtwoPlates = numOfBlocks * 5
     nailHooks = min(numOfBlocks, 2)
     nailHookConnectors = nailHooks * 2
 
-
-    blockID = 6302092
-    nailHookID = 6302094
-    nailHookConnectorID = 6279875
-    greenConnectorID = 6526672
-    redConnectorID = 6347789
-    greenPlateID = 4621548
-    redPlateID = 379521
-    twoxtwoPlateID = 4211094
-    # convert size counts → piece ID counts
-    baseplates = defaultdict(int)
-    baseplates[blockID] = numOfBlocks
-    baseplates[nailHookID] = nailHooks
-    baseplates[nailHookConnectorID] = nailHookConnectors
-    baseplates[greenConnectorID] = numOfGreenConnectors
-    baseplates[redConnectorID] = numOfRedConnectors
-    baseplates[greenPlateID] = numOfGreenPlates
-    baseplates[redPlateID] = numOfRedPlates
-    baseplates[twoxtwoPlateID] = twoxtwoPlates
-
-
-    return dict(baseplates)
-
-
-
+    # Return standard dict; GenerateOrderList will upgrade it to defaultdict
+    return {
+        6302092: int(numOfBlocks),
+        6302094: int(nailHooks),
+        6279875: int(nailHookConnectors),
+        6526672: int(numOfGreenConnectors),
+        6347789: int(numOfRedConnectors),
+        4621548: int(numOfGreenPlates),
+        379521:  int(numOfRedPlates),
+        4211094: int(twoxtwoPlates)
+    }
 
 def GetFrameForSize(width, height):
-
-
-    blockWidth = (int)(width / 16)
-    blockHeight = (int)(height / 16)
-
-
+    """Calculates frame components based on mosaic dimensions."""
+    blockWidth = width // 16
+    blockHeight = height // 16
     num_of_corners = 4
-    #frame_width = width + 2 #will be two wider because it will be the border
-    #frame_height = height + 2 #will be two taller because it will be the border
 
-
-    #calculate quantities
     cornerBlocks = num_of_corners
     cornerPlates = num_of_corners
     onexoneBricks = num_of_corners * 2
-    twoxoneBricksWithAxleHole = (int)(blockWidth * 4) + (int)(blockHeight * 4) #two sides and two per block = *4
-    axlePegs = twoxoneBricksWithAxleHole #1:1 with the holes
-    eightxoneBricks = (int)(twoxoneBricksWithAxleHole / 2) # these go inbetween two axle hole blocks
-    fourxoneBricks = ((blockWidth - 1) * 2) + ((blockHeight - 1) * 2) #connect each non corner blocks
-    tenxtwoPlates = eightxoneBricks #will always be below the 8x1
-    sixxtwoPlates = fourxoneBricks #will always be below the 4x1
-    #Above handles the bottom level
-    sixteenxoneBricks = (blockWidth * 2) + (blockHeight * 2) #1:1 with perimeter in blocks
-    onexoneBricks += num_of_corners #to handle corners (not handled by 16 length blocks)
-    #above handles the middle level
+    twoxoneBricksWithAxleHole = (blockWidth * 4) + (blockHeight * 4)
+    axlePegs = twoxoneBricksWithAxleHole
+    eightxoneBricks = twoxoneBricksWithAxleHole // 2
+    fourxoneBricks = ((blockWidth - 1) * 2) + ((blockHeight - 1) * 2)
+    tenxtwoPlates = eightxoneBricks
+    sixxtwoPlates = fourxoneBricks
+    sixteenxoneBricks = (blockWidth * 2) + (blockHeight * 2)
+    onexoneBricks += num_of_corners
     thinCornerPlates = num_of_corners
+    flatonexfourPlates = 8 * (blockWidth + blockHeight) - 4
 
-    flatonexfourPlates = 8 * (blockWidth + blockHeight) - 4 # -4 to handle corners only needing 1 instead of 2
-
-
-
-    #each corner needs 1 corner plate, 2 1x1x1 blocks, 1 corner block
-    #STRETCH: consider passing in desired frame color to select different piece IDs
-    cornerBlockID = 235726
-    cornerPlateID = 6483102
-    onexoneBrickID = 300526
-    twoxoneBrickWithAxleHoleID = 6178922
-    axlePegID = 4109810
-    eightxoneBrickID = 300826
-    fourxoneBrickID = 301026
-    tenxtwoPlateID = 383226
-    sixxtwoPlateID = 379526
-    sixteenxoneBrickID = 246526
-    thinCornerPlateID = 6439175
-    flatonexfourPlateID = 243126
-
-
-    #initialize dictionary
-    baseplates = defaultdict(int)
-    baseplates[cornerBlockID] = cornerBlocks
-    baseplates[cornerPlateID] = cornerPlates
-    baseplates[onexoneBrickID] = onexoneBricks
-    baseplates[twoxoneBrickWithAxleHoleID] = twoxoneBricksWithAxleHole
-    baseplates[axlePegID] = axlePegs
-    baseplates[eightxoneBrickID] = eightxoneBricks
-    baseplates[fourxoneBrickID] = fourxoneBricks
-    baseplates[tenxtwoPlateID] = tenxtwoPlates
-    baseplates[sixxtwoPlateID] = sixxtwoPlates
-    baseplates[sixteenxoneBrickID] = sixteenxoneBricks
-    baseplates[thinCornerPlateID] = thinCornerPlates
-    baseplates[flatonexfourPlateID] = flatonexfourPlates
-   
-
-
-    #return dictionary of piece id and quantity and keys and values
-    return dict(baseplates)
-
-
+    return {
+        235726:  int(cornerBlocks),
+        6483102: int(cornerPlates),
+        300526:  int(onexoneBricks),
+        6178922: int(twoxoneBricksWithAxleHole),
+        4109810: int(axlePegs),
+        300826:  int(eightxoneBricks),
+        301026:  int(fourxoneBricks),
+        383226:  int(tenxtwoPlates),
+        379526:  int(sixxtwoPlates),
+        246526:  int(sixteenxoneBricks),
+        6439175: int(thinCornerPlates),
+        243126:  int(flatonexfourPlates)
+    }
