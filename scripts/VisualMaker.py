@@ -1700,9 +1700,10 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
     draw2.text((30, middle_y_of_image), "The frame and mosaic should be connected", fill="black", font=font)
     draw_ortho_plate(draw2, -12, 16, True, 2, 1, 3, (.3, .3, .3), False)
     #draw axle pin below the axle pin text
-    # axle_pin = Image.open("axle_pin.jpg").convert("RGBA") #TODO: update file path to work on hosted service
-    # axle_pin = axle_pin.resize((100, 100))
-    # to_reuse.paste(axle_pin, (300, 150), axle_pin)
+    BASE_DIR = Path(__file__).resolve().parent
+    axle_pin = Image.open(BASE_DIR / "axle_pin.jpg").convert("RGBA") #TODO: ensure file path works on hosted service
+    axle_pin = axle_pin.resize((100, 100))
+    to_reuse.paste(axle_pin, (300, 150), axle_pin)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
     #display plate and brick layer (those layers should be complete now)
