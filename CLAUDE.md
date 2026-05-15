@@ -248,3 +248,65 @@ CORS origins are hardcoded. The env var implies you can change the frontend URL 
 
 ### `queue.Queue` state is not persisted across server restarts
 If the server restarts mid-queue (e.g., Render cold start), all queued and running jobs are lost with no notification to users. Users must discover this by polling and resubmit manually.
+
+---
+
+## Order Optimizer (checkout pipeline)
+
+Source: `scripts/checkout/`. Full documentation: `docs/ORDER_OPTIMIZER.md`.
+
+### What it does
+
+After a mosaic job completes, the checkout pipeline reads `order_list.json` (copied to `outputs/{job_id}/order_list.json` before workspace deletion), fetches live BrickOwl listings, runs a greedy two-pass optimizer to minimize total cost (piece prices + per-seller shipping), then executes a Saga: Stripe hold → BrickOwl sub-orders (with stockout retry) → LEGO.com Playwright fallback → Stripe capture. LAIGO adds a service fee of `max($3.00, 5% of grand_total)`.
+
+### Endpoints
+
+```
+POST /jobs/{job_id}/checkout/quote                     → QuoteResponse       (no charge, 10-min TTL)
+POST /jobs/{job_id}/checkout/confirm                   → ConfirmResponse     (async Saga, poll for result)
+GET  /jobs/{job_id}/checkout/{checkout_id}/status      → CheckoutStatusResponse
+```
+
+### Module layout (`scripts/checkout/`)
+
+| File | Role |
+|---|---|
+| `router.py` | FastAPI router; registered in `Main.py` via `app.include_router(checkout_router, prefix="/jobs")` |
+| `models.py` | All Pydantic models and `StockoutError` exception |
+| `brickowl_client.py` | Async BrickOwl API wrapper (httpx, semaphore-bounded, exponential backoff) |
+| `optimizer.py` | Two-pass greedy allocator — pure function, no I/O |
+| `saga.py` | Saga orchestrator; checkpoints to `outputs/{job_id}/checkout_state.json` |
+| `lego_fallback.py` | Playwright automation for LEGO.com Pick-a-Brick fallback |
+| `cache.py` | In-process TTL cache (listings, quotes); sweep task started from `Main.py lifespan` |
+| `checkout_store.py` | Disk-backed checkout state + `read_order_list()` |
+| `stripe_client.py` | Stripe PaymentIntent stub (`STRIPE_ENABLED = False`; flip to enable). **Not the safety boundary** — see `gate.py` |
+| `gate.py` | Single source of truth for "is checkout safe to run?" — `compute_decision()`, `require_open()`, `GateClosedError`, `CheckoutMode {DISABLED, TEST, LIVE}`. Boot-time assertion in `Main.py` lifespan refuses startup if `CHECKOUT_ENABLED=true` but env is misconfigured |
+
+### Key design notes
+
+- **Order list path**: `Main.py run_job()` copies `workspace/OrderLists/order_list.json` to `outputs/{job_id}/order_list.json` before deleting the workspace. `checkout_store.read_order_list()` reads this stable path.
+- **Saga locking**: `checkout_store.update()` holds an `asyncio.Lock` internally. Never nest `load()`/`update()` calls — `asyncio.Lock` is not reentrant and will deadlock.
+- **BrickOwl endpoints**: Verify `/catalog/id_lookup`, `/order/create`, `/order/cancel` paths against https://www.brickowl.com/developer once the API key is active. Field names in `get_listings_for_element()` may need adjustment based on the live API response.
+- **Stripe / Checkout gate**: `STRIPE_ENABLED = False` in `stripe_client.py` is now only one of several conditions checked by `gate.compute_decision()`. The full gate also requires `CHECKOUT_ENABLED=true` in env, a valid `STRIPE_SECRET_KEY` prefix (`sk_test_` or `sk_live_`), at least one marketplace's credentials, and `RENDER=true` for live keys. Flipping `STRIPE_ENABLED = True` alone is **no longer sufficient** to put checkout into TEST or LIVE mode. See `docs/CHECKOUT_AUDIT.md §10` for the full layered defense and rollout playbook. **TODAY: even though gate + boot assertion are in place, the bypass at `saga.py:104-106` (`except NotImplementedError: pass`) is still live** — Layers 3 (router 503) and 4 (Saga pre-flight) are pending and are what actually retire RPN #1.
+- **Playwright selectors**: LEGO.com's React SPA can break `lego_fallback.py` silently. Screenshots at every step aid debugging (`outputs/lego_debug/`).
+
+### Secrets
+
+All secrets in `.env.secrets` (gitignored): `BRICKOWL_API_KEY`, `STRIPE_SECRET_KEY`, `LEGO_EMAIL`, `LEGO_PASSWORD`. Never commit this file.
+
+### First-time setup
+
+```bash
+pip install httpx stripe playwright
+playwright install chromium
+# Populate .env.secrets with the four keys above
+```
+
+### Antipatterns to avoid
+
+- Do not import `stripe` anywhere except `stripe_client.py`.
+- Do not call BrickOwl API outside `brickowl_client.py`.
+- Do not call Playwright outside `lego_fallback.py`.
+- Keep `optimizer.py` as a pure function — no I/O, no env reads at call time.
+- Do not catch `GateClosedError` anywhere except the Saga's top-level error handler. The exception is designed to be loud against `except NotImplementedError:` and `except ValueError:` patterns. Adding new catch sites defeats the layered defense.
+- Do not add per-component bypasses like `try: do_payment(); except NotImplementedError: pass`. Use `gate.require_open()` at the top of the entry point instead.

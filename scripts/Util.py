@@ -12,20 +12,24 @@ DEBUG = bool(os.getenv("DEBUG"))
 
 def load_project_env():
     """
-    Load .env file from project root.
-    Assumes this file is in scripts/ and .env is in project root.
+    Load .env and .env.secrets from project root.
+    Assumes this file is in scripts/ and both env files are in project root.
+    .env.secrets is optional (gitignored) and never committed.
     """
-    # Project root is parent of scripts/
     project_root = Path(__file__).parent.parent.resolve()
-    env_path = project_root / ".env"
 
+    env_path = project_root / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path)
         log_info(f".env loaded from {env_path}")
     else:
         log_error(f"No .env found at {env_path}, using defaults or system environment")
 
-    # Optional: return project_root for convenience
+    secrets_path = project_root / ".env.secrets"
+    if secrets_path.exists():
+        load_dotenv(dotenv_path=secrets_path, override=False)
+        log_info(f".env.secrets loaded from {secrets_path}")
+
     return project_root
 
 def log_info(message):

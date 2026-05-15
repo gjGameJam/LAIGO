@@ -23,6 +23,10 @@ import sys
 from PIL import Image
 from .picToMosiac import pic_to_mosaic, MosaicType
 from .Util import load_project_env
+from .checkout.router import checkout_router
+from .checkout.debug_router import debug_router
+from .checkout.cache import start_cache_sweeper
+from .checkout.gate import compute_decision, is_truthy, CheckoutMode
 import gc
 
 # -----------------------------
@@ -89,6 +93,44 @@ log.info(f"STUDS_PER_BLOCK:  {STUDS_PER_BLOCK}")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting LAIGO API...")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CHECKOUT GATE — Layer 1: refuse to boot if checkout is misconfigured.
+    # See scripts/checkout/gate.py for the full defense-in-depth design.
+    #
+    # This block enforces two safety invariants at startup:
+    #   (a) If CHECKOUT_ENABLED=true, the gate MUST compute TEST or LIVE.
+    #       If env says "enabled" but reality says DISABLED (missing key,
+    #       wrong prefix, no marketplace creds), refuse to boot — better to
+    #       have the server down than to accept /confirm without payment.
+    #   (b) A LIVE Stripe key outside the Render environment is forbidden,
+    #       regardless of the master flag. This catches the case where a
+    #       live key leaks into a dev .env.secrets file by accident.
+    # ─────────────────────────────────────────────────────────────────────────
+    gate_decision = compute_decision()
+    log.info(f"Checkout gate: mode={gate_decision.mode.value} "
+             f"payment_provider={gate_decision.payment_provider} "
+             f"marketplaces_live={list(gate_decision.marketplaces_live)}")
+    for reason in gate_decision.reasons:
+        log.info(f"  gate reason: {reason}")
+
+    if is_truthy(os.environ.get("CHECKOUT_ENABLED")) and gate_decision.mode == CheckoutMode.DISABLED:
+        log.critical(
+            "CHECKOUT_ENABLED=true but gate computed DISABLED. "
+            f"Reasons: {'; '.join(gate_decision.reasons)}. "
+            "Refusing to boot — fix the configuration or unset CHECKOUT_ENABLED."
+        )
+        raise RuntimeError("Checkout gate misconfigured — see CRITICAL log line above")
+
+    stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
+    if stripe_key.startswith("sk_live_") and not os.environ.get("RENDER"):
+        log.critical(
+            "Live Stripe key (sk_live_...) detected outside the Render environment. "
+            "This is never allowed — use sk_test_... for local development. "
+            "Refusing to boot."
+        )
+        raise RuntimeError("Live Stripe key outside Render is forbidden")
+
     try:
         # max_tasks_per_child=1: worker exits and is respawned after every job,
         # releasing all memory (numpy, skimage, PIL, cv2, mediapipe, palette globals)
@@ -130,6 +172,9 @@ async def lifespan(app: FastAPI):
         log.critical(f"Failed to start cleanup thread: {e}", exc_info=True)
         raise
 
+    start_cache_sweeper()
+    log.info("Cache sweeper started")
+
     log.info("LAIGO API ready")
     yield
 
@@ -150,6 +195,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(checkout_router, prefix="/jobs")
+app.include_router(debug_router)
 
 try:
     app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
@@ -365,6 +412,15 @@ def run_job(job_id: str,
         tb = traceback.format_exc()
         wlog.error(f"Job {job_id} failed to create archive: {e}", exc_info=True)
         return fail(f"Archive creation failed: {e}", tb)
+
+    # Copy order_list.json to a stable location before workspace deletion so the
+    # checkout optimizer can read it after the workspace is gone.
+    _order_list_src = workspace / "OrderLists" / "order_list.json"
+    if _order_list_src.exists():
+        try:
+            shutil.copy2(_order_list_src, job_root / "order_list.json")
+        except Exception as e:
+            wlog.warning(f"Job {job_id} could not copy order_list.json: {e}")
 
     # --- Success cleanup ---
     shutil.rmtree(workspace, ignore_errors=True)

@@ -3,7 +3,27 @@
     "allow": [
       "Bash(Test-Path *)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\" -Recurse -Include \"*.py\")",
-      "Bash(Select-Object -ExpandProperty FullName)"
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\" -Recurse -File)",
+      "Bash(Select-Object -First 50)",
+      "Bash(Format-Table Name, FullName)",
+      "WebFetch(domain:www.brickowl.com)",
+      "WebFetch(domain:brickowl.com)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:forum.brickowl.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:www.bricklink.com)",
+      "WebFetch(domain:davesweb.github.io)",
+      "WebFetch(domain:apidev.bricklink.com)",
+      "Bash(Remove-Item \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\\\\scripts\\\\checkout\\\\brickowl_client.py\" -Force)",
+      "Bash(Remove-Item \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\\\\scripts\\\\checkout\\\\lego_availability.py\" -Force)",
+      "Bash(Remove-Item \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\\\\scripts\\\\checkout\\\\lego_fallback.py\" -Force)",
+      "Bash(Write-Host \"Deleted old client files\")",
+      "PowerShell(Remove-Item *)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"from checkout.optimizer import optimize, merge_listings, apply_free_shipping_thresholds; print\\('imports OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe *)"
     ]
   }
 }
