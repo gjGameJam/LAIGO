@@ -25,6 +25,7 @@ from .picToMosiac import pic_to_mosaic, MosaicType
 from .Util import load_project_env
 from .checkout.router import checkout_router
 from .checkout.debug_router import debug_router
+from .checkout.health_router import checkout_health_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
 import gc
@@ -197,6 +198,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(checkout_router, prefix="/jobs")
 app.include_router(debug_router)
+app.include_router(checkout_health_router)
 
 try:
     app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")

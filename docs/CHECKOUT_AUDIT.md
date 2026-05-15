@@ -926,7 +926,7 @@ The fix for RPN #1 ("Stripe disabled, orders ship anyway") is a six-layer defens
 |---|---|---|---|
 | **L0** Gate module (`scripts/checkout/gate.py`) | Single source of truth: `compute_decision()`, `require_open()`, `GateClosedError`, `CheckoutMode {DISABLED, TEST, LIVE}` | ✅ **Shipped 2026-05-15** | Foundation for all other layers |
 | **L1** Boot assertion (`scripts/Main.py` lifespan) | Logs gate state on boot; refuses to start if `CHECKOUT_ENABLED=true` but gate is DISABLED; refuses any `sk_live_` outside Render | ✅ **Shipped 2026-05-15** | T2, T7 |
-| **L2** Health endpoint (`/health/checkout`) | Operational visibility — returns gate JSON for Render healthcheck / dashboards | ❌ Not built | Post-deploy regression detection |
+| **L2** Health endpoint (`/health/checkout`) | Public read-only endpoint returning `{mode, is_open, payment_provider, marketplaces_live, reasons[], commit}`. Always 200; `Cache-Control: no-store` so kill-switch state propagates immediately. `commit` is read from `RENDER_GIT_COMMIT` (null in local dev). | ✅ **Shipped 2026-05-15** | Post-deploy verification; config-drift detection; future dashboard |
 | **L3** Router gate (`/confirm` returns 503) | HTTP-layer short-circuit when gate is DISABLED | ❌ Not built | T1 at HTTP layer, T4 for routes that go through router |
 | **L4** Saga pre-flight (`gate.require_open()` + delete `except NotImplementedError: pass` at `saga.py:104,218`) | Refuses to advance before any external call. **The actual bypass closure.** | ❌ Not built | T1, T3, T4, T6 — the keystone layer |
 | **L5** PaymentProvider Protocol + registry | No stub providers exist; `get_active()` raises if none constructed. Each provider's `__init__` validates SDK + env atomically. | ❌ Not built | T1, T5 |
@@ -936,6 +936,7 @@ The fix for RPN #1 ("Stripe disabled, orders ship anyway") is a six-layer defens
 
 - **`scripts/checkout/gate.py`** (new): pure-function `compute_decision()` returns a frozen `GateDecision` carrying mode + reasons + payment_provider + marketplaces_live. `require_open()` is the enforcement primitive for Saga + router; raises `GateClosedError` (does not inherit from `NotImplementedError` so existing silent-catches can't swallow it). `is_truthy()` is exposed publicly for env-flag parsing.
 - **`scripts/Main.py`** lifespan: logs the gate decision at every boot, refuses to boot if env-says-enabled-but-reality-disagrees. Mirror of `stripe_client._log_mode()`'s live-key safeguard, evaluated at boot rather than first Stripe call.
+- **`scripts/checkout/health_router.py`** (new, L2): public `GET /health/checkout` returning the gate snapshot + commit SHA. Always 200; `Cache-Control: no-store`. Mounted at root in `Main.py` alongside the existing `/health` liveness endpoint (which is untouched — Render's healthcheck must remain pointed at `/health`, not `/health/checkout`).
 
 ### Antipatterns identified during review
 
@@ -950,6 +951,23 @@ The fix for RPN #1 ("Stripe disabled, orders ship anyway") is a six-layer defens
 | I2 | `stripe_client._log_mode()` redundant with gate's check | Keep until L5 supersedes it |
 | I3 | `CLAUDE.md` stale (no mention of gate.py) | **Fixed** 2026-05-15 |
 | I4 | `docs/ORDER_OPTIMIZER.md` line 465 calls dev-mode bypass "safe for development" | Update when L4 lands and the wording becomes false |
+
+### Operational playbook now that L2 is live
+
+After every Render deploy, run:
+```
+curl https://laigo.onrender.com/health/checkout
+```
+Expected response shape:
+```json
+{"mode":"live","is_open":true,"payment_provider":"stripe",
+ "marketplaces_live":["brickowl","lego_official"],"reasons":[],"commit":"abc1234..."}
+```
+If `mode` is unexpected or `reasons` is non-empty, the deploy is misconfigured even though boot succeeded. Investigate before sending customer traffic.
+
+The kill switch (unset `CHECKOUT_ENABLED` in Render dashboard → restart service) results in `mode: "disabled"` within ~30 seconds. No code change, no rollback needed.
+
+**Do not point Render's healthcheck at `/health/checkout`** — that URL stays 200 even when checkout is intentionally disabled, but the *intent* of Render's healthcheck is liveness, which is what `/health` provides.
 
 ### What "RPN #1 retired" requires
 

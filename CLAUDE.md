@@ -281,6 +281,7 @@ GET  /jobs/{job_id}/checkout/{checkout_id}/status      → CheckoutStatusRespons
 | `checkout_store.py` | Disk-backed checkout state + `read_order_list()` |
 | `stripe_client.py` | Stripe PaymentIntent stub (`STRIPE_ENABLED = False`; flip to enable). **Not the safety boundary** — see `gate.py` |
 | `gate.py` | Single source of truth for "is checkout safe to run?" — `compute_decision()`, `require_open()`, `GateClosedError`, `CheckoutMode {DISABLED, TEST, LIVE}`. Boot-time assertion in `Main.py` lifespan refuses startup if `CHECKOUT_ENABLED=true` but env is misconfigured |
+| `health_router.py` | `GET /health/checkout` — public, always 200, no cache. Returns `{mode, is_open, payment_provider, marketplaces_live, reasons[], commit}`. Separate from the liveness `/health` in `Main.py` — Render's healthcheck must stay on `/health` |
 
 ### Key design notes
 
