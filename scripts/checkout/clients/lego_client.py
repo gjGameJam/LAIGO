@@ -39,7 +39,7 @@ import httpx
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 from ..models import SellerListing
-from ..cache import cache_get, cache_set
+from ..cache import cache_get, cache_set, cache_delete
 
 logger = logging.getLogger("laigo")
 
@@ -115,6 +115,19 @@ async def _search(element_id: str) -> Optional[dict]:
     except Exception as exc:
         logger.warning(f"LEGO.com search failed for element {element_id}: {exc}")
         return None
+
+
+# ── Cache invalidation ────────────────────────────────────────────────────────
+# Owned by this module so the cache key naming is in exactly one place.
+# Mirror functions exist on brickowl_client and bricklink_client. (B9/B10/H8)
+
+async def invalidate_listing(element_id: str) -> None:
+    """Drop any cached LEGO.com search result for `element_id`.
+
+    Idempotent. Safe to call even if no cache entry exists. Used by the
+    Saga stockout-retry path to force a fresh fetch on the next quote.
+    """
+    await cache_delete(f"lego_raw:{element_id}")
 
 
 def _parse_available(item: dict) -> bool:

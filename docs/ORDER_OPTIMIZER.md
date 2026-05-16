@@ -75,7 +75,12 @@ GET /jobs/{id}/checkout/{co_id}/status
 | `saga.py` | Saga orchestrator; routes orders by seller_id prefix |
 | `cache.py` | In-process TTL cache; sweep task started from `Main.py lifespan` |
 | `checkout_store.py` | Disk-backed checkout state + `read_order_list()` |
-| `stripe_client.py` | Stripe PaymentIntent wrapper (`STRIPE_ENABLED = False`) |
+| `payment/base.py` | Provider Protocol + `PaymentHold` value type + retryable/permanent/unavailable exception hierarchy. Dependency-free (no SDK imports). |
+| `payment/registry.py` | Single-active provider registry: `register()`, `get_active()`, `is_configured()`, `active_name()`, `active_mode()`. Populated once per process at lifespan startup. |
+| `payment/stripe_provider.py` | `StripeProvider` implementing the Protocol. Houses the `STRIPE_ENABLED` operator flag. Translates Stripe error classes into Retryable/Permanent. **Not the safety boundary** — see `gate.py`. |
+| `gate.py` | Layered checkout-gate single source of truth (`CheckoutMode`, `compute_decision`, `require_open`, `GateClosedError`). Reads `payment.registry`. Read this and `docs/CHECKOUT_AUDIT.md §10` before touching checkout flow. |
+| `gate_router.py` | `GET /checkout/gate` — public, always 200, no cache. Reports gate state. **Render's healthcheck must stay on `/health`** (not `/checkout/gate`). |
+| `dependencies.py` | FastAPI dependencies for checkout. `require_checkout_gate_open` gates `/confirm` (Layer 3) with 503 when gate closed. |
 | `debug_router.py` | Swagger test endpoints (prefix `/checkout-debug`) |
 | `clients/__init__.py` | Empty; makes `clients` a sub-package |
 | `clients/lego_client.py` | LEGO.com: pricing, availability, Playwright ordering |
@@ -96,7 +101,9 @@ GET /jobs/{id}/checkout/{co_id}/status
 | BrickOwl order placement | ❌ No API | BrickOwl is a seller API; no buyer order/create endpoint exists |
 | BrickLink price guide | ❌ Not started | Need seller account + API credential setup |
 | BrickLink order placement | ❌ Not started | Need seller account; BrickLink API does not expose per-store listings |
-| Stripe payment hold/capture | ❌ Stub | Set `STRIPE_ENABLED = True` after end-to-end test |
+| Stripe payment hold/capture | ✅ Real | Wired via `StripeProvider`. Set `STRIPE_ENABLED = True` in `payment/stripe_provider.py` AND `STRIPE_SECRET_KEY=sk_test_...` in env to enable. |
+| Capture retry + MANUAL_REVIEW | ✅ Working | 3 attempts on transient Stripe errors (`APIConnectionError`/`RateLimitError`/`APIError`); backoff 1s/4s/16s; permanent errors skip retry. Exhaust → `SagaStatus.MANUAL_REVIEW`. |
+| Hold authorization buffer | ✅ 5% | Hold = `ceil(quote_total × 1.05)`; capture = actual allocated total. Capture > authorized → MANUAL_REVIEW. |
 | LEGO.com free shipping threshold ($35) | ✅ Working | Applied automatically; recalculates all downstream totals |
 | Multi-seller shipping consolidation | ✅ Working | Only effective once BrickOwl/BrickLink return per-seller listings |
 | Unsourceable piece blocking | ✅ Working | Blocks `/confirm` if any piece unavailable on all active sources |
@@ -189,7 +196,7 @@ async def get_all_listings(
 ) -> dict[str, list[SellerListing]]   # elementId → [SellerListing, ...]
 ```
 
-`router.py` calls all three concurrently, merges the results via `_merge_listings()`, and passes the combined dict to `optimize()`. Items with no listings from any client become `unsourceable_items` and block `/confirm`.
+`router.py` calls all three concurrently, merges the results via `merge_listings()` (in `optimizer.py`), and passes the combined dict to `optimize()`. Items with no listings from any client become `unsourceable_items` and block `/confirm`.
 
 ### 6.1 LEGO.com (`lego_client.py`)
 
@@ -372,7 +379,7 @@ Defaults: `max(300, grand_total_cents × 0.05)` — minimum $3.00, or 5% of gran
     ┌──────────┐
     │ initiated│
     └────┬─────┘
-         │ Stripe hold attempted
+         │ Stripe hold attempted (1.05× quote total, 5% buffer)
          ▼
     ┌──────────────┐
     │ stripe_held  │◄─────────────────────────────┐
@@ -382,22 +389,48 @@ Defaults: `max(300, grand_total_cents × 0.05)` — minimum $3.00, or 5% of gran
     ┌───────────────┐                              │
     │ orders_placed │──── BrickOwl stockout ───────┘
     └──────┬────────┘
-           │ Stripe capture
+           │ Stripe capture (1s/4s/16s retries on transient errors)
            ▼
     ┌──────────────────┐
     │ payment_captured │  ← terminal (success)
     └──────────────────┘
 
-    Any step → ┌─────────────┐
-               │   failed    │  ← terminal (failure); compensation attempted
-               └─────────────┘
-                     ↓ (after cancel_order + cancel Stripe hold)
-               ┌─────────────┐
-               │ compensated │  ← terminal (compensated)
-               └─────────────┘
+    Any failure before orders placed → ┌─────────────┐
+                                       │   failed    │  ← terminal (failure)
+                                       └─────────────┘
+    Any failure with orders placed, AND clean cancel possible:
+       (BrickOwl cancels all succeed, Stripe cancel succeeds,
+        NO LEGO.com order present)
+                                     → ┌─────────────┐
+                                       │ compensated │  ← terminal (clean rollback)
+                                       └─────────────┘
+    Any failure where clean cancel is NOT possible:
+       (LEGO.com order placed, OR any BrickOwl cancel fails,
+        OR Stripe cancel fails after retries, OR capture failed
+        after orders placed, OR allocation drift > 5% post-placement)
+                                     → ┌───────────────┐
+                                       │ manual_review │  ← terminal (operator action required)
+                                       └───────────────┘
 ```
 
-**Note:** `fallback_ordered` state exists in the enum but is not currently reachable in MVP because the router sets `lego_fallback_items=[]` in the cached quote. It will become reachable once BrickOwl supplies some pieces and LEGO.com handles overflow. It is preserved in the enum for forward compatibility.
+**Terminal states (all distinguishable by `saga_status` field):**
+
+| State | Customer outcome | Operator action |
+|---|---|---|
+| `payment_captured` | Order placed, card charged | None |
+| `compensated` | No order, no charge — money was never moved | None |
+| `failed` | No order, no charge — failure happened before any orders were placed | None (read `error` field for context) |
+| `manual_review` | Orders MAY be placed; Stripe hold MAY be active | **Required.** Read `manual_review_reason` — it describes every stranded resource (BrickOwl orders to cancel by hand, LEGO.com order to cancel via lego.com/profile/orders, Stripe hold to release in the dashboard). See §9 below for the runbook. |
+
+**Notes on intermediate (non-terminal) states:**
+
+- `initiated`, `stripe_held`, `orders_placed`: in-flight saga. Frontend should keep polling — these are not endpoints to surface to the customer as "your status."
+- `fallback_ordered`: exists in the enum but unreachable in MVP (router sets `lego_fallback_items=[]` in the cached quote). Reserved for the future state where BrickOwl supplies some pieces and LEGO.com handles overflow. Do not write this status from any new code path without coordinating with the optimizer's `lego_fallback_items` semantics.
+
+**Saga-level deadline (B4, shipped 2026-05-15):** the entire saga runs inside a single `asyncio.wait_for(...)` bounded by `SAGA_TIMEOUT_SECONDS` (default 900s = 15 min, env-overridable). If the deadline expires, `_handle_saga_timeout` reads the checkpointed state and routes recovery:
+- No `payment_hold_id` yet → `failed` (no money moved).
+- Hold exists, no orders → best-effort `provider.cancel`; `failed` on success, `manual_review` on failure.
+- Any orders placed → `manual_review` (cannot infer capture state from here; operator inspects Stripe + marketplaces).
 
 ### Order routing logic
 
@@ -430,12 +463,13 @@ If retries exhausted: compensate and mark Saga `failed`.
 | State | Meaning | If server crashes here |
 |---|---|---|
 | `initiated` | Saga started, no external calls made | Nothing to compensate |
-| `stripe_held` | Stripe PaymentIntent created (funds held, not charged) | Cancel PaymentIntent manually: Stripe Dashboard → Payments → Cancel |
+| `stripe_held` | Stripe PaymentIntent created (funds held at `1.05 × quote_total`, not charged) | Cancel PaymentIntent manually: Stripe Dashboard → Payments → Cancel. Use idempotency key `cancel-{checkout_id}` if cancelling via CLI to stay consistent with the saga's automated retry. |
 | `orders_placed` | All seller orders placed (BrickOwl and/or LEGO.com) | Cancel BrickOwl orders via portal; LEGO.com: cancel at lego.com/profile/orders if not shipped; then cancel Stripe hold |
 | `fallback_ordered` | (Not reachable in MVP — see note above) | Same as `orders_placed` |
-| `payment_captured` | Payment charged — order complete | No action needed |
-| `compensated` | Compensation succeeded | No action needed |
-| `failed` | Saga failed; compensation was attempted | Read `error` field; verify compensation succeeded in Stripe and BrickOwl dashboards |
+| `payment_captured` | Payment captured at the actual allocated total (may be < authorized — the unused portion of the 5% buffer decays automatically) | No action needed |
+| `compensated` | Compensation succeeded — money was never moved, no orders are live | No action needed |
+| `failed` | Saga failed BEFORE any orders were placed | Read `error` field for context; no operator action — `_handle_saga_timeout` / saga internal handlers already released the hold (if any). |
+| `manual_review` | Orders may be placed AND/OR Stripe hold may still be active. Set in 6 conditions: capture-exhausted-retries with orders placed; capture permanent error with orders placed; post-placement drift > 5%; saga timed out with orders placed; compensation hit a permanent error during cancel; LEGO.com order placed (uncancellable via API). | **REQUIRED.** Read `manual_review_reason` — every stranded resource is enumerated with order IDs and runbook steps. See §9 below. |
 
 ---
 
@@ -447,29 +481,68 @@ Read `outputs/{job_id}/checkout_state.json` to find the last checkpoint, then fo
 
 **`stripe_held`:** Cancel the PaymentIntent:
 ```
-Stripe Dashboard → Payments → find stripe_payment_intent_id → Cancel
+Stripe Dashboard → Payments → find payment_hold_id → Cancel
 ```
 Or via CLI: `stripe payment_intents cancel <pi_...>`
 
 **`orders_placed`:**
 1. For each ID in `brickowl_order_ids`: cancel via BrickOwl seller portal
 2. For `lego_order_id` (if set): log into LAIGO's LEGO.com account → Orders → cancel if not yet shipped
-3. Cancel Stripe hold
+3. Cancel Stripe hold (`payment_hold_id`)
 
-**Special case — Stripe capture failed after orders placed:** The `error` field says `"Orders ARE placed. Manual review required."` Do NOT cancel the orders — they are with sellers. Issue a manual Stripe charge for `total_charged_cents` via the Dashboard, or contact the customer directly for alternate payment.
+**`manual_review` (NEW terminal state — read `manual_review_reason` first):** The Saga deliberately stopped because something needs operator judgement before continuing. Two common causes:
+
+- **Capture exhausted retries after orders were placed.** The hold (`payment_hold_id`) may have actually been captured (Stripe's idempotency cache returned a network error to us but accepted the capture server-side). Check the Stripe dashboard first.
+  - If captured: mark the saga `payment_captured` manually by editing `checkout_state.json`.
+  - If still authorized: retry capture from the dashboard, OR cancel the hold and refund the placed orders.
+- **Allocation drift exceeded the 5% buffer.** Final total > authorized. Capture the authorized amount, bill the customer for the difference via an alternate channel, OR refund the placed orders and cancel the hold.
+
+Do NOT cancel orders without reading `manual_review_reason` — orders are already with sellers and the customer's intent is unknown without human judgement.
 
 ---
 
-## 10. Stripe Integration (current status: stub)
+## 10. Stripe Integration (Layer 5 — shipped)
 
-`STRIPE_ENABLED = False` in `stripe_client.py`. All calls raise `NotImplementedError`, which the Saga catches and logs as a warning — orders are placed but no money is held or charged. Safe for development.
+Real Stripe API calls are wired through `StripeProvider` in `scripts/checkout/payment/stripe_provider.py`. The provider's constructor atomically validates SDK + env + safety rules; if any check fails it raises `PaymentProviderUnavailable` and the registry stays empty, which the gate sees as DISABLED with a reason.
 
-### Enabling Stripe
+The safety boundary is the **layered checkout gate** (see `scripts/checkout/gate.py` and `docs/CHECKOUT_AUDIT.md §10`). In DISABLED gate state, `POST /confirm` returns **HTTP 503** with `code: "CHECKOUT_GATE_CLOSED"` — no Saga is started, no orders are placed. This is enforced at the HTTP layer by Layer 3 and reinforced at the Saga layer by Layer 4.
 
-1. Add `STRIPE_SECRET_KEY=sk_test_...` to `.env.secrets`
-2. Implement the commented-out code blocks in `create_payment_hold`, `capture_payment`, `cancel_payment_hold` in `stripe_client.py`
-3. Set `STRIPE_ENABLED = True`
-4. Verify `_log_mode()` is called at startup (currently only called inside the commented implementation — add a call to it in `Main.py` lifespan after Stripe keys are loaded)
+The legacy "Stripe-disabled bypass" behavior — where `NotImplementedError` was caught and the Saga proceeded silently — has been removed. Calling `execute_checkout_saga()` directly (bypassing `/confirm`) while the gate is closed produces `saga_status: "failed"` with `error: "Gate closed at Saga start: ..."`. There is no longer a code path that places orders without a payment hold.
+
+**To enable real Stripe flows for development:**
+1. Set `STRIPE_SECRET_KEY=sk_test_...` in `.env.secrets`
+2. Set `BRICKOWL_API_KEY=...` (or `LEGO_EMAIL`+`LEGO_PASSWORD`) in `.env.secrets` so at least one marketplace is "live"
+3. Set `CHECKOUT_ENABLED=true` in `.env`
+4. Flip `STRIPE_ENABLED = True` at the top of `scripts/checkout/payment/stripe_provider.py`
+5. Restart the server; check the boot log for `payment.registry.registered provider=stripe mode=test`
+6. Verify `GET /checkout/gate` returns `mode: "test"` with no `reasons`
+
+### Enabling Stripe (deliberate two-step operator action)
+
+The "flip the code constant AND set env" pattern is intentional defense-in-depth. Setting env alone — e.g., copy-pasting an `sk_test_` key into `.env.secrets` while testing — does NOT enable real payment calls. Flipping `STRIPE_ENABLED` alone without env is caught by `StripeProvider.__init__` immediately, with a specific reason. Both signals must align before the provider constructs.
+
+1. Add `STRIPE_SECRET_KEY=sk_test_...` (or `sk_live_...` for production) to `.env.secrets`
+2. Set `STRIPE_ENABLED = True` at the top of `scripts/checkout/payment/stripe_provider.py`
+3. Test a single hold/capture/cancel cycle using `pm_card_visa` against your test mode dashboard
+4. Only after step 3 succeeds: deploy with the same flag value to Render
+
+### Capture retry policy
+
+The Saga retries Stripe capture on transient errors only — see `_capture_with_retry()` in `saga.py`.
+
+| Stripe error | Mapped to | Saga behavior |
+|---|---|---|
+| `APIConnectionError` / `RateLimitError` / `APIError` (5xx) | `PaymentRetryableError` | retry with 1s/4s/16s backoff |
+| `CardError` (declined at capture, e.g. card cancelled) | `PaymentPermanentError` | skip retry → MANUAL_REVIEW |
+| `AuthenticationError` / `InvalidRequestError` / `PermissionError` / `IdempotencyError` / `SignatureVerificationError` | `PaymentPermanentError` | skip retry → MANUAL_REVIEW |
+
+The same idempotency key (`f"capture-{checkout_id}"`) is used across all attempts. Stripe's idempotency cache (24h) makes this safe — if the first attempt actually captured but the response was lost to a network error, the retry returns the cached success rather than double-capturing.
+
+### Authorization buffer (5%)
+
+The hold is for `ceil(quote_total × 1.05)`. Capture is for the actual allocated total (may differ from quote total after stockout re-optimization). Stripe permits capturing less than authorized; the unused portion of the authorization releases automatically without charging the customer. This absorbs allocation drift up to 5% without prompting a customer "confirm new price" round-trip.
+
+If drift exceeds 5%, the Saga fails-closed to MANUAL_REVIEW BEFORE attempting capture. Hard-coded constants in `saga.py`: `_HOLD_BUFFER_MULTIPLIER = 1.05`, `_CAPTURE_BACKOFFS_SECONDS = (1, 4, 16)`.
 
 ### PaymentIntent pattern
 
@@ -509,7 +582,37 @@ Raw card numbers never reach LAIGO servers.
 
 ### Live mode guard
 
-`_log_mode()` in `stripe_client.py` raises `RuntimeError` if a `sk_live_*` key is used outside of a Render deployment (checks `RENDER` env var). This prevents accidentally charging real cards during local development.
+`StripeProvider.__init__` in `payment/stripe_provider.py` raises `PaymentProviderUnavailable` if an `sk_live_*` key is used outside of a Render deployment (checks `RENDER` env var with `is_truthy()` so `RENDER="false"` does NOT count as on-Render). The gate also independently checks this so an operator sees a specific, actionable reason on `/checkout/gate` even if the provider somehow registered. This prevents accidentally charging real cards during local development.
+
+### Payment provider registry — single-active contract (B17, Phase 3.2)
+
+The registry (`scripts/checkout/payment/registry.py`) holds exactly one active provider per process. It is populated once at lifespan startup by `Main.py` calling `payment_registry.register(StripeProvider())`. After that, reads via `get_active()`, `is_configured()`, `active_name()`, `active_mode()` are lock-free.
+
+**Replacement guard (B17, shipped 2026-05-16):** `register()` refuses to replace an already-registered provider unless the same instance is passed (`is` check, not `name` check) OR the env flag `LAIGO_ALLOW_REGISTRY_REPLACE=1` is set. The guard raises `RuntimeError` rather than warn-and-replace.
+
+```
+# Production: env unset
+register(StripeProvider())   # first call: succeeds
+register(StripeProvider())   # second call: RuntimeError (different instance)
+
+# Test: same instance reused
+p = StripeProvider()
+register(p); register(p)     # no-op on second call
+
+# Test: env flag set
+os.environ["LAIGO_ALLOW_REGISTRY_REPLACE"] = "1"
+register(StripeProvider())   # logs WARNING; replacement permitted
+
+# Test: explicit reset
+payment_registry._reset_for_tests()
+register(StripeProvider())   # treated as a fresh process
+```
+
+**Operator implications:**
+- `LAIGO_ALLOW_REGISTRY_REPLACE` MUST NOT be set in production. The /checkout/gate body does NOT surface this state; operators rely on log scraping for `payment.registry.replaced` lines.
+- `_reset_for_tests()` is the canonical way to reset state between test scenarios; despite the name, it is safe to call from production shutdown paths.
+
+**Latent caveat:** `Main.py` lifespan does not currently catch `RuntimeError` from `register()`. If FastAPI lifespan ever runs twice in the same Python process (some test frameworks; future hot-reload tooling), the second `register()` raises and crashes lifespan startup. Production today is unaffected because `uvicorn` (with or without `--reload`) spawns fresh child processes for each lifespan. See `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §8 H6` for the planned mitigation (one-line `_reset_for_tests()` call in lifespan shutdown).
 
 ### Webhook (optional)
 
@@ -604,20 +707,38 @@ POST /jobs/{job_id}/checkout/confirm
 ─────────────────────────────────────────────────────────────────────────────
 
 Background: execute_checkout_saga()
+  Wrapped in asyncio.wait_for(..., timeout=SAGA_TIMEOUT_SECONDS=900s).
+  On timeout: _handle_saga_timeout() inspects state and writes failed/manual_review.
 
-  1. Stripe hold (skipped in dev: STRIPE_ENABLED=False)
-  2. BrickOwl sub-orders (skipped in MVP: create_order raises NotImplementedError)
-  3. LEGO.com order via Playwright → lego_client.order_from_lego(items, job_id)
-       → writes lego_order_id to checkout_state.json
-  4. Stripe capture (skipped in dev)
-  5. Update saga_status → payment_captured
+  Layer 4 — gate.require_open() at the first line; FAILED if closed.
+  Layer 5 — payment_registry.get_active() acquires provider for the whole saga.
+
+  1. Stripe hold via PaymentProvider.create_hold (idempotency: hold-{checkout_id})
+     - amount = ceil(quote_total × 1.05) — 5% buffer absorbs stockout drift
+     - PaymentPermanentError → FAILED (no orders placed)
+     - PaymentRetryableError → FAILED ("please retry")
+  2. While-loop with B5 pre-placement drift check at the top:
+     - If new total > authorized → _compensate (clean COMPENSATED path, no orders)
+     - BrickOwl sub-orders (skipped in MVP: create_order raises NotImplementedError;
+       real path: B19 splits create + checkpoint into separate try blocks)
+     - LEGO.com order via Playwright → lego_client.order_from_lego(items, job_id)
+       → writes lego_order_id to checkout_state.json (also B19-split)
+     - Stockout retry up to OPTIMIZER_MAX_STOCKOUT_RETRIES; re-fetch + re-optimize
+  3. Stripe capture via PaymentProvider.capture (idempotency: capture-{checkout_id})
+     - 3 attempts on PaymentRetryableError; backoff 1s / 4s / 16s
+     - Post-placement drift safety: capture_amount > authorized → MANUAL_REVIEW
+       (orders placed, can't safely capture; operator decides recovery)
+     - Exhausted retries OR PaymentPermanentError → MANUAL_REVIEW
+  4. Update saga_status → payment_captured
 ```
 
 ---
 
 ## 14. Known Issues
 
-1. **`fallback_ordered` saga state is unreachable in MVP.** The router sets `lego_fallback_items=[]` before caching the quote allocation, so the saga's LEGO.com fallback block never fires. This state becomes reachable once BrickOwl is active and some pieces overflow to LEGO.com.
+Operational issues only — defects in the saga / payment layer are tracked in `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §4` (B1–B23) and the hardening sequence is in §8 of that file. Do not duplicate here.
+
+1. **`fallback_ordered` saga state is unreachable in MVP.** The router sets `lego_fallback_items=[]` before caching the quote allocation, so the saga's LEGO.com fallback block never fires. This state becomes reachable once BrickOwl is active and some pieces overflow to LEGO.com. (Tracked as H14 — keep as reserved.)
 
 2. **LEGO.com pricing endpoint is unverified against live traffic.** `_parse_price_cents()` in `lego_client.py` tries several field name candidates based on expected API shape. If LEGO.com's response uses a different field name, prices return as `0`. Test via `GET /checkout-debug/lego/element/{id}/listing`.
 
@@ -625,17 +746,23 @@ Background: execute_checkout_saga()
 
 4. **Stale BOID cache after suffix-stripping fix.** Any `boid:{element_id}` entries cached before the `322944-42` → `322944` fix contain incorrect values that persist for up to 24h. Server restart clears them.
 
-5. **Concurrent LEGO.com sessions share one account.** Two simultaneous checkouts both call `lego_client.order_from_lego()` using the same LEGO.com credentials. Playwright sessions are independent processes and should not conflict, but LEGO.com may rate-limit or flag the account for concurrent automated logins.
+5. **Concurrent LEGO.com sessions share one account.** Two simultaneous checkouts both call `lego_client.order_from_lego()` using the same LEGO.com credentials. Playwright sessions are independent processes and should not conflict, but LEGO.com may rate-limit or flag the account for concurrent automated logins. Roadmap #13 introduces a per-account semaphore.
 
-6. **LEGO.com actual stock levels are unknown.** The optimizer assumes each element has `LEGO_MAX_QTY_PER_ITEM` (default 9999) available. LEGO.com's search API does not expose stock counts. If an element is truly out of stock and the API still marks it available, orders will fail at Playwright checkout time (not at quote time). No workaround without scraping stock data.
+6. **LEGO.com actual stock levels are unknown.** The optimizer assumes each element has `LEGO_MAX_QTY_PER_ITEM` (default 9999) available. LEGO.com's search API does not expose stock counts. If an element is truly out of stock and the API still marks it available, orders will fail at Playwright checkout time (not at quote time). No workaround without scraping stock data. (B8 in PRE_RELEASE §4 — option B is the recommended pre-launch mitigation: document the asymmetry; option A makes LEGO stockouts retryable.)
 
-7. **No per-customer order visibility.** Orders are placed from LAIGO's service accounts. The customer receives no BrickOwl or LEGO.com confirmation email directly. `customer_email` is stored in `checkout_state.json` but no notification is sent after order placement.
+7. **No per-customer order visibility.** Orders are placed from LAIGO's service accounts. The customer receives no BrickOwl or LEGO.com confirmation email directly. `customer_email` is stored in `checkout_state.json` but no notification is sent after order placement. (Tracked as roadmap #14 in PRE_RELEASE §3.)
 
-8. **`checkout_store._locks` dict grows unbounded.** A new `asyncio.Lock` is created per `job_id` and never removed. For a long-running server with many jobs, this accumulates locks indefinitely. Low memory impact in practice, but worth cleaning up when a job's TTL expires.
+8. **`checkout_store._locks` dict grows unbounded.** A new `asyncio.Lock` is created per `job_id` and never removed. For a long-running server with many jobs, this accumulates locks indefinitely. Low memory impact in practice, but worth cleaning up when a job's TTL expires. (Tracked as H13 — defer to roadmap #2 if Postgres state lands; otherwise tier-4 cleanup.)
+
+9. **B23 — concurrent `/confirm` with different `checkout_id` for the same `job_id` clobbers in-flight state.** If a customer opens a second tab, makes a fresh `/quote`, and confirms before the first saga finishes, the second `/confirm` overwrites the row. Today's `_locks[job_id]` serialization (B1) makes this atomic but not safe — the two sagas race their state writes. See PRE_RELEASE §4 B23 for the recommended fix (Option B — reject if the existing saga is non-terminal).
+
+10. **Error-field information leak (B12 — paused).** `GET /status` surfaces `state.get("error")` verbatim, which includes Stripe internal text, exception class names, PaymentIntent IDs, and operator-facing gate reasons. Customer-visible. See PRE_RELEASE §8 H1 — top of the resume queue.
 
 ---
 
 ## 15. Pending Work
+
+This table is operational follow-ups for client/launch work. **Pure correctness/hardening bugs** (B1–B23) and their per-phase shipping status live in `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §4`; the prioritized hardening order is in that doc's §8. Do not duplicate entries between the two docs.
 
 Listed in priority order:
 
@@ -649,9 +776,12 @@ Listed in priority order:
 | 6 | Implement BrickOwl order placement once strategy decided | BrickOwl API access + strategy decision |
 | 7 | Create BrickLink seller account; obtain API credentials | — |
 | 8 | Implement BrickLink price guide client | API credentials |
-| 9 | Enable Stripe: implement `stripe_client.py` functions; set `STRIPE_ENABLED=True` | End-to-end Stripe test with `pm_card_visa` |
-| 10 | Send customer confirmation email after saga completes | Email service (e.g. SendGrid / SES) |
-| 11 | Add `checkout_store._locks` cleanup on job TTL expiry | Main.py cleanup thread integration |
+| 9 | Enable Stripe: set `STRIPE_ENABLED=True` in `payment/stripe_provider.py` + `STRIPE_SECRET_KEY=sk_test_...` in `.env.secrets` + `CHECKOUT_ENABLED=true` in `.env` + verify `GET /checkout/gate` returns `mode: "test"` | End-to-end Stripe test with `pm_card_visa` (see PRE_RELEASE_PAYMENT_CHECKLIST.md §6 for the full go-live runbook) |
+| 10 | Send customer confirmation email after saga completes | Email service (e.g. SendGrid / SES). Should fire on `saga_status == payment_captured` AND on `saga_status == manual_review` (different templates). |
+| 11 | Add `checkout_store._locks` cleanup on job TTL expiry | Main.py cleanup thread integration. Subsumed by roadmap #2 (Postgres state) when that ships. |
+| 12 | Resume B12 (customer-facing error translation) | None — paused mid-Phase-3, top of `PRE_RELEASE_PAYMENT_CHECKLIST.md §8 H1` resume queue. |
+| 13 | L6 audit log subsystem | Schema + storage decisions made; see `PRE_RELEASE_PAYMENT_CHECKLIST.md §2`. |
+| 14 | Postgres-backed state + resume-on-restart | Roadmap #2 — unblocks B11 (destructive checkpoint), B13/B15 hardening, durable in-flight saga recovery. |
 
 ---
 
@@ -714,14 +844,17 @@ assert "-" not in boid, "BOID should not contain color suffix"
 
 ### End-to-end quote test (Swagger UI)
 
+**Precondition:** `GET /checkout/gate` must return `is_open: true` for `/confirm` to work. In DISABLED mode (dev default), `/confirm` returns 503 — see `docs/CHECKOUT_AUDIT.md §10` for how to bring the gate into TEST or LIVE.
+
 1. `uvicorn Main:app --reload` from `scripts/`
 2. Open http://127.0.0.1:8000/docs
-3. Complete a mosaic job (`POST /generate` → poll `GET /jobs/{id}` → status `complete`)
-4. `POST /jobs/{job_id}/checkout/quote` — expect `can_proceed: true`, `sellers` shows `lego_official`
-5. `POST /jobs/{job_id}/checkout/confirm` with `stripe_payment_method_id: "pm_card_visa"` — expect 200, `saga_status: "initiated"`
-6. Poll `GET /jobs/{job_id}/checkout/{checkout_id}/status` — expect `saga_status: "orders_placed"` or `"payment_captured"` (Stripe stub skips payment, so `"payment_captured"` requires `STRIPE_ENABLED=True`)
+3. **Verify gate**: `GET /checkout/gate` — if `mode != "test"` and `mode != "live"`, the rest of this test will 503 at step 5. Either skip to step 4 (quote works regardless of gate) or configure env per the "Enabling Stripe" section above.
+4. Complete a mosaic job (`POST /generate` → poll `GET /jobs/{id}` → status `complete`)
+5. `POST /jobs/{job_id}/checkout/quote` — expect `can_proceed: true`, `sellers` shows `lego_official`. Works in DISABLED mode (quote is read-only).
+6. `POST /jobs/{job_id}/checkout/confirm` with `stripe_payment_method_id: "pm_card_visa"` — expect 200 with `saga_status: "initiated"` when gate is open; expect 503 with `code: "CHECKOUT_GATE_CLOSED"` when gate is DISABLED.
+7. Poll `GET /jobs/{job_id}/checkout/{checkout_id}/status` — expect `saga_status: "payment_captured"` on success. Once Layer 4 is shipped, a gate flip mid-Saga produces `saga_status: "failed"` with `error: "Gate closed at Saga start: ..."`.
 
-### Stripe test (requires `STRIPE_ENABLED=True`)
+### Stripe test (requires `STRIPE_ENABLED=True` in `payment/stripe_provider.py`)
 
 Use `pm_card_visa` as `stripe_payment_method_id`. Verify in Stripe Dashboard → Payments that a PaymentIntent with `capture_method=manual` appears, transitions to captured.
 

@@ -86,10 +86,45 @@ class SagaStatus(str, Enum):
     INITIATED         = "initiated"
     STRIPE_HELD       = "stripe_held"
     ORDERS_PLACED     = "orders_placed"
+    # RESERVED — see docs/ORDER_OPTIMIZER.md §8. Not written by any current
+    # saga path. Reserved for forward compatibility: when BrickOwl supplies
+    # some pieces and LEGO.com handles overflow as the literal fallback, this
+    # status marks the transition between "primary orders placed" and
+    # "fallback (LEGO) order placed." Keep until that flow ships; removing
+    # without coordinated frontend update breaks the SagaStatus enum contract.
     FALLBACK_ORDERED  = "fallback_ordered"
     PAYMENT_CAPTURED  = "payment_captured"
     COMPENSATED       = "compensated"
     FAILED            = "failed"
+    # Terminal state distinct from FAILED. Reached when orders WERE placed
+    # but Stripe capture did not succeed after the retry budget OR a
+    # permanent error class. The customer's marketplace orders are real;
+    # operator action is required to either capture out-of-band, refund
+    # the placed orders, or charge a different payment method. The
+    # `manual_review_reason` field in checkout_state.json describes what
+    # the operator needs to do.
+    MANUAL_REVIEW     = "manual_review"
+
+
+# ── Customer-facing error translation (B12 / H1) ─────────────────────────────
+# Every saga write that sets `error: ...` MUST also set `customer_message: ...`
+# using a key from this table. `error` is operator-internal (raw exception
+# text, Stripe IDs, PaymentIntent IDs); `customer_message` is the only string
+# safe to surface to /status response consumers.
+#
+# Adding a new category here is a coordinated change — saga.py picks the key,
+# the frontend may want to render it differently. Don't change existing
+# strings without coordinating with the frontend.
+
+ERROR_MESSAGES: dict[str, str] = {
+    "payment_permanent":   "Your payment method was declined. Please use a different card.",
+    "payment_transient":   "Our payment system is temporarily unavailable. Please retry shortly.",
+    "marketplace_failure": "We couldn't complete one of your orders. Your card was not charged.",
+    "manual_review":       "Your order is being reviewed by our team. We'll email you within 24 hours.",
+    "drift_buffer":        "The price of your order changed. Please request a new quote.",
+    "gate_closed":         "Checkout is temporarily unavailable. Please try again shortly.",
+    "timeout":             "Your order took longer than expected. Our team is reviewing — no action required.",
+}
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -109,7 +144,25 @@ class CheckoutStatusResponse(BaseModel):
     saga_status: SagaStatus
     brickowl_order_ids: list[str]
     lego_order_id: Optional[str] = None
-    stripe_payment_intent_id: Optional[str] = None
+    # Provider-agnostic name (renamed from `stripe_payment_intent_id` in L5).
+    # For Stripe this is the PaymentIntent ID (pi_...). For future providers
+    # it is whatever opaque identifier they return from create_hold().
+    payment_hold_id: Optional[str] = None
+    # Amount actually authorized at hold time. May exceed `total_charged_cents`
+    # if a buffer was applied (today: 1.05x the quote total).
+    payment_authorized_cents: Optional[int] = None
     total_charged_cents: Optional[int] = None
+    # Operator-facing error text. May contain Stripe IDs, exception class
+    # names, internal request IDs. Frontend MUST NOT render this verbatim —
+    # render `customer_message` instead.
     error: Optional[str] = None
+    # Customer-facing translated message (B12 / H1). One of the strings from
+    # ERROR_MESSAGES above, or None when no error has occurred. This is the
+    # field /status consumers should surface to the customer.
+    customer_message: Optional[str] = None
+    # Populated when saga_status == MANUAL_REVIEW. Human-readable explanation
+    # of what went wrong and what an operator needs to do. Frontend should
+    # display the `customer_message` instead, but the field is included so
+    # support staff can read the operator runbook directly when investigating.
+    manual_review_reason: Optional[str] = None
     completed_at: Optional[str] = None   # ISO 8601 timestamp

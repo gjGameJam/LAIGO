@@ -23,7 +23,14 @@
       "PowerShell(Remove-Item *)",
       "Bash(python -c ' *)",
       "Bash(python -c \"from checkout.optimizer import optimize, merge_listings, apply_free_shipping_thresholds; print\\('imports OK'\\)\")",
-      "Bash(.venv/Scripts/python.exe *)"
+      "Bash(.venv/Scripts/python.exe *)",
+      "Bash(git mv *)",
+      "Bash(git rm *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/checkout/saga.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(git add *)",
+      "Bash(git reset *)",
+      "Bash(python *)"
     ]
-  }
+  },
+  "enabledPlugins": {}
 }

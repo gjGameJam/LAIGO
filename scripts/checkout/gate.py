@@ -16,7 +16,7 @@ No single check covers all of those. Each defense layer reads from this gate;
 each makes its own decision. Layers (in order of when they fire):
 
   L1 Main.py lifespan         — refuse to boot if env says enabled but reality disagrees
-  L2 /health/checkout         — operational visibility
+  L2 /checkout/gate            — operational visibility
   L3 router /confirm           — return 503 if gate is not open
   L4 saga pre-flight           — refuse to advance before any external call
   L5 PaymentProvider registry  — no stub providers exist; only real ones can be obtained
@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 import os
+
+from .payment import registry as payment_registry
 
 logger = logging.getLogger("laigo")
 
@@ -94,26 +96,22 @@ _ENV_LEGO_PASSWORD = "LEGO_PASSWORD"
 _ENV_RENDER = "RENDER"  # set by Render automatically in their environment
 
 
-def is_truthy(value: str | None) -> bool:
-    """Public so callers (e.g. Main.py's boot block) parse env flags identically."""
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
-
+# is_truthy lives in ._env (dependency-free) so registry.py and
+# payment/stripe_provider.py can use it without importing gate. Re-exported
+# here for backward compatibility — `from .checkout.gate import is_truthy`
+# continues to work.
+from ._env import is_truthy
 
 # Backwards-compatible alias used internally; remove when no external callers remain.
 _is_truthy = is_truthy
 
 
-def _stripe_key_mode(key: str) -> str | None:
-    """Returns 'test' / 'live' / None based on the Stripe key prefix.
-
-    None means the key is missing or malformed. We deliberately do NOT log or
-    return the key itself — only its mode classification.
-    """
-    if key.startswith("sk_test_"):
-        return "test"
-    if key.startswith("sk_live_"):
-        return "live"
-    return None
+# Stripe key validation lives in payment/key_format.py so gate.py and
+# stripe_provider.py agree on what counts as a valid key (B6/H4). Before
+# the consolidation, gate's check was lenient (any suffix length) and the
+# provider's was strict (≥8 chars beyond prefix) — same env produced two
+# different reason strings on `/checkout/gate`.
+from .payment.key_format import key_mode as _stripe_key_mode
 
 
 def compute_decision() -> GateDecision:
@@ -128,40 +126,51 @@ def compute_decision() -> GateDecision:
     marketplaces_live: list[str] = []
 
     # ── Master switch ────────────────────────────────────────────────────────
-    master_enabled = is_truthy(os.environ.get(_ENV_MASTER_FLAG))
+    # B13: distinguish "operator hasn't set the flag" from "operator set it to
+    # a falsy value" (deliberate kill switch). Same gate outcome (DISABLED)
+    # but the reason string is far less ambiguous for someone investigating
+    # the kill switch state.
+    master_raw = os.environ.get(_ENV_MASTER_FLAG)
+    master_enabled = is_truthy(master_raw)
     if not master_enabled:
-        reasons.append(f"{_ENV_MASTER_FLAG} is not set to true")
+        if master_raw is None:
+            reasons.append(f"{_ENV_MASTER_FLAG} is not set")
+        else:
+            reasons.append(f"{_ENV_MASTER_FLAG}={master_raw!r} is not truthy")
 
     # ── Payment provider probe ───────────────────────────────────────────────
-    # Imported lazily so the gate has no hard dependency on stripe_client and
-    # so import cycles can't form. If stripe_client itself fails to import,
-    # we treat that as "no payment provider available" rather than crashing.
-    stripe_module_enabled = False
-    try:
-        from . import stripe_client
-        stripe_module_enabled = bool(stripe_client.STRIPE_ENABLED)
-    except Exception as exc:
-        reasons.append(f"stripe_client failed to import: {exc}")
-
-    if not stripe_module_enabled:
-        reasons.append("stripe_client.STRIPE_ENABLED is False")
+    # Source of truth: payment.registry. The registry is populated at lifespan
+    # startup by Main.py constructing a concrete PaymentProvider (today only
+    # StripeProvider). The provider's __init__ atomically validates SDK + env
+    # + safety rules — if it succeeded, the gate trusts that provider is
+    # ready to serve real payments. See scripts/checkout/payment/base.py for
+    # the Protocol contract and scripts/checkout/payment/stripe_provider.py
+    # for the construction-time checks (L5 of the defense-in-depth design).
+    if payment_registry.is_configured():
+        payment_provider = payment_registry.active_name()
     else:
-        stripe_key = os.environ.get(_ENV_STRIPE_KEY, "")
-        key_mode = _stripe_key_mode(stripe_key)
-        if key_mode is None:
-            reasons.append(
-                f"{_ENV_STRIPE_KEY} is missing or malformed "
-                "(must start with sk_test_ or sk_live_)"
-            )
-        elif key_mode == "live" and not os.environ.get(_ENV_RENDER):
-            # Mirror of stripe_client._log_mode's safeguard, evaluated at the
-            # gate so we fail at boot instead of at the first Stripe call.
-            reasons.append(
-                "Live Stripe key (sk_live_) detected outside the Render "
-                "environment — refusing to enable checkout"
-            )
-        else:
-            payment_provider = "stripe"
+        reasons.append(
+            "No payment provider registered "
+            "(see boot logs for the construction failure reason)"
+        )
+
+    # Defense-in-depth — keep the "live key outside Render" rule visible at
+    # the gate even when the registry path didn't surface it. StripeProvider's
+    # __init__ already enforces this and refuses to construct; this duplicate
+    # check exists so an operator who sees `mode: disabled` on /checkout/gate
+    # gets a specific, actionable reason in addition to the generic "no
+    # provider registered." Two independent enforcement sites is the whole
+    # point of layered defense (see audit P3 — intentional duplication).
+    stripe_key = os.environ.get(_ENV_STRIPE_KEY, "")
+    stripe_key_mode = _stripe_key_mode(stripe_key)
+    if stripe_key_mode == "live" and not is_truthy(os.environ.get(_ENV_RENDER)):
+        # is_truthy (not raw truthiness): RENDER="false"/"0"/"no" must NOT
+        # count as "we're on Render". See CHECKOUT_AUDIT.md §10 D1.
+        reasons.append(
+            "Live Stripe key (sk_live_) detected outside the Render "
+            "environment — refusing to enable checkout"
+        )
+        payment_provider = None  # force DISABLED even if registry somehow has one
 
     # ── Marketplace probe ────────────────────────────────────────────────────
     # A marketplace is "live" if its credentials are present in env. The gate
@@ -191,10 +200,12 @@ def compute_decision() -> GateDecision:
     if (not master_enabled) or (payment_provider is None) or (not marketplaces_live):
         mode = CheckoutMode.DISABLED
     else:
-        # Provider is configured and master switch is on. Test vs live is
-        # determined by the Stripe key prefix.
-        stripe_key = os.environ.get(_ENV_STRIPE_KEY, "")
-        mode = CheckoutMode.LIVE if _stripe_key_mode(stripe_key) == "live" else CheckoutMode.TEST
+        # Provider is registered and the master switch is on. Test vs live
+        # comes from the registered provider's own mode() — single source of
+        # truth, no risk of disagreement between env key and what the SDK is
+        # actually configured to use.
+        provider_mode = payment_registry.active_mode()
+        mode = CheckoutMode.LIVE if provider_mode == "live" else CheckoutMode.TEST
 
     return GateDecision(
         mode=mode,

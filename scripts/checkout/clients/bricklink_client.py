@@ -68,3 +68,15 @@ async def get_all_listings(
         "BrickLink client is not yet implemented. "
         "Complete the setup steps in clients/bricklink_client.py."
     )
+
+
+# ── Cache invalidation ────────────────────────────────────────────────────────
+# Stub today (BrickLink listings aren't cached because get_all_listings either
+# returns empty or raises NotImplementedError). Kept here so the Saga's
+# parallel-invalidate gather pattern (B9/B10/H8) has a uniform contract across
+# all three marketplaces. Wire up real cache key deletion when BrickLink
+# ordering ships.
+
+async def invalidate_listing(element_id: str) -> None:
+    """No-op stub. BrickLink doesn't cache listings yet (see module docstring)."""
+    return None

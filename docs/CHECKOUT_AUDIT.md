@@ -5,6 +5,32 @@
 **Posture:** Pre-launch. Stripe disabled, BrickOwl catalog API not yet granted, LEGO.com Playwright untested in live. No customer money has moved yet. Recommendations are framed as **"what must be true before the first real charge."**
 **Authoring date:** 2026-05-15.
 
+> **⚠️ Line-number references in this doc are HISTORICAL (frozen 2026-05-15).** The saga.py file has grown from ~500 lines to 1280+ as Phase 1/2/3 + B7/B8/B9/B10/B12/B15/B16 hardening landed. References like `saga.py:104` describe code that existed pre-Phase-1; the SAME bug or behavior may live at a different line today (or may have been fixed and removed entirely). Use this doc for context and reasoning; for current-code references, see `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §4` (per-bug current-state references) and `docs/ORDER_OPTIMIZER.md` (operational reference).
+>
+> **What's still authoritative in this doc:** the FMEA (§7), the layered defense design (§10), the threat-class taxonomy (§5), and the gap analyses that informed the L0–L5 implementation. **What's stale:** specific `saga.py:N` line numbers and any `except NotImplementedError:` discussion — those exceptions are deleted; the L4/L5 design fully shipped.
+>
+> **Quick map of the most-cited historical references to current equivalents** (H12, current as of 2026-05-16):
+>
+> | Audit doc says… | Now lives at… | What it's about |
+> |---|---|---|
+> | `saga.py:34` (`_LEGO_SELLER_ID`) | `saga.py:70` | constant |
+> | `saga.py:37-63` (`_compensate` body) | `saga.py:358-560` | compensation routine |
+> | `saga.py:58` (compensate Stripe cancel) | inside `_cancel_hold_with_retry` (~saga.py:175-280) | deleted bare `except NotImplementedError` → real retry policy |
+> | `saga.py:98` (`f"hold-{checkout_id}"` idempotency) | `saga.py:~835` (inside `create_hold` call) | idempotency key construction |
+> | `saga.py:104-106` (Stripe hold `NotImplementedError`) | DELETED (L4); now real call at `saga.py:~828-870` | atomic provider.create_hold |
+> | `saga.py:115-183` (stockout retry loop) | `saga.py:~885-1062` | the much-expanded `while True:` body |
+> | `saga.py:137-147` (`except StockoutError`) | `saga.py:~949-957` | BrickOwl StockoutError branch |
+> | `saga.py:140-147` (generic Exception on cancel_order) | `saga.py:~1004-1028` (now uses `_parallel_brickowl_cancels`) | B16/H10 site #2 |
+> | `saga.py:158-159` (cancel orders 1 and 2 already placed) | `saga.py:~1004-1028` | same site |
+> | `saga.py:166-177` (re-optimization after stockout) | `saga.py:~1043-1056` | re-optimize after cache invalidate |
+> | `saga.py:196-208` (LEGO generic except Exception) | `saga.py:~1085-1119` (now split into StockoutError [B8/H9] + Exception) | LEGO error handling |
+> | `saga.py:217` (capture_payment call) | `saga.py:~1241-1246` (inside `_capture_with_retry`) | provider.capture |
+> | `saga.py:217-233` (capture exception block) | `saga.py:~1235-1295` (`_capture_with_retry` body) | capture retry loop |
+> | `saga.py:218-219` (Stripe capture `NotImplementedError`) | DELETED (L4) | real retry with MANUAL_REVIEW escalation |
+> | `saga.py:235-239` (state writes `total_charged_cents`) | `saga.py:~1129-1132` | terminal `payment_captured` checkpoint |
+>
+> Doc-side audit policy: when a §4 hardening bug ships, update the bug entry in `PRE_RELEASE_PAYMENT_CHECKLIST.md §4` to current line numbers; let this doc's historical refs stay frozen. The two docs serve different audiences (this one = design context; that one = current operating state).
+
 ---
 
 ## 0. Executive summary
@@ -815,7 +841,7 @@ Hot-path acceptance tests (network-dependent, run in CI with a mock server):
 
 | # | Failure mode | Cause (file:line) | Effect | S | O | D | RPN | Mitigation |
 |---|---|---|---|---|---|---|---|---|
-| 1 | **Stripe disabled, orders ship anyway** | `saga.py:104-106` silently swallows `NotImplementedError` from `stripe_client._check_enabled()` | LAIGO ships order with zero payment hold. Direct revenue loss per order. | 10 | 9 | 9 | **810** → **~600 in-flight** | **Layered fix in progress (see §10).** L0 `gate.py` + L1 boot assertion shipped 2026-05-15: prevents *future deploy misconfigurations* (boot refuses when `CHECKOUT_ENABLED=true` but env is incomplete, or `sk_live_` key outside Render). **L3 router 503 and L4 Saga pre-flight still pending — the actual silent-bypass code path at `saga.py:104-106` is unchanged.** Full retirement requires L3 + L4 + deleting the `except NotImplementedError: pass` blocks at `saga.py:104` and `:218`. |
+| 1 | **Stripe disabled, orders ship anyway** | `saga.py:104-106` silently swallowed `NotImplementedError` from `stripe_client._check_enabled()` | LAIGO ships order with zero payment hold. Direct revenue loss per order. | 10 | 9 | 9 | **810** → **RETIRED** | **RETIRED 2026-05-15.** Layered fix complete: L0 gate.py + L1 boot assertion + L2 /checkout/gate + L3 router 503 + L4 Saga pre-flight + strong asyncio task ref. The three `except NotImplementedError: pass` blocks at `saga.py:58, 104, 218` have been deleted. Verified by 6-scenario L4 test suite: direct Saga invocation with gate closed produces `saga_status: "failed"` with `error: "Gate closed at Saga start: ..."`, never reaching Stripe or marketplace calls. See §10 for full details. **Note:** the stub `stripe_client.py` still returns empty strings when STRIPE_ENABLED=True — that gap is L5's concern (PaymentProvider Protocol). |
 | 2 | **Partial multi-seller failure leaves orders un-cancellable** | `brickowl_client.cancel_order` is a no-op stub (`brickowl_client.py:337-341`); `lego_client` has no cancel API | If N-1 of N orders succeed and the last fails, the N-1 ship and customer is refunded. LAIGO eats $X per failure. | 9 | 7 | 8 | **504** | Implement Playwright-based cancellation for BrickOwl (Option A §17.5). LEGO.com: cancellation is manual; the Saga must order LEGO.com LAST and only commit it after BrickOwl successes are confirmed. Add `commit_order` adapter property `is_reversible: bool` and order commits by reversibility (reversible first, irreversible last). |
 | 3 | **Saga crashes mid-flight, no resumption** | `router.py:203-209` `asyncio.create_task` is fire-and-forget; no startup resume code reads `outputs/{job_id}/checkout_state.json` | Funds held on customer card for up to 7 days; orders may or may not have been placed. Customer support burden + chargebacks. | 10 | 5 | 9 | **450** | Implement Section 6.5 resumption. Move state to Postgres so it survives Render restarts. |
 | 4 | **Listing data is up to 70 min stale at commit time** | 1h `BRICKOWL_CACHE_TTL_SECONDS` + 10min quote window + ~10min saga duration; no pre-commit revalidation | Customer is charged for inventory that's gone. Stockout retry helps, but doesn't help LEGO.com (single Playwright session, no retry-after-stockout path). | 8 | 7 | 8 | **448** | Implement Section 6.3 pre-commit revalidation. Shrink cache TTL during checkout flows specifically (use `cache_get_fresh(key, max_age=60)` for revalidation reads). |
@@ -862,45 +888,15 @@ Hot-path acceptance tests (network-dependent, run in CI with a mock server):
 
 ## 8. Prioritized roadmap to v1
 
-The order below trades off RPN reduction per engineering-hour. Items 1–6 must be done before the first real $1 moves.
+**Moved to `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §3.** That document is the single source of truth for pre-launch must-dos and tracks current status of each roadmap item.
 
-| # | Item | RPN(s) addressed | Effort | Notes |
-|---|---|---|---|---|
-| 1 | Replace Stripe-disabled silent-bypass with a layered defense (gate + boot + router + Saga + provider + audit) | #1 (810) | S–M | **In progress.** L0 + L1 shipped 2026-05-15. L3 + L4 are what actually close the bypass; L2/L5/L6 are scalability + observability. See §10 for layer-by-layer status. |
-| 2 | Move Saga state to Postgres; add resume-on-startup; add partial-unique-index per-job | #3 (450), #5 (324), #17 (112), #16 (80) | M | Single most-impactful pre-launch change. |
-| 3 | Implement pre-commit revalidation per adapter | #4 (448), #14 (120), #15 (126) | M | Roughly half the cart-snatching window closes here. |
-| 4 | Marketplace adapter Protocol; refactor LEGO.com + BrickOwl into adapters | #2 (504) prep; #20 (120); structural | M | Required for everything else to compose cleanly. |
-| 5 | Implement BrickOwl Playwright cancellation (Option A §17.5); reorder commits so reversible ones happen first | #2 (504) | L | Cannot launch without this if BrickOwl is in the loop. |
-| 6 | Capture retry with backoff + operator alert; explicit `MANUAL_REVIEW` state | #7 (252) | S | |
-| 7 | Per-source rate-limit budgets via `AsyncLimiter` + lifespan HTTP clients | #8 (240) | S | |
-| 8 | Listing parse sanity checks (price/qty bounds) | #10 (243) | S | |
-| 9 | Optimizer Pass 2 redesign + sanity tests | #11 (150), #20 (120) | M | |
-| 10 | Bounded financial exposure circuit breaker | #19 (216) | S | |
-| 11 | Test suite covering Section 6.10 minimums | #21 (189) | M | |
-| 12 | Drift tolerance + customer "confirm new price" round-trip | #9 (245) | M | |
-| 13 | LEGO.com semaphore + recent-order-list duplicate-detection heuristic | #6 (288), #18 (168) | M | |
-| 14 | Customer confirmation email | #24 (40) | S | |
-
-**"S" = ≤1 engineer-day, "M" = ≤1 engineer-week, "L" = >1 engineer-week.**
-
-The minimum-viable pre-launch is items 1–7. Items 8–14 are quality-of-life and reducing tail-risk.
+This audit retains the FMEA in §7 (which the roadmap is derived from) and the implementation history in §10.
 
 ---
 
-## 9. Appendix — open questions for product
+## 9. Open questions for product
 
-These are product-strategy questions that the audit surfaced but cannot answer alone. They should be resolved before v1 ships:
-
-1. **BrickOwl ordering strategy (§17.2):** Option A (Playwright; LAIGO collects payment) vs Option B (Cart URL redirect; customer pays BrickOwl directly). Option A preserves the "fully automated" promise but exposes LAIGO to Playwright fragility and float-financing the BrickOwl portion. Option B preserves the brand promise less perfectly but eliminates ~half the Saga complexity.
-2. **Allocation drift tolerance:** When fresh revalidation produces a higher total, does LAIGO eat the small delta (≤2%), or does the customer get a "confirm new price" prompt unconditionally? The answer drives both Saga design and customer-facing flow.
-3. **Hourly financial exposure cap:** What is the maximum at-risk amount that should be permitted before `/confirm` returns 503? $500? $5000? This is a business risk-appetite question, not an engineering one.
-4. **Customer concurrency policy:** If a customer has an active Saga for a job, is a second `/quote` for the same job (different shipping address, different country, etc.) permitted, or is the job locked until the Saga terminates?
-5. **Refund policy on commit-but-not-capture failures:** When orders are placed and capture fails, does LAIGO contact the customer for an alternate payment, refund the marketplace orders (eating cost), or both?
-
-**Resolved 2026-05-15 (partial):**
-- Merchant of record: **LAIGO is the reseller.** Customer pays LAIGO via Stripe for bricks + shipping + service fee; LAIGO uses its own marketplace accounts to place supplier orders.
-- Partial-fail policy: **all-or-nothing.** Any unrecoverable partial failure triggers compensation + full customer refund. This guarantee is conditional on real cancellation working (RPN #2) — see §10.
-- Authorization buffer: **5%.** Stripe hold is `1.05 × quote`; capture is for the exact allocated total; the unused authorization decays. Standard pattern; Stripe permits capturing less than authorized.
+**Moved to `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §5.** Update there as decisions land; this audit no longer mirrors them.
 
 ---
 
@@ -926,17 +922,19 @@ The fix for RPN #1 ("Stripe disabled, orders ship anyway") is a six-layer defens
 |---|---|---|---|
 | **L0** Gate module (`scripts/checkout/gate.py`) | Single source of truth: `compute_decision()`, `require_open()`, `GateClosedError`, `CheckoutMode {DISABLED, TEST, LIVE}` | ✅ **Shipped 2026-05-15** | Foundation for all other layers |
 | **L1** Boot assertion (`scripts/Main.py` lifespan) | Logs gate state on boot; refuses to start if `CHECKOUT_ENABLED=true` but gate is DISABLED; refuses any `sk_live_` outside Render | ✅ **Shipped 2026-05-15** | T2, T7 |
-| **L2** Health endpoint (`/health/checkout`) | Public read-only endpoint returning `{mode, is_open, payment_provider, marketplaces_live, reasons[], commit}`. Always 200; `Cache-Control: no-store` so kill-switch state propagates immediately. `commit` is read from `RENDER_GIT_COMMIT` (null in local dev). | ✅ **Shipped 2026-05-15** | Post-deploy verification; config-drift detection; future dashboard |
-| **L3** Router gate (`/confirm` returns 503) | HTTP-layer short-circuit when gate is DISABLED | ❌ Not built | T1 at HTTP layer, T4 for routes that go through router |
-| **L4** Saga pre-flight (`gate.require_open()` + delete `except NotImplementedError: pass` at `saga.py:104,218`) | Refuses to advance before any external call. **The actual bypass closure.** | ❌ Not built | T1, T3, T4, T6 — the keystone layer |
-| **L5** PaymentProvider Protocol + registry | No stub providers exist; `get_active()` raises if none constructed. Each provider's `__init__` validates SDK + env atomically. | ❌ Not built | T1, T5 |
-| **L6** Audit log (`audit.emit()` at every Saga state transition) | `hold.skipped` event would be the unmistakable signal of a regression — should be permanently zero in prod | ❌ Not built | Post-hoc detection of any future regression |
+| **L2** Health endpoint (`/checkout/gate`) | Public read-only endpoint returning `{mode, is_open, payment_provider, marketplaces_live, reasons[], commit}`. Always 200; `Cache-Control: no-store` so kill-switch state propagates immediately. `commit` is read from `RENDER_GIT_COMMIT` (null in local dev). | ✅ **Shipped 2026-05-15** | Post-deploy verification; config-drift detection; future dashboard |
+| **L3** Router gate (`/confirm` returns 503) | FastAPI `Depends(require_checkout_gate_open)` on `/confirm`. Returns `503` with `{detail: {error, code: "CHECKOUT_GATE_CLOSED", mode}}`. `/quote`, `/status`, and `/checkout-debug/*` remain accessible in DISABLED mode (most-conservative gating scope). Emits WARNING `checkout.gate.l3_rejected` log line per rejection — see audit-gap notes below. | ✅ **Shipped 2026-05-15** | T1 at HTTP layer, T4 for routes going through router |
+| **L4** Saga pre-flight | First statement of `execute_checkout_saga` calls `gate.require_open()`; a closed gate produces `saga_status: "failed"` with `error: "Gate closed at Saga start: ..."` and the Saga returns without touching Stripe or marketplaces. Three `except NotImplementedError: pass` silent catches removed (`saga.py:58, 104, 218`). Strong reference for the Saga task in `router.py` (`_running_sagas` set + done callback) so Python 3.11+ asyncio can't GC the task mid-flight. | ✅ **Shipped 2026-05-15 — RPN #1 retired** | T1, T3, T4, T6 — keystone layer that closes the structural bypass |
+| **L5** PaymentProvider Protocol + registry | `scripts/checkout/payment/{base,registry,stripe_provider}.py`. `StripeProvider.__init__` atomically validates SDK + env + safety rules (STRIPE_ENABLED + key format + live-outside-Render check). Registry is single-active; populated at lifespan startup before `compute_decision()` runs. `get_active()` raises `PaymentProviderUnavailable` if no provider was registered. Saga obtains the provider once per execution and uses it for hold/capture/cancel. Hold amount is 1.05× quote total; capture amount is the final allocated total; capture > authorized → MANUAL_REVIEW. | ✅ **Shipped 2026-05-15** | T1, T5 |
+| **L6** Audit log (`audit.emit()` at every Saga state transition) | Design contract in `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §2. `payment.skipped` event is the canonical regression signal — should be permanently zero in prod. | ❌ Not built | Post-hoc detection of any future regression |
 
 ### What changed today (concretely)
 
 - **`scripts/checkout/gate.py`** (new): pure-function `compute_decision()` returns a frozen `GateDecision` carrying mode + reasons + payment_provider + marketplaces_live. `require_open()` is the enforcement primitive for Saga + router; raises `GateClosedError` (does not inherit from `NotImplementedError` so existing silent-catches can't swallow it). `is_truthy()` is exposed publicly for env-flag parsing.
 - **`scripts/Main.py`** lifespan: logs the gate decision at every boot, refuses to boot if env-says-enabled-but-reality-disagrees. Mirror of `stripe_client._log_mode()`'s live-key safeguard, evaluated at boot rather than first Stripe call.
-- **`scripts/checkout/health_router.py`** (new, L2): public `GET /health/checkout` returning the gate snapshot + commit SHA. Always 200; `Cache-Control: no-store`. Mounted at root in `Main.py` alongside the existing `/health` liveness endpoint (which is untouched — Render's healthcheck must remain pointed at `/health`, not `/health/checkout`).
+- **`scripts/checkout/gate_router.py`** (new, L2): public `GET /checkout/gate` returning the gate snapshot + commit SHA. Always 200; `Cache-Control: no-store`. Mounted at root in `Main.py` alongside the existing `/health` liveness endpoint (which is untouched — Render's healthcheck must remain pointed at `/health`, not `/checkout/gate`).
+- **`scripts/checkout/dependencies.py`** (new, L3): FastAPI dependency `require_checkout_gate_open` that calls `gate.compute_decision()` per request and raises `HTTPException(503)` with the locked body shape when the gate is closed. Designed to be the only HTTP-aware bridge between the pure gate and FastAPI — kept small and policy-only.
+- **`scripts/checkout/router.py`** (L3 wiring): added `Depends(require_checkout_gate_open)` to `confirm_checkout`'s signature. Gate runs BEFORE cache lookup, BEFORE state writes, BEFORE Saga creation. Ordering relative to FastAPI's built-in validation: CORS preflight → Pydantic body validation (422) → L3 gate Depends (503) → endpoint body (409/404/422/200). Invalid bodies still get the more-specific 422 because Pydantic runs before Depends.
 
 ### Antipatterns identified during review
 
@@ -944,39 +942,483 @@ The fix for RPN #1 ("Stripe disabled, orders ship anyway") is a six-layer defens
 |---|---|---|
 | P1 | RPN #1 not fully retired by L0+L1 alone; the bypass code path at `saga.py:104-106` is unchanged | Documented above; L3+L4 will close |
 | P2 | `_is_truthy` duplicated between gate and Main.py | **Fixed** — `is_truthy()` exported from gate |
-| P3 | "Live Stripe key outside Render" rule lives in 3 sites (`stripe_client._log_mode`, gate, Main.py boot) | **Intentional** — defense in depth. Each fires at a different time. `stripe_client._log_mode` becomes redundant when L5 lands and `StripeProvider.__init__` subsumes its checks |
+| P3 | "Live Stripe key outside Render" rule lives in 3 sites (`stripe_client._log_mode`, gate, Main.py boot) | **Resolved with L5 (2026-05-15).** `stripe_client.py` is deleted; `_log_mode`'s checks are subsumed by `StripeProvider.__init__`. The three remaining enforcement sites are: (1) `StripeProvider.__init__` (refuses construction), (2) `gate.compute_decision()` (refuses to compute open), (3) `Main.py` lifespan (refuses to boot). All fire at different times; intentional defense in depth. |
 | P4 | Gate hardcodes marketplace credential probes (`BRICKOWL_API_KEY`, `LEGO_EMAIL`+`LEGO_PASSWORD`) | TODO comment in gate.py; resolved when L5 MarketplaceAdapter Protocol lands and adapters declare their own `is_configured()` |
 | P5 | `compute_decision()` called twice on boot | Acceptable — pure function |
 | I1 | `saga.py:58` (`_compensate`) catches `NotImplementedError` on Stripe cancel | Will be removed in same commit as L4 |
-| I2 | `stripe_client._log_mode()` redundant with gate's check | Keep until L5 supersedes it |
+| I2 | `stripe_client._log_mode()` redundant with gate's check | **Resolved with L5 (2026-05-15).** `stripe_client.py` deleted; checks moved into `StripeProvider.__init__`. |
 | I3 | `CLAUDE.md` stale (no mention of gate.py) | **Fixed** 2026-05-15 |
 | I4 | `docs/ORDER_OPTIMIZER.md` line 465 calls dev-mode bypass "safe for development" | Update when L4 lands and the wording becomes false |
 
+### Known L3 limitations (the audit-log gap)
+
+**Moved to `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §2.8** ("Audit-log gap today (without L6)") for the operational scenarios and §2.6 for the migration steps when L6 ships.
+
+Interim mitigation reminder: configure a saved log search in Render for `checkout.gate.l3_rejected`, `MANUAL_REVIEW`, and `payment.skipped`. Notification rule on volume > 0.
+
 ### Operational playbook now that L2 is live
 
-After every Render deploy, run:
+After every Render deploy, run (substitute your actual backend URL — the frontend is at `laigo-frontend.onrender.com`, the backend is a separate Render service):
+
 ```
-curl https://laigo.onrender.com/health/checkout
+curl https://<your-laigo-backend>.onrender.com/checkout/gate
 ```
-Expected response shape:
+
+Expected response shape when fully configured:
+
 ```json
 {"mode":"live","is_open":true,"payment_provider":"stripe",
  "marketplaces_live":["brickowl","lego_official"],"reasons":[],"commit":"abc1234..."}
 ```
+
 If `mode` is unexpected or `reasons` is non-empty, the deploy is misconfigured even though boot succeeded. Investigate before sending customer traffic.
 
 The kill switch (unset `CHECKOUT_ENABLED` in Render dashboard → restart service) results in `mode: "disabled"` within ~30 seconds. No code change, no rollback needed.
 
-**Do not point Render's healthcheck at `/health/checkout`** — that URL stays 200 even when checkout is intentionally disabled, but the *intent* of Render's healthcheck is liveness, which is what `/health` provides.
+**Render healthcheck path: keep on `/health`, never `/checkout/gate`.** Render's healthcheck is a free-text field in the dashboard. If anyone points it at `/checkout/gate`, the service stays marked-healthy even when checkout is intentionally disabled (we always return 200) — a silent failure mode. `/health` is the pure liveness endpoint; `/checkout/gate` is for operators and monitoring tools that explicitly want gate state.
 
-### What "RPN #1 retired" requires
+**`is_open` vs `mode`.** `is_open` is True for both TEST and LIVE. It means "the Saga will execute" — not "real money is moving." Alerting rules that care about real-money exposure should match `mode == "live"`, not `is_open`. A TEST deploy is `is_open: true, mode: "test"`.
 
-L3 + L4 in a single commit:
-1. `router.confirm_checkout`: call `compute_decision()`, return 503 with the gate's reasons if not `is_open`.
-2. `saga.execute_checkout_saga`: call `require_open()` at the top, before any state mutation or external call.
-3. Delete `try/except NotImplementedError: pass` at `saga.py:104-106` and `:218-219`.
-4. Delete `try/except NotImplementedError: pass` at `saga.py:58` (Stripe cancel in compensate).
+**`reasons` are free-text strings, not stable codes.** Programmatic alerting today must substring-match (e.g. `"STRIPE_SECRET_KEY" in reason`). Reason wordings may change between releases. If alerting matures, refactor to structured `{code, message}` entries.
 
-Estimated effort: 45 minutes including a manual test of `/confirm` against the four states (DISABLED, TEST, LIVE, gate-flips-after-quote).
+**`commit` is sourced from `RENDER_GIT_COMMIT`.** Set automatically by Render. Null in local dev. Use it to confirm the running instance matches the commit you intended to deploy.
 
-These should be written into a brief product doc and referenced from the implementation tickets so they don't get rediscovered ad-hoc during build.
+**Post-L5: Gate reads `payment.registry.is_configured()` (populated at lifespan from `StripeProvider()`).** `StripeProvider.__init__` checks `stripe_provider.STRIPE_ENABLED` (a Python module constant) AND env. Flipping `STRIPE_ENABLED` from `False` to `True` requires a code edit + redeploy, not just a Render env change. When unset, the gate reason reads `"No payment provider registered (see boot logs for the construction failure reason)"`; the actual reason (STRIPE_ENABLED, missing key, etc.) appears in the WARNING log at lifespan startup.
+
+### Layer interaction contract
+
+| Aspect | L0 (gate) | L1 (boot) | L2 (`/checkout/gate`) | L3 (`/confirm` Depends) |
+|---|---|---|---|---|
+| Side effects | None (pure function) | Raises on misconfiguration; logs gate state to stdout | None on server state; sets `Cache-Control: no-store` on response | Emits WARNING `checkout.gate.l3_rejected` on rejection; otherwise none |
+| Fires when | On demand, from any caller | Once, at lifespan startup | Per HTTP request on `/checkout/gate` | Per HTTP request on `/confirm` only |
+| Reads | env vars + `payment.registry.is_configured()` (post-L5) | calls L0 once | calls L0 once + reads `RENDER_GIT_COMMIT` | calls L0 once per request |
+| Effect of failure | Returns `mode=disabled` with reasons; never raises | Server refuses to start; uvicorn exits | Always 200 unless FastAPI itself crashes | 503 with locked body shape; allows other paths through |
+| Shared mutable state with other layers | None | None | None | None |
+
+**Key composition rules:**
+- L1 is one-shot. After boot, only L2/L3 reflect current state per-request.
+- L2 surfaces drift L1 missed — if env mutates between deploys, L2 sees the new state immediately. This is a **feature**, not a bug.
+- L3 enforces the same drift detection on the write-side: if the gate closes mid-session, the next `/confirm` returns 503 even though L1 already passed at boot.
+- If L1 raises and refuses boot, L2 and L3 are unreachable (server never accepts requests). Diagnose from boot logs in that case.
+- L2 is a reporter only. Hitting `/checkout/gate` does not gate `/quote`, `/confirm`, or any other endpoint. **Enforcement at HTTP layer is L3.** Enforcement at Saga layer is L4 (pending).
+- L3 only covers HTTP-initiated Sagas. A future code path that calls `execute_checkout_saga()` directly (admin tool, batch job, test fixture) bypasses L3 entirely. **L4 is what closes that hole.**
+
+### Known L2 limitations (deliberate v1 omissions)
+
+- **No timestamp in response body.** Clients fall back to HTTP `Date` header.
+- **No deep readiness check** (no live probe of BrickOwl / Stripe / LEGO.com). The gate only knows whether *credentials are present*, not whether they *authenticate*. A `/checkout/gate/deep` endpoint that does live probes is future work.
+- **CORS is restricted to LAIGO frontend + localhost:5173.** A future status page on a different origin would need to be added to `allow_origins` in `Main.py` or fetch server-side.
+- **No request logging on `/checkout/gate`.** Intentional — polling monitors would spam the log. If audit is needed later, add FastAPI access-log middleware.
+- **`reasons` reason text is operator-facing English, not for end users.** Acceptable while LAIGO has one operator.
+
+### What "RPN #1 retired" required — ALL ITEMS DONE 2026-05-15
+
+1. ~~`router.confirm_checkout`: call `compute_decision()`, return 503 with the gate's reasons if not `is_open`.~~ ✅ Done (L3) — wired via `Depends(require_checkout_gate_open)`.
+2. ~~`saga.execute_checkout_saga`: call `gate.require_open()` at the top, before any state mutation or external call.~~ ✅ Done (L4) — first statement of the function, dedicated `try/except GateClosedError` writes a clear FAILED state.
+3. ~~Delete `try/except NotImplementedError: pass` at `saga.py:104-106` (Stripe hold) and `:218-219` (Stripe capture).~~ ✅ Done (L4).
+4. ~~Delete `try/except NotImplementedError: pass` at `saga.py:58` (Stripe cancel in compensate).~~ ✅ Done (L4).
+5. (Added during L4 review) ~~Strong reference for the Saga `asyncio.create_task` so Python 3.11+ GC can't cancel the task mid-flight.~~ ✅ Done (L4) — `_running_sagas` set in `router.py` with `add_done_callback` cleanup.
+6. (Added during L4 review) ~~Fix D1: replace `not os.environ.get("RENDER")` with `not is_truthy(os.environ.get("RENDER"))` in both `gate.py` and `Main.py`.~~ ✅ Done — verified across `false`, `0`, `no`, `False`, empty, absent, and `true` values.
+
+**RPN #1 is structurally retired.** There is no longer a code path that places orders without a valid payment hold. Verified by:
+
+- 8-scenario test suite for L3 (HTTP layer)
+- 6-scenario test suite for L4 (Saga layer, including direct invocation)
+- 7-value test for D1 (RENDER truthiness)
+
+Open follow-up items (lower priority): D2, D3, F5, F6, S2 — see Consolidated fix backlog above. These are hardening, not bypass concerns.
+
+---
+
+### Multi-pass review findings (2026-05-15)
+
+A five-pass senior review (correctness, security, concurrency, doc-drift, future-step risk) was run against L0–L3 and the surrounding code. Findings are grouped by pass and tagged for traceability. **All open items are listed in the consolidated fix backlog at the bottom of §10.**
+
+#### Pass 1 — Correctness defects
+
+| Tag | Severity | Issue | Status | Fix |
+|---|---|---|---|---|
+| **D1** | **CRITICAL** | `RENDER="false"` / `"0"` / `"no"` bypass the live-key safeguard. Both `gate.py:156` and `Main.py:127` check `not os.environ.get(_ENV_RENDER)` — string truthiness, so any non-empty value evaluates "set." Verified by test: `RENDER="false"` + `sk_live_xxx` produces `mode=LIVE` with no warning. | OPEN | Replace with `is_truthy(os.environ.get(_ENV_RENDER))` in `gate.py:156` and `Main.py:127`. Also revisit `Main.py:47` (`load_project_env` skip condition) for the same defect class. |
+| D2 | MEDIUM | Whitespace-only credentials counted as configured. `LEGO_EMAIL="   "` + `LEGO_PASSWORD="   "` marks `lego_official` in `marketplaces_live`. Same for `BRICKOWL_API_KEY="   "`. | OPEN | Apply `.strip()` to env reads before truthiness check, in `gate.py:176-179`. |
+| D3 | LOW | `STRIPE_SECRET_KEY="sk_test_"` (just the prefix, empty body) accepted as TEST. Stripe API would reject at first call, but gate doesn't catch early. | OPEN | Require minimum length, e.g. `len(key) >= len(prefix) + 8` in `_stripe_key_mode`. |
+
+Tested and confirmed **not defective**: is_truthy whitespace handling, 50-thread concurrent compute_decision (all 50 agree), GateDecision FrozenInstanceError on mutation attempts, GateDecision hashability, reasons-list order stability across calls, 100 rapid env flap iterations show precise 50/50 distribution (no caching).
+
+#### Pass 2 — Security & data exposure
+
+Clean: no secret leaks in `/checkout/gate` body (verified with fake `sk_live_super_secret_value`, `bo_api_secret_xyz`, real-looking emails — none appear in response). 503 body contains no operator info. Header injection (`X-Checkout-Enabled: false`, custom headers, Origin spoofing) cannot trick the gate. HTTP methods correctly limited to POST on `/confirm` (GET/PUT/DELETE/PATCH/TRACE all return 405).
+
+| Tag | Severity | Issue | Status |
+|---|---|---|---|
+| S1 | MEDIUM | Path-traversal in `job_id` — pre-existing in `checkout_store`, not introduced by L0–L3. `POST /jobs/{job_id}/checkout/confirm` accepts arbitrary `job_id` strings that become filesystem paths via `outputs/{job_id}/...`. Most malicious values get rejected downstream (cache miss → 409) but `checkout_store.save()` could create directories outside the intended path. | OPEN (pre-existing — flag for separate audit) |
+| S2 | LOW | Pydantic doesn't enforce `max_length` on `ConfirmRequest.checkout_id` or `stripe_payment_method_id`. 20KB strings accepted. Not a DoS in practice (FastAPI body limit applies) but the contract is loose. | OPEN |
+
+#### Pass 3 — Concurrency & distributed systems
+
+Clean: GIL serializes env access (verified with 42 mutations + 5 concurrent readers over 0.5s, no crashes, no partial reads). Per-request gate evaluation works (rapid env flap → precise reflection in next compute_decision). Multi-worker semantics: each uvicorn worker process reads env independently, all agree on the gate. Lifespan ordering: L1 runs before any thread/executor/cache-sweeper init.
+
+| Tag | Severity | Issue | Status |
+|---|---|---|---|
+| **C1** | **MEDIUM** | `router.py:222`: `asyncio.create_task(saga_module.execute_checkout_saga(...))` does not store a strong reference. Python 3.11+ asyncio docs: "the event loop only keeps weak references to tasks. A task that isn't referenced elsewhere may be garbage collected at any time, even before it's done." A Saga awaiting a slow Playwright session could be GC'd mid-flight, leaving state in `pending` forever. | OPEN — address with L4 |
+| C2 | INFO | `stripe_provider.STRIPE_ENABLED` is per-process module state (post-L5; was `stripe_client.STRIPE_ENABLED` pre-L5). Each uvicorn worker / subprocess has its own copy, AND each constructs its own `StripeProvider` instance held in its own registry. Not exploitable today (no monkey-patching in prod), but a future multi-instance architecture (Postgres-backed state, shared workers) must register per-worker. | DOCUMENTED |
+| C3 | INFO | Lifespan failure makes both `/health` and `/checkout/gate` unreachable (uvicorn never starts serving). Documented in gate_router.py docstring. | DOCUMENTED |
+
+#### Pass 4 — Documentation drift
+
+| Tag | Severity | Location | Issue | Status |
+|---|---|---|---|---|
+| **F1** | MEDIUM | `docs/ORDER_OPTIMIZER.md:465` | Calls dev-mode bypass "Safe for development." Now partially false — L3 returns 503 in dev. This language is what normalized the original RPN #1 bug. | OPEN |
+| F2 | LOW | `docs/ORDER_OPTIMIZER.md:78` module table | Missing entries for `gate.py`, `dependencies.py`, `gate_router.py`. | OPEN |
+| F3 | LOW | `docs/ORDER_OPTIMIZER.md:608-609` Saga sequence | Says "Stripe hold (skipped in dev: STRIPE_ENABLED=False)" — incorrect after L4 lands. | UPDATE WITH L4 |
+| F4 | MEDIUM | `docs/ORDER_OPTIMIZER.md:722` test instructions | Don't mention gate as precondition; readers will be confused why `/confirm` 503s in dev. | OPEN |
+| F5 | MINOR | `gate.py:20` docstring | Says "L3 router /confirm" — should read "L3 /confirm endpoint" for precision (the router isn't gated; one endpoint is). | OPEN |
+| F6 | MINOR | `dependencies.py:9-12` | Says "when the gate is DISABLED" but code rejects "when not is_open" — equivalent today, may drift if non-open modes added (maintenance/degraded). | OPEN |
+
+#### Pass 5 — Future-step risks
+
+| Tag | Layer affected | Issue | Required action |
+|---|---|---|---|
+| **G1** | L4 | Existing `except Exception:` blocks in `saga.py` will swallow `GateClosedError` with misleading messages ("Stripe hold failed: GateClosedError..."). | L4 MUST add a dedicated outer try/except for GateClosedError as the FIRST statement in `execute_checkout_saga`, before any state mutation. See L4 pre-work section below. |
+| G2 | L4 | After L4 deletes `except NotImplementedError: pass` at `saga.py:104,218`, the remaining `except Exception:` would catch a stripe `NotImplementedError` with a misleading "Stripe hold failed" message. | Ensure the gate's `require_open()` runs FIRST so unreachable code paths never raise NotImplementedError. |
+| G3 | L4 | `except NotImplementedError: pass` at `saga.py:58` (compensate Stripe cancel) becomes dead code after L4 in most scenarios — the gate was open at Saga start, so Stripe is configured at compensate time. Safe to delete. | Delete it; document the reasoning in the commit. |
+| **H1** | L5 | Gate reads `stripe_client.STRIPE_ENABLED` directly at `gate.py:142`. L5's PaymentProvider Protocol requires migrating this dependency. | **Resolved with L5 (2026-05-15).** Gate now imports `payment.registry` and consults `is_configured()` + `active_name()` + `active_mode()`. `stripe_client.py` is deleted. |
+| H2 | L5 | `payment_provider: Optional[str]` is ambiguous if multiple providers active simultaneously. | **Resolved with L5 (2026-05-15).** Locked single-active for v1; field stays `Optional[str]`. Multi-active deferred to a future iteration when a second provider lands. |
+| **I1** | L6 | Multiple call sites already need `audit.emit()`: L3 dependency, L4 (when built), saga state transitions, marketplace order events, payment events. The audit module doesn't exist. | Design contract locked in `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §2 (schema, vocabulary, storage, retention, API, migration, alerting). |
+| J1 | Roadmap #2 (Postgres state) | Saga resumption from Postgres must call `gate.require_open()` at resume time. A Saga that started in LIVE could otherwise resume in DISABLED. | Include in L4 design constraints (below). |
+| J2 | Roadmap #10 (financial exposure circuit breaker) | Could be modeled as a new gate state (`DEGRADED`) vs a separate check in Saga. | Decision before L4; affects whether the gate's `mode` field vocabulary expands. |
+
+---
+
+### L4 design — pre-work required before implementation
+
+Original audit roadmap called L4 a "single-line fix." The multi-pass review surfaced **five design constraints** that must be addressed in the same commit. This subsection is the L4 implementation contract — read before writing any L4 code.
+
+#### L4 constraint #1 (G1): mandatory dedicated try/except for GateClosedError
+
+Naive placement of `gate.require_open()` inside `execute_checkout_saga` fails in two ways:
+- **Inside any existing try block**: the resulting GateClosedError is caught by `except Exception:` with a misleading message
+- **Outside any try block**: the error escapes to asyncio task level and silently dies (with at most a "Task exception was never retrieved" log)
+
+**Required pattern (this is the contract):**
+
+```python
+async def execute_checkout_saga(
+    job_id: str,
+    checkout_id: str,
+    allocation: AllocationResult,
+    payment_method_id: str,
+    max_stockout_retries: int = 2,
+) -> None:
+    from .gate import require_open, GateClosedError
+
+    # ── Layer 4 — gate pre-flight ────────────────────────────────────────────
+    # This MUST be the first statement. No state mutation, no logging, no
+    # external calls before this. Catches both the customer-facing path (L3
+    # passed, gate flipped between L3 and Saga start) and direct invocations
+    # that bypass /confirm entirely.
+    try:
+        decision = require_open()
+    except GateClosedError as exc:
+        await checkout_store.update(job_id, {
+            "saga_status": SagaStatus.FAILED,
+            "error": f"Gate closed at Saga start: {exc}",
+        })
+        logger.critical(
+            f"[saga] [{checkout_id}] GATE CLOSED — refusing to run. {exc}"
+        )
+        return  # graceful failure; do NOT re-raise
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ... existing Saga flow
+```
+
+**This is the ONLY legitimate catch site for GateClosedError per gate.py's docstring rule.** A future CI grep guard will pass-list this site and fail any other `except GateClosedError` in the codebase.
+
+#### L4 constraint #2 (C1): strong reference for the Saga asyncio task
+
+`router.py:222` currently drops the task object on the floor. Required pattern:
+
+```python
+# Module-level in router.py (or new file scripts/checkout/task_registry.py)
+_running_sagas: set[asyncio.Task] = set()
+
+# Inside confirm_checkout, replacing the existing line:
+task = asyncio.create_task(saga_module.execute_checkout_saga(
+    job_id=job_id,
+    checkout_id=body.checkout_id,
+    allocation=allocation,
+    payment_method_id=body.stripe_payment_method_id,
+    max_stockout_retries=max_retries,
+))
+_running_sagas.add(task)
+task.add_done_callback(_running_sagas.discard)
+```
+
+This must land in the same L4 commit because L4 makes the Saga actually do something (real Stripe + marketplace work) — task lifetime becomes load-bearing.
+
+#### L4 constraint #3 (J1): gate check on Saga resumption
+
+When Postgres-backed state + crash resumption lands (roadmap item 2), the resumption code MUST call `gate.require_open()` before continuing a Saga. The L4 design naturally supports this: gate is checked at function entry, which is also called for resumptions. No additional plumbing needed today, but the resumption code (future) must call `execute_checkout_saga` rather than skipping straight to a mid-Saga step.
+
+#### L4 constraint #4: deletion order
+
+The order of deletions matters for safety during the change:
+
+1. **First**, add `require_open()` at top of `execute_checkout_saga` (with the try/except from constraint #1)
+2. **Then** delete `except NotImplementedError: pass` at `saga.py:104-106` (Stripe hold)
+3. **Then** delete `except NotImplementedError: pass` at `saga.py:218-219` (Stripe capture)
+4. **Then** delete `except NotImplementedError: pass` at `saga.py:58` (compensate Stripe cancel — dead code after the above)
+5. **Then** add a unit test for each gate-closed → Saga aborts scenario
+
+Doing it in this order means: at any intermediate state, the worst case is "Stripe call fails with NotImplementedError, error propagates to outer except Exception, state goes to FAILED" — which is acceptable. The bug being fixed is "Stripe NotImplementedError is silently swallowed and orders ship anyway." Any intermediate state where Stripe failures are *louder* (even if message is wrong) is an improvement.
+
+#### L4 constraint #5: error messaging for L4-rejected Sagas
+
+The `checkout_state.json` (and future Postgres row) records:
+- `saga_status: "failed"`
+- `error: "Gate closed at Saga start: <gate reasons>"`
+- `failed_at: <ISO 8601 timestamp>` (new field; document in CheckoutStatusResponse model)
+
+The `/status` endpoint will return this state. The customer sees an error indicating "checkout was interrupted." Frontend should treat this similarly to a /confirm 503 — render the "checkout unavailable" UI.
+
+#### L4 testing plan
+
+Pre-merge tests:
+
+| # | Setup | Expected |
+|---|---|---|
+| 1 | Gate open at /confirm time; gate stays open through Saga | Saga proceeds normally |
+| 2 | Gate flips DISABLED between /confirm and Saga task start | Saga's require_open() fires; state = FAILED with "Gate closed at Saga start" |
+| 3 | Direct call to `execute_checkout_saga()` bypassing /confirm with gate DISABLED | Same FAILED state as #2 |
+| 4 | Saga task is referenced strongly (force GC with `gc.collect()`) | Task survives; verifies C1 fix |
+| 5 | Simulate Postgres-resumption call to `execute_checkout_saga` with gate DISABLED | Resumption fails-closed gracefully |
+| 6 | Run existing L3 tests | All 8 still pass (no regression) |
+
+#### What L4 must NOT do
+
+- Do not add any per-step gate checks (`require_open` once at entry is enough for v1)
+- Do not change the `except Exception:` blocks elsewhere in the Saga — those handle real Stripe/marketplace errors
+- Do not change the existing `_compensate` flow — compensate must run regardless of gate state once it's started
+- Do not modify L3 — L3's contract is independent
+
+---
+
+### L5 — PaymentProvider Protocol — SHIPPED 2026-05-15
+
+The plan below was the design contract used at implementation time. All steps shipped; this section is the historical record. The "what shipped concretely" subsection at the end records the final state, the bundled roadmap #6 work, and the test scenarios verified.
+
+L5 introduces a `PaymentProvider` Protocol with a registry. Migration must not break L1/L2/L3.
+
+#### Step 1: new files
+
+- `scripts/checkout/payment/__init__.py` (empty package marker)
+- `scripts/checkout/payment/base.py` — `PaymentProvider` Protocol, `PaymentHold` dataclass, `PaymentProviderUnavailable` exception
+- `scripts/checkout/payment/registry.py` — `register()`, `get_active()`, `is_configured()`, `active_name() -> Optional[str]`
+- `scripts/checkout/payment/stripe_provider.py` — `StripeProvider` class implementing the Protocol; subsumes the env validation that currently lives in `stripe_client._log_mode()`
+
+`stripe_client.py` becomes a thin wrapper that the StripeProvider uses internally, eventually removed.
+
+#### Step 2: gate update
+
+Replace gate's payment-provider probe (currently `gate.py:135-164`):
+
+```python
+# Replace stripe_client direct read with registry lookup
+from .payment import registry as payment_registry
+
+if payment_registry.is_configured():
+    provider = payment_registry.get_active()
+    if provider.mode() == "live" and not is_truthy(os.environ.get(_ENV_RENDER)):
+        reasons.append("Live payment provider outside Render — refused")
+    else:
+        payment_provider = provider.name
+else:
+    reasons.append("No payment provider configured")
+```
+
+The `_stripe_key_mode` helper moves into `StripeProvider`. Gate becomes provider-agnostic.
+
+#### Step 3: Saga update
+
+`saga.py` `stripe_client.create_payment_hold(...)` calls become:
+
+```python
+provider = payment_registry.get_active()
+hold = await provider.create_hold(
+    amount_cents=allocation.customer_total_cents,
+    currency=os.environ.get("STRIPE_CURRENCY", "usd"),
+    payment_method_id=payment_method_id,
+    idempotency_key=f"hold-{checkout_id}",
+)
+# hold.hold_id replaces the bare string returned by stripe_client today
+```
+
+Stored under `payment_hold_id` in `checkout_state.json` (rename from `stripe_payment_intent_id`).
+
+#### Step 4: lifespan registration
+
+`Main.py` lifespan, after env load but before L1 boot check:
+
+```python
+from .checkout.payment import registry as payment_registry
+from .checkout.payment.stripe_provider import StripeProvider
+from .checkout.payment.base import PaymentProviderUnavailable
+
+try:
+    payment_registry.register(StripeProvider())
+    log.info("Payment provider registered: stripe")
+except PaymentProviderUnavailable as exc:
+    log.warning(f"Payment provider not available: {exc}")
+    # If CHECKOUT_ENABLED=true, L1 boot check will refuse below.
+```
+
+#### Open decision H2: single vs multiple active providers
+
+`payment_provider: Optional[str]` is the current type. Options:
+- **Single-active** (recommended for v1): only one provider active at a time. Field stays `Optional[str]`. Adding a new provider replaces the old.
+- **Multi-active**: registry holds a list with priority order. Field becomes `list[str]`. Resilient (failover) but complex.
+
+v1 = single-active. Multi-active is future work. **Decision locked: keep `Optional[str]`.**
+
+#### L5 testing plan
+
+- `StripeProvider()` constructor raises `PaymentProviderUnavailable` when `STRIPE_SECRET_KEY` missing
+- `StripeProvider()` raises when `sk_live_` outside Render (with D1 fixed: use `is_truthy(RENDER)`)
+- `compute_decision()` returns `payment_provider="stripe"` after registration
+- `payment_registry.get_active()` raises when no provider registered
+- L1 boot refuses if `CHECKOUT_ENABLED=true` and registry is empty
+- L2 `/checkout/gate` endpoint shows correct provider name
+- Saga uses registry; no direct `stripe_client.create_payment_hold` calls remain
+
+#### What shipped concretely (2026-05-15)
+
+Verified end-to-end by an import-and-smoke harness exercising every refusal path. All pass.
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | `STRIPE_ENABLED=False` (default) | `PaymentProviderUnavailable("STRIPE_ENABLED is False in stripe_provider.py...")` |
+| 2 | `STRIPE_ENABLED=True`, no `STRIPE_SECRET_KEY` | `PaymentProviderUnavailable("STRIPE_SECRET_KEY is missing or malformed...")` |
+| 3 | `STRIPE_ENABLED=True`, `STRIPE_SECRET_KEY="sk_test_"` (too short) | Refused — addresses D3 ("minimum length beyond prefix") inline |
+| 4 | `STRIPE_ENABLED=True`, `sk_live_xxx`, `RENDER` absent | `PaymentProviderUnavailable("Live Stripe key... detected outside the Render environment.")` |
+| 5 | `STRIPE_ENABLED=True`, `sk_live_xxx`, `RENDER="false"` | Same refusal (D1 truthiness fix verified) |
+| 6 | Happy path: `STRIPE_ENABLED=True`, `sk_test_xxx`, `CHECKOUT_ENABLED=true`, `BRICKOWL_API_KEY` set | Gate computes `mode=test`, `is_open=True`, `payment_provider="stripe"`, reasons=[] |
+| 7 | Gate without provider registered, `sk_live_` in env, no Render | Gate computes DISABLED with BOTH reasons: "No payment provider registered" AND "Live Stripe key... outside the Render environment" — defense-in-depth verified |
+
+#### Bundled work — Roadmap #6 (capture retry + MANUAL_REVIEW)
+
+L5 was shipped together with roadmap item 6. The "capture failed after orders placed" path no longer goes silently to `FAILED` and eats cost — it now retries on transient errors and escalates to `MANUAL_REVIEW` (a new terminal state) on exhaust or permanent error.
+
+| Aspect | Behavior |
+|---|---|
+| Retry trigger | `PaymentRetryableError` only (Stripe `APIConnectionError` / `RateLimitError` / `APIError`) |
+| No-retry trigger | `PaymentPermanentError` (Stripe `CardError` / `AuthenticationError` / `InvalidRequestError` / `PermissionError` / `IdempotencyError` / `SignatureVerificationError`) |
+| Schedule | 3 attempts max; backoff 1s / 4s / 16s between them (~21s worst-case) |
+| Idempotency key | Stable `f"capture-{checkout_id}"` across all attempts. Stripe's 24h idempotency cache returns the first response to subsequent retries; so a transient network error on the first call followed by a successful retry never double-captures. |
+| Capture > authorized (allocation drift exceeds 5% buffer) | **Hard fail-closed to MANUAL_REVIEW** before any capture attempt. Closes RPN #9 within the buffer; drift beyond 5% becomes operator-visible immediately. |
+| MANUAL_REVIEW state shape | `saga_status="manual_review"`, `manual_review_reason` is verbose (lists hold_id, authorized amount, last error, recommended next steps). `/status` surfaces both fields. |
+| Operator alerting (interim) | `[saga] [{checkout_id}] MANUAL_REVIEW — ...` CRITICAL log line. Promote to `audit.emit("saga.manual_review", ...)` when L6 lands. |
+
+#### Files changed (post-L5 layout)
+
+| File | Role |
+|---|---|
+| `scripts/checkout/payment/__init__.py` | Package marker |
+| `scripts/checkout/payment/base.py` | `PaymentProvider` Protocol, `PaymentHold` dataclass, `PaymentProviderUnavailable` / `PaymentRetryableError` / `PaymentPermanentError` exception hierarchy |
+| `scripts/checkout/payment/registry.py` | Single-active registry: `register()`, `get_active()`, `is_configured()`, `active_name()`, `active_mode()` |
+| `scripts/checkout/payment/stripe_provider.py` | `StripeProvider` implementing the Protocol. Houses the `STRIPE_ENABLED` operator flag (previously in `stripe_client.py`). Translates Stripe error classes into Retryable/Permanent at the boundary. |
+| `scripts/checkout/stripe_client.py` | **Deleted.** All functionality moved into `stripe_provider.py`. |
+| `scripts/checkout/gate.py` | Imports `payment.registry` at module top; reads `is_configured()` / `active_name()` / `active_mode()` instead of `stripe_client.STRIPE_ENABLED`. Defense-in-depth "live key outside Render" check stays. |
+| `scripts/checkout/saga.py` | Acquires provider via `payment_registry.get_active()` after gate check. Applies 1.05× hold buffer. Capture retry loop calls `_capture_with_retry()` helper. Field `stripe_payment_intent_id` → `payment_hold_id` in state writes; also stores `payment_authorized_cents`, `payment_provider`, `payment_mode`. |
+| `scripts/checkout/router.py` | Status endpoint surfaces `payment_hold_id`, `payment_authorized_cents`, `manual_review_reason`. Initial state save uses the new field names. |
+| `scripts/checkout/models.py` | `SagaStatus.MANUAL_REVIEW` added. `CheckoutStatusResponse` has renamed + new fields. |
+| `scripts/Main.py` | Lifespan registers `StripeProvider()` BEFORE `compute_decision()`. `PaymentProviderUnavailable` is caught and logged as a warning — L1 boot block below it decides if the resulting DISABLED state should refuse boot. |
+
+#### Frontend / wire contract changes
+
+The status response now returns provider-agnostic field names. **Frontend must update if it parses these:**
+
+- `stripe_payment_intent_id` → `payment_hold_id`
+- New optional: `payment_authorized_cents` (may exceed `total_charged_cents` by up to 5% due to the hold buffer)
+- New optional: `manual_review_reason` (present when `saga_status == "manual_review"`)
+- New `saga_status` value: `"manual_review"` (terminal, distinct from `"failed"`; frontend should render a "your order is being reviewed by our team" message rather than a generic failure)
+
+---
+
+### L6 — audit log subsystem
+
+**Moved to `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §2.** That document is now the design contract for L6 — event envelope, locked vocabulary, storage options, retention policy, public API, migration of existing call sites, and alerting rules. Build there.
+
+---
+
+### Consolidated fix backlog (prioritized)
+
+All open items across the multi-pass review, ordered by when they should land.
+
+#### Tier 1 — Critical, before any more layer work
+
+| Tag | Item | File | Effort |
+|---|---|---|---|
+| **D1** | Replace `not os.environ.get(_ENV_RENDER)` with `not is_truthy(os.environ.get(_ENV_RENDER))` | `gate.py:156`, `Main.py:127` | 15 min |
+| F1 | Rewrite "Safe for development" paragraph | `docs/ORDER_OPTIMIZER.md:465` | 10 min |
+| F2 | Add `gate.py`, `dependencies.py`, `gate_router.py` to module table | `docs/ORDER_OPTIMIZER.md:78` | 5 min |
+| F4 | Add gate-precondition preamble to test instructions | `docs/ORDER_OPTIMIZER.md:722` | 5 min |
+
+#### Tier 2 — Bundle with L4 commit
+
+| Tag | Item | Location | Effort |
+|---|---|---|---|
+| G1 | Dedicated `try/except GateClosedError` at Saga entry | `saga.py` (top of execute_checkout_saga) | 30 min |
+| C1 | Strong reference for `asyncio.create_task` | `router.py:222` (new module-level set) | 15 min |
+| F3 | Update Saga sequence description | `docs/ORDER_OPTIMIZER.md:608-609` | 10 min |
+| L4 core | `require_open()` + delete 3 `except NotImplementedError: pass` blocks | `saga.py:58,104,218` | 30 min |
+| L4 tests | 6-scenario test suite | new file | 1 h |
+
+#### Tier 3 — Hardening (any time before launch)
+
+| Tag | Item | File | Effort |
+|---|---|---|---|
+| D2 | `.strip()` env credentials before truthiness | `gate.py:176-179` | 15 min |
+| D3 | Minimum length check for Stripe key | `gate.py:_stripe_key_mode` | 10 min |
+| S2 | `max_length=64` on ConfirmRequest fields | `models.py` | 10 min |
+| F5 | Precision wording in gate.py docstring | `gate.py:20` | 2 min |
+| F6 | Precision wording in dependencies.py docstring | `dependencies.py:9-12` | 2 min |
+
+#### Tier 4 — Pre-existing, separate audit
+
+| Tag | Item | Owner |
+|---|---|---|
+| S1 | Path-traversal validation for `job_id` | Separate review of `checkout_store.py` |
+
+#### Tier 5 — L5 / L6 planning (documented, no code yet)
+
+| Tag | Item | Reference |
+|---|---|---|
+| H1 | L5 migration steps | "L5 migration plan" section above |
+| H2 | Single vs multi active provider | Decided: single-active for v1 |
+| I1 | L6 event schema + storage | `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §2 |
+| J1 | Saga resumption calls require_open() | Folded into L4 constraint #3 |
+| J2 | Circuit breaker as gate state vs separate check | **DECISION NEEDED before L4 ships** |
+
+---
+
+### Pre-clear summary (for fresh sessions)
+
+A future session starting without this conversation's context should:
+
+1. Read this entire §10 — it is the authoritative state of the layered defense.
+2. Read `scripts/checkout/gate.py` docstring (L0 contract).
+3. Read `scripts/checkout/gate_router.py` docstring (L2 contract).
+4. Read `scripts/checkout/dependencies.py` docstring (L3 contract).
+5. Read CLAUDE.md → checkout section + antipatterns list.
+
+After that, the **current state of work** is:
+- ✅ L0 shipped (gate.py)
+- ✅ L1 shipped (Main.py lifespan)
+- ✅ L2 shipped (gate_router.py)
+- ✅ L3 shipped (dependencies.py + router.py wiring)
+- ⏳ **D1 (CRITICAL) pending**: RENDER truthiness fix — do BEFORE L4
+- ⏳ F1, F2, F4 doc-drift pending — small ORDER_OPTIMIZER.md edits
+- ⏳ L4 ready to design + implement: read "L4 design" subsection above
+- 📋 L5 shipped; L6 design contract locked in `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` §2 (not yet built)
+
+The next implementation increment should bundle: D1 fix + L4 + C1 strong task ref + G1 dedicated try/except + L4 tests. After that, **RPN #1 (silent Stripe bypass) is structurally retired.**

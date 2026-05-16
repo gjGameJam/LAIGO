@@ -26,7 +26,7 @@ import httpx
 from typing import Optional
 
 from ..models import SellerListing
-from ..cache import cache_get, cache_set
+from ..cache import cache_get, cache_set, cache_delete
 
 logger = logging.getLogger("laigo")
 
@@ -294,6 +294,20 @@ async def get_all_listings(
 
     await asyncio.gather(*[_fetch(eid) for eid in to_fetch])
     return results
+
+
+# ── Cache invalidation ────────────────────────────────────────────────────────
+# Owned by this module so the cache key naming is in exactly one place.
+# Saga calls this on stockout retry so the next quote re-fetches live data.
+# (B9/B10/H8) Mirror functions exist on lego_client and bricklink_client.
+
+async def invalidate_listing(element_id: str) -> None:
+    """Drop any cached BrickOwl listings for `element_id`.
+
+    Idempotent. Safe to call even if no cache entry exists. Used by the
+    Saga stockout-retry path to force a fresh fetch on the next quote.
+    """
+    await cache_delete(f"brickowl_listings:{element_id}")
 
 
 # ── Raw lookup for debugging ──────────────────────────────────────────────────

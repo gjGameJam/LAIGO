@@ -25,7 +25,7 @@ from .picToMosiac import pic_to_mosaic, MosaicType
 from .Util import load_project_env
 from .checkout.router import checkout_router
 from .checkout.debug_router import debug_router
-from .checkout.health_router import checkout_health_router
+from .checkout.gate_router import checkout_gate_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
 import gc
@@ -44,7 +44,12 @@ log = logging.getLogger("laigo")
 # -----------------------------
 # ENV SETUP
 # -----------------------------
-if os.getenv("RENDER") is None:
+# is_truthy not is-None: RENDER="false" should NOT skip local .env loading
+# (otherwise an operator with a stale RENDER=false in their shell would silently
+# bypass .env loading). Same defect class as D1 in CHECKOUT_AUDIT.md §10.
+# is_truthy was imported on line 30 via .checkout.gate; it lives in
+# .checkout._env (dependency-free) and is safe to call before .env is loaded.
+if not is_truthy(os.getenv("RENDER")):
     load_project_env()
 
 INPUT_DIR = Path(os.getenv("INPUT_DIR", "./inputs")).resolve()
@@ -96,17 +101,47 @@ async def lifespan(app: FastAPI):
     log.info("Starting LAIGO API...")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # PAYMENT PROVIDER REGISTRATION (Layer 5).
+    #
+    # Construct + register the active PaymentProvider BEFORE computing the
+    # gate decision. compute_decision() consults the registry to determine
+    # whether checkout can be opened; if registration fails here, the gate
+    # reports DISABLED with a clear reason and L1 (below) refuses boot when
+    # CHECKOUT_ENABLED=true.
+    #
+    # PaymentProviderUnavailable is a *configuration-level* failure, not a
+    # boot blocker on its own — local dev with no Stripe key should be able
+    # to start the server and serve /quote (read-only) while leaving
+    # /confirm gated. Only the L1 block below decides whether that
+    # combination should refuse boot.
+    # ─────────────────────────────────────────────────────────────────────────
+    from .checkout.payment import registry as payment_registry
+    from .checkout.payment.base import PaymentProviderUnavailable
+    from .checkout.payment.stripe_provider import StripeProvider
+    try:
+        payment_registry.register(StripeProvider())
+    except PaymentProviderUnavailable as exc:
+        log.warning(f"Payment provider not registered: {exc}")
+        # Continue boot — the gate's L1 block decides if this is fatal.
+
+    # ─────────────────────────────────────────────────────────────────────────
     # CHECKOUT GATE — Layer 1: refuse to boot if checkout is misconfigured.
     # See scripts/checkout/gate.py for the full defense-in-depth design.
     #
     # This block enforces two safety invariants at startup:
     #   (a) If CHECKOUT_ENABLED=true, the gate MUST compute TEST or LIVE.
     #       If env says "enabled" but reality says DISABLED (missing key,
-    #       wrong prefix, no marketplace creds), refuse to boot — better to
-    #       have the server down than to accept /confirm without payment.
+    #       wrong prefix, no marketplace creds, provider registration
+    #       failed), refuse to boot — better to have the server down than
+    #       to accept /confirm without payment.
     #   (b) A LIVE Stripe key outside the Render environment is forbidden,
     #       regardless of the master flag. This catches the case where a
     #       live key leaks into a dev .env.secrets file by accident.
+    #       (Note: StripeProvider.__init__ refuses to construct in this
+    #       case, so registration above already failed and the gate is
+    #       already DISABLED. The explicit check here is defense-in-depth
+    #       — if registration somehow succeeded with a live key outside
+    #       Render via a future code path, this still refuses boot.)
     # ─────────────────────────────────────────────────────────────────────────
     gate_decision = compute_decision()
     log.info(f"Checkout gate: mode={gate_decision.mode.value} "
@@ -124,7 +159,9 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Checkout gate misconfigured — see CRITICAL log line above")
 
     stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
-    if stripe_key.startswith("sk_live_") and not os.environ.get("RENDER"):
+    # is_truthy (not raw truthiness): RENDER="false"/"0"/"no" must NOT count
+    # as "we're on Render." Defect D1 in CHECKOUT_AUDIT.md §10.
+    if stripe_key.startswith("sk_live_") and not is_truthy(os.environ.get("RENDER")):
         log.critical(
             "Live Stripe key (sk_live_...) detected outside the Render environment. "
             "This is never allowed — use sk_test_... for local development. "
@@ -198,7 +235,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(checkout_router, prefix="/jobs")
 app.include_router(debug_router)
-app.include_router(checkout_health_router)
+app.include_router(checkout_gate_router)
 
 try:
     app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")

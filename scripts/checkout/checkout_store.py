@@ -29,9 +29,15 @@ def _state_path(job_id: str) -> Path:
 
 
 def _get_lock(job_id: str) -> asyncio.Lock:
-    if job_id not in _locks:
-        _locks[job_id] = asyncio.Lock()
-    return _locks[job_id]
+    # B1: dict.setdefault is atomic under the GIL (single C-level op), making
+    # the get-or-create explicit. The previous `if not in / assign` pattern
+    # is atomic under pure single-threaded asyncio because there is no `await`
+    # between the check and the write, but the pattern reads like a TOCTOU
+    # race and would become a real bug if this module is ever called from a
+    # thread pool or multi-process worker pool. setdefault costs one extra
+    # Lock() allocation when the key already exists (immediately GC'd); for a
+    # per-job_id dict that allocation overhead is negligible.
+    return _locks.setdefault(job_id, asyncio.Lock())
 
 
 async def load(job_id: str) -> Optional[dict]:
