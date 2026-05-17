@@ -38,7 +38,7 @@ from typing import Optional
 import httpx
 from playwright.async_api import async_playwright, BrowserContext, Page
 
-from ..models import SellerListing
+from ..models import SellerListing, StockoutError
 from ..cache import cache_get, cache_set, cache_delete
 
 logger = logging.getLogger("laigo")
@@ -302,6 +302,13 @@ async def order_from_lego(
         page: Page = await context.new_page()
         try:
             return await _run_checkout(page, items, job_id)
+        except StockoutError:
+            # B33: preserve StockoutError so saga's B8/H9 branch can match.
+            # Wrapping as RuntimeError silently defeats the documented contract
+            # that LEGO stockouts get the "no retry; compensate cleanly" path
+            # rather than the generic "LEGO.com order failed" path.
+            await _screenshot(page, job_id, "ERROR_lego_stockout")
+            raise
         except Exception as exc:
             await _screenshot(page, job_id, "ERROR_final_state")
             raise RuntimeError(f"LEGO.com order failed: {exc}") from exc

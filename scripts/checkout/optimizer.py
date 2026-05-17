@@ -138,8 +138,12 @@ def optimize(
                         feasible = False
                         break
 
-                    # Check that A has enough remaining stock to absorb B's qty
-                    a_already = allocation[a_sid][eid]
+                    # Check that A has enough remaining stock to absorb B's qty.
+                    # B34: use .get() (mirroring Pass 1's pattern at line 95-96)
+                    # so reading does NOT create a ghost `allocation[a_sid][eid]
+                    # = 0` entry. Ghosts polluted AllocationEntry.items with
+                    # zero-quantity entries when the merge didn't happen.
+                    a_already = allocation.get(a_sid, {}).get(eid, 0)
                     a_remaining = a_listing.available_qty - a_already
                     if a_remaining < qty:
                         feasible = False

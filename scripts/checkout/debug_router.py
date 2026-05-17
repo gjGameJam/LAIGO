@@ -28,10 +28,10 @@ from pydantic import BaseModel, Field
 
 from .models import SellerListing, SellerAllocationResponse
 from . import checkout_store
-from .clients import brickowl_client, lego_client
+from .clients import brickowl_client, lego_client, bricklink_client
 from .clients.brickowl_client import raw_id_lookup, raw_availability, get_boid_for_element
 from .clients.lego_client import check_element_available, check_elements_available
-from .optimizer import optimize
+from .optimizer import optimize, apply_free_shipping_thresholds
 
 logger = logging.getLogger("laigo")
 debug_router = APIRouter(prefix="/checkout-debug", tags=["checkout-debug"])
@@ -312,7 +312,11 @@ async def debug_optimize(job_id: str, body: OptimizePreviewRequest):
 
     cache_ttl = int(os.environ.get("BRICKOWL_CACHE_TTL_SECONDS", "3600"))
     try:
-        lego_listings, brickowl_listings = await asyncio.gather(
+        # B37: match the saga's quote flow exactly — include BrickLink (today
+        # returns empty unless BRICKLINK_ENABLED=true, but kept in for parity
+        # so operators previewing /quote totals see the same allocation the
+        # customer would).
+        lego_listings, brickowl_listings, bricklink_listings = await asyncio.gather(
             lego_client.get_all_listings(
                 order_items=order_items,
                 shipping_country=body.shipping_country,
@@ -325,16 +329,29 @@ async def debug_optimize(job_id: str, body: OptimizePreviewRequest):
                 shipping_zip=body.shipping_zip,
                 cache_ttl=cache_ttl,
             ),
+            bricklink_client.get_all_listings(
+                order_items=order_items,
+                shipping_country=body.shipping_country,
+                shipping_zip=body.shipping_zip,
+                cache_ttl=cache_ttl,
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Listings fetch error: {exc}")
 
     from .optimizer import merge_listings
-    listings = merge_listings(lego_listings, brickowl_listings)
-    allocation = optimize(order_items, listings)
+    listings = merge_listings(lego_listings, brickowl_listings, bricklink_listings)
+    # B37: apply_free_shipping_thresholds mirrors the saga's quote flow so the
+    # preview totals match what the customer would see.
+    allocation = apply_free_shipping_thresholds(optimize(order_items, listings))
 
-    # Items the optimizer couldn't fill from any source are unsourceable
-    lego_available = []
+    # B38: with LEGO as a primary source in seller_allocations,
+    # `lego_fallback_items` reflects pieces the optimizer couldn't source from
+    # ANY marketplace (BrickOwl, LEGO.com, BrickLink). These ARE the
+    # unsourceable items — the old separate `lego_available` distinction was
+    # vestigial from the pre-LEGO-as-primary design. Report the same list in
+    # both fields for backward-compat of the response shape; future cleanup
+    # can collapse the duplicate field.
     unsourceable = allocation.lego_fallback_items
 
     sellers = [
@@ -353,8 +370,8 @@ async def debug_optimize(job_id: str, body: OptimizePreviewRequest):
         job_id=job_id,
         total_items=sum(i["quantity"] for i in order_items),
         sellers=sellers,
-        lego_fallback_items=lego_available,
-        lego_fallback_item_count=len(lego_available),
+        lego_fallback_items=unsourceable,
+        lego_fallback_item_count=len(unsourceable),
         unsourceable_items=unsourceable,
         unsourceable_count=len(unsourceable),
         can_proceed=len(unsourceable) == 0,

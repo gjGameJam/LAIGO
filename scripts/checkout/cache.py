@@ -19,6 +19,13 @@ from typing import Any, Optional
 
 _store: dict[str, tuple[float, Any]] = {}  # key -> (expiry_timestamp, value)
 
+# B24: strong reference to the sweep task so the event loop doesn't GC it.
+# Python 3.11+ docs: "the event loop only keeps weak references to tasks. A
+# task that isn't referenced elsewhere may be garbage collected at any time,
+# even before it's done." Same defect class as the C1 fix that introduced
+# `_running_sagas` in router.py. Idempotency check prevents double-start.
+_sweeper_task: Optional[asyncio.Task] = None
+
 
 async def cache_get(key: str) -> Optional[Any]:
     entry = _store.get(key)
@@ -50,5 +57,13 @@ async def _sweep_loop() -> None:
 
 
 def start_cache_sweeper() -> None:
-    """Schedule the background sweep task. Call once from Main.py lifespan."""
-    asyncio.create_task(_sweep_loop())
+    """Schedule the background sweep task. Call once from Main.py lifespan.
+
+    Idempotent — calling twice (or after a previous task finished) re-schedules
+    safely. The module-level `_sweeper_task` strong reference is what keeps the
+    event loop from GC'ing the task (B24).
+    """
+    global _sweeper_task
+    if _sweeper_task is not None and not _sweeper_task.done():
+        return  # already running
+    _sweeper_task = asyncio.create_task(_sweep_loop())

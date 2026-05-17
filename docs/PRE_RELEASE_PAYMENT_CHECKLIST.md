@@ -21,7 +21,7 @@ This file consolidates material that previously lived in `docs/CHECKOUT_AUDIT.md
 | L6 audit log subsystem | ❌ Not built | This document, §2 |
 | Capture retry + MANUAL_REVIEW | ✅ Shipped | `scripts/checkout/saga.py` |
 | 5% hold buffer + drift fail-closed | ✅ Shipped | `scripts/checkout/saga.py` |
-| Postgres-backed state + resume-on-restart | ❌ Not built — host = **Neon** (locked 2026-05-16; §9.3.11.1); 6 tables; 6.5 engineer-days planned | §3 roadmap item 2 / §9 |
+| Postgres-backed state + resume-on-restart | 🟡 Phase A shipped 2026-05-16. Phases B–F pending; per-phase status in §9.6.1. Host = **Neon** (PG 17.8 / us-east-1; locked 2026-05-16; §9.3.11.1). 6 tables; 6.5 engineer-days planned. **Per-phase operational playbooks: §9.5. Live progress dashboard: §9.6.** | §3 roadmap item 2 / §9 |
 | Pre-commit revalidation | ❌ Not built | §3 roadmap item 3 |
 | MarketplaceAdapter Protocol | ❌ Not built | §3 roadmap item 4 |
 | BrickOwl cancellation (Playwright) | ❌ Not built | §3 roadmap item 5 |
@@ -40,11 +40,16 @@ This file consolidates material that previously lived in `docs/CHECKOUT_AUDIT.md
 | B13 Master-flag reason wording | ✅ Shipped 2026-05-16 (Phase 3.1) | `scripts/checkout/gate.py` |
 | B17 Registry replace safety | ✅ Shipped 2026-05-16 (Phase 3.2) | `scripts/checkout/payment/registry.py` |
 | B14 `/confirm` 409 disambiguation | ✅ Shipped 2026-05-16 (Phase 3.3) | `scripts/checkout/router.py` |
-| Undocumented bugs B6–B12, B15, B16, B23, B24, B25, B26 | ❌ Open | §4 |
+| Pre-DB-migration bundle: B6, B7, B8 (Option B), B9, B10, B12, B15, B16 | ✅ Shipped 2026-05-16 | §4 (per-bug entries flipped); §8 (H1+H2/H3/H4/H5/H7/H8/H9/H10/H12/H14) |
+| Pre-DB-migration final sweep: B24, B25, H6 | ✅ Shipped 2026-05-16 | §4 (B24, B25); §8 (H6) |
+| Pre-DB-migration audit pass: B32 (saga_status pending mismatch), B33 (StockoutError wrapping), B34 (optimizer ghost entries), B37 (debug_optimize parity), B38 (debug_optimize dead lego_available), B39 (Main.py lenient sk_live), B40 (router missing customer_message) | ✅ Shipped 2026-05-16 | §4 (B32–B40 entries) |
+| Newly surfaced (open, post-bundle): B27 (currency allowlist hardcoded), B28 (BrickOwl cancel no per-order retry — LATENT until roadmap #5), B29 (LEGO StockoutError plumbed but not raised), B30 (unexpected-hold mapped to transient), B31 (audit-doc mapping table drift) | ❌ Open (none launch-blocking; B28 LATENT) | §4 |
+| Newly surfaced from audit (open, DB-coupled): B35 (non-atomic file writes), B36 (semaphore per-call) | ⏳ Subsumed by §9 (JSON files disappear / future concurrent-saga design) | §4 |
+| Still open (DB-coupled, deferred to §9): B11, B23, B26 | ⏳ Subsumed/restructured by Postgres migration | §4, §9 |
 
 **Hard launch gate:** items §3 #1–#7, plus B1–B5 in §4, must be resolved before any real Stripe key is configured.
 
-**Phase 3.4 (B12 — customer-facing error translation) is paused** mid-implementation. Resuming this is the next planned work item; the audit doc in this file's §4 entry for B12 is the authoritative spec.
+**Phase 3.4 (B12 — customer-facing error translation) shipped 2026-05-16** as part of the pre-DB-migration bundle. **Pre-DB-migration runway is now CLEAR** — every open defect either (a) requires the DB migration to fix without throwaway work, (b) is newly-surfaced LOW/LATENT/DOC (B27–B31), or (c) is gated on other deferred work (roadmap #5 for B28, DOM-detection for B29, production data for B30). Next major work item is §9 Phase A (Neon provisioning).
 
 ---
 
@@ -364,134 +369,105 @@ await checkout_store.update(job_id, {                  # overwrites with FAILED
 
 ---
 
-### B6 — Stripe key length rule disagreement between gate and provider — **MEDIUM**
+### B6 — Stripe key length rule disagreement between gate and provider — **MEDIUM** — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle / H4)
 
-**File:line:** `scripts/checkout/gate.py:108-118` vs `scripts/checkout/payment/stripe_provider.py:103-114`
+**File:line:** `scripts/checkout/payment/key_format.py` (new module — single source of truth); `scripts/checkout/gate.py:109` and `scripts/checkout/payment/stripe_provider.py:101` (both now import from key_format).
 
-**Symptom:** `gate._stripe_key_mode()` accepts `sk_test_` / `sk_live_` with *any* suffix length. `stripe_provider._key_mode()` requires ≥ 8 chars beyond the prefix (the D3 fix). So `STRIPE_SECRET_KEY=sk_live_` (bare prefix) produces:
-- **`RENDER` unset:** gate fires the "live key outside Render" reason. Registry empty because provider refused construction. Both reasons present.
-- **`RENDER=true`:** gate classifies key as "live", checks Render → passes. Registry still empty. Single reason: "No payment provider registered."
+**Original symptom:** `gate._stripe_key_mode()` accepted `sk_test_` / `sk_live_` with *any* suffix length. `stripe_provider._key_mode()` required ≥ 8 chars beyond the prefix (the D3 fix). `STRIPE_SECRET_KEY=sk_live_` (bare prefix) produced two different `/checkout/gate` reason strings depending on the value of `RENDER`.
 
-Two different reason-string outputs for the same bad config.
+**What shipped:**
 
-**Why it's not in the audit:** D3 was added inline during L5 review; the gate's older `_stripe_key_mode` was not updated to match.
+- New `scripts/checkout/payment/key_format.py` exporting `key_mode(key) -> str | None` and `_MIN_SUFFIX_CHARS = 8` and `_PREFIXES = {"sk_test_": "test", "sk_live_": "live"}`. Dependency-free.
+- `gate.py` replaced its local `_stripe_key_mode` with `from .payment.key_format import key_mode as _stripe_key_mode`. The strict 8-char rule is now what gate enforces.
+- `stripe_provider.py` replaced its local `_key_mode` with `from .key_format import key_mode as _key_mode`. The two layers' contract is identical by construction.
+- Decision rationale (chose option B from the original entry — shared helper module): keeps `gate.py` from importing a `payment/` implementation detail. The provider is the implementation; the key format is the contract.
 
-**Fix:** Either import `_key_mode` from `stripe_provider` (or extract a shared helper module) so both layers agree on what counts as a valid key.
+**Verified:** behavioral check via `python -c`:
+- `key_mode("sk_live_")` → `None` (bare prefix rejected)
+- `key_mode("sk_test_")` → `None` (bare prefix rejected)
+- `key_mode("sk_test_short")` → `None` (suffix < 8 chars)
+- `key_mode("sk_test_abcd1234")` → `"test"`
+- `key_mode("sk_live_abcd1234")` → `"live"`
+- `key_mode("")` → `None`
+- `key_mode("pk_test_abcd1234")` → `None` (publishable key rejected)
 
-```python
-# gate.py — replace local _stripe_key_mode with:
-from .payment.stripe_provider import _key_mode as _stripe_key_mode
-```
-
-(Or move both helpers to a new `scripts/checkout/payment/key_format.py` to avoid the gate importing a provider implementation detail.)
-
-**Effort:** 15 min.
-
-**Launch-blocking?** No. Both paths end DISABLED, just with different reason text.
+**Operator implication:** the `/checkout/gate` body's `reasons[]` array no longer disagrees with the StripeProvider's construction failure reason. A bare-prefix typo surfaces as: gate reports `"No payment provider registered (see boot logs for the construction failure reason)"` AND `StripeProvider.__init__` raised `PaymentProviderUnavailable("STRIPE_SECRET_KEY is missing or malformed...")`. One config defect → one consistent reason chain.
 
 ---
 
-### B7 — Currency read at Saga runtime, not at provider construction — **MEDIUM**
+### B7 — Currency read at Saga runtime, not at provider construction — **MEDIUM** — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle / H5)
 
-**File:line:** `scripts/checkout/saga.py:772` (current, post-Phase-1/2; originally `:228` pre-Phase-1)
+**File:line:** `scripts/checkout/payment/stripe_provider.py` (`_ALLOWED_CURRENCIES`, `_ENV_STRIPE_CURRENCY`, `self.currency` set in `__init__`); `scripts/checkout/payment/base.py` (Protocol now declares `currency: str`); `scripts/checkout/saga.py:~830` (now reads `provider.currency`).
 
-**Symptom:**
+**Original symptom:** the currency was read fresh on every `create_hold` call via `os.environ.get("STRIPE_CURRENCY", "usd")`. Env mutation between hold and capture (after restart-while-saga-in-flight) could target different currencies. No allowlist — `STRIPE_CURRENCY=zzz` would only fail at the first Stripe API call (after the hold attempt was already in flight).
+
+**What shipped:**
+
+- Module-level `_ALLOWED_CURRENCIES: Final = frozenset({"usd", "eur", "gbp", "cad"})` and `_ENV_STRIPE_CURRENCY: Final = "STRIPE_CURRENCY"` in `stripe_provider.py`.
+- New construction step (step 5 in the atomic `__init__` order): read `STRIPE_CURRENCY`, lowercase + strip, validate against `_ALLOWED_CURRENCIES`, raise `PaymentProviderUnavailable` on miss with a message that lists the allowed values, lock as `self.currency: Final`.
+- `PaymentProvider` Protocol in `payment/base.py` now declares `currency: str` as a required attribute with a docstring explaining the contract (B7/H5: locked at construction, NOT re-read by callers).
+- `saga.py` `create_hold` site now passes `currency=provider.currency` with a comment pointing to B7/H5.
+
+**Verified:** AST parse + Protocol declaration. The misconfig case `STRIPE_CURRENCY=zzz` would now surface as a `/checkout/gate` reason `"No payment provider registered (see boot logs)"` plus a startup log line `PaymentProviderUnavailable: STRIPE_CURRENCY='zzz' is not in the allowlist ['cad', 'eur', 'gbp', 'usd']`.
+
+**Operator implication:** adding a new currency (e.g., AUD when LAIGO expands to Australia) now requires a code change + deploy. See B27 below for a doc-only follow-up that flags this as a known constraint.
+
+**Frontend implication:** none. Customers never see currency strings in `/status` responses.
+
+---
+
+### B8 — LEGO.com stockouts are not retryable — **MEDIUM** — ✅ SHIPPED 2026-05-16 (Option B; pre-DB-migration bundle / H9)
+
+**File:line:** `scripts/checkout/saga.py:~1085-1106` (the new `except StockoutError` arm in the LEGO branch of `_execute_checkout_saga_inner`'s `while True:` body, sitting above the pre-existing `except Exception`).
+
+**What shipped (Option B chosen):**
+
+- New `except StockoutError as exc:` branch directly above the generic `except Exception` for the LEGO order call.
+- Behavior on this branch:
+  1. WARNING log `"LEGO stockout on element(s) {exc.element_id!r}: compensating without retry (LEGO is the primary source; re-routing would not help)."`
+  2. Calls `_compensate(job_id, original_error=f"LEGO.com stockout (no retry path): {exc}", extra_brickowl_orders=placed_brickowl_ids)` → clean compensation path; customer refunded; any BrickOwl orders placed earlier this iteration get cancelled.
+  3. Returns.
+- Documented in the source comment that LEGO is the primary inventory source. Re-routing to "LEGO again" wouldn't help (BrickOwl already explored if cheaper). When LEGO surfaces a secondary source (wishlist queue, backorder API), the fallback wires here.
+
+**Important caveat (B29 below):** the new branch is plumbed but **currently unreachable** because `lego_client.order_from_lego` doesn't yet raise `StockoutError` — it returns the Playwright order ID on success and raises generic `Exception` (caught by the `except Exception` arm) on any failure including DOM-detected stockouts. The Option B fix establishes the contract; wiring `lego_client` to actually raise `StockoutError` is filed as B29 (LOW; doc-only / minor refinement).
+
+**Operator implication:** support-staff runbook for "customer says LEGO order failed" no longer needs to distinguish "LEGO stockout" from "LEGO website broke" — the `error` field will say `"LEGO.com stockout (no retry path)"` once B29 is wired, vs `"LEGO.com order failed: <exc>"` for everything else. Until B29 ships, all LEGO failures still surface as the generic message.
+
+---
+
+### B9 — Stockout retry only invalidates BrickOwl listings cache — **MEDIUM** — ✅ SHIPPED 2026-05-16 (bundled with B10; pre-DB-migration / H8)
+
+**File:line:** `scripts/checkout/saga.py:~1037-1041` (the `asyncio.gather` over all three clients' `invalidate_listing(stockout_eid)`).
+
+**What shipped (bundled with B10):**
+
+Each client module now exposes an `invalidate_listing(element_id) -> Awaitable[None]` that owns its own cache key naming. Saga's stockout-retry path replaced the single `cache_delete(f"brickowl_listings:{stockout_eid}")` with:
+
 ```python
-hold = await provider.create_hold(
-    ...
-    currency=os.environ.get("STRIPE_CURRENCY", "usd"),
-    ...
+await asyncio.gather(
+    brickowl_client.invalidate_listing(stockout_eid),
+    lego_client.invalidate_listing(stockout_eid),
+    bricklink_client.invalidate_listing(stockout_eid),
 )
 ```
-The currency is read fresh on every hold. If env mutates between hold and capture (unlikely in production but possible after restart-while-Saga-in-flight), the capture call could target a different currency. Stripe rejects → PaymentPermanentError → MANUAL_REVIEW. The failure mode is "your env changed mid-Saga," difficult to diagnose.
 
-Also: no whitelist. `STRIPE_CURRENCY=zzz` passes through to Stripe and gets refused only on first call. The provider doesn't surface this misconfiguration at boot.
+Bricklink's `invalidate_listing` is a no-op stub (BrickLink isn't caching listings yet — see its module docstring), kept for contract symmetry.
 
-**Why it's not in the audit:** L5 design didn't surface currency as a config concern; the StripeProvider accepts whatever caller passes.
+**Verified:** AST + key-symmetry check — each client's `invalidate_listing` uses the same key string its `get_all_listings` writes (`brickowl_listings:{eid}` for BrickOwl, `lego_raw:{eid}` for LEGO).
 
-**Fix:** Read once in `StripeProvider.__init__`, validate against an allowlist, expose as `provider.currency`.
-
-```python
-# stripe_provider.py
-_ALLOWED_CURRENCIES = frozenset({"usd", "eur", "gbp", "cad"})
-
-def __init__(self) -> None:
-    ...
-    currency = os.environ.get("STRIPE_CURRENCY", "usd").strip().lower()
-    if currency not in _ALLOWED_CURRENCIES:
-        raise PaymentProviderUnavailable(
-            f"STRIPE_CURRENCY={currency!r} not in {sorted(_ALLOWED_CURRENCIES)}"
-        )
-    self.currency: Final = currency
-```
-
-Saga drops the env read entirely and uses `provider.currency`.
-
-**Effort:** 20 min.
-
-**Launch-blocking?** No (default "usd" is correct), but tightens the contract.
+**Operator implication:** when a piece becomes stockout-prone (e.g., a discontinued color), retries no longer chew through cached-stale data across marketplaces. Latency per stockout retry stays consistent regardless of which marketplaces' data was cached at quote time.
 
 ---
 
-### B8 — LEGO.com stockouts are not retryable — **MEDIUM**
+### B10 — Cache key construction is duck-typed across modules — **MEDIUM** — ✅ SHIPPED 2026-05-16 (bundled with B9; pre-DB-migration / H8)
 
-**File:line:** `scripts/checkout/saga.py:999-1013` (current, post-Phase-1/2/B19; originally `:374-386` pre-Phase-1). Look for the LEGO branch inside `_execute_checkout_saga_inner`'s `while True:` body — specifically the `try: lego_order_id = await lego_client.order_from_lego(...)` and its `except Exception:` arm.
+**File:line:** `scripts/checkout/clients/brickowl_client.py` (`invalidate_listing`), `scripts/checkout/clients/lego_client.py` (`invalidate_listing`), `scripts/checkout/clients/bricklink_client.py` (`invalidate_listing` stub).
 
-**Symptom:** The Saga's retry loop only handles `StockoutError` from BrickOwl. Any failure in `lego_client.order_from_lego` — including a LEGO.com stockout — falls through to the generic `except Exception:`, triggering full compensation and FAILED. The Saga has zero recovery path for "LEGO.com showed an out-of-stock UI for one piece out of 200."
+**What shipped:** the saga no longer constructs cache key strings. Each client module owns its own key naming and exposes `invalidate_listing(eid)`. A one-character typo at the saga site is no longer possible — there are no key strings there.
 
-**Why it's not in the audit:** §1.2 mentions "LEGO.com has no stockout retry path at all" but flags it as a problem in the original code. Post-L5 the retry loop did get added — but only for BrickOwl. LEGO.com's status is unchanged.
+See B9 (bundled). Same touch surface, same commit.
 
-**Impact:** Compensation cancels every BrickOwl order placed in the same Saga and refunds the customer. Customer must restart, eating the latency of a fresh quote + the retried Playwright session. Marketplace shipping fees on the cancelled BrickOwl orders are lost.
-
-**Fix (option A — symmetric):** Make `lego_client.order_from_lego` raise a `StockoutError` when its Playwright flow detects the LEGO.com stockout UI. Add the LEGO path to the same retry loop. This requires reliable DOM detection in Playwright, which is fragile but doable.
-
-**Fix (option B — document the asymmetry):** Add an explicit `except StockoutError as e:` branch above the generic Exception handler for the LEGO path, explaining that LEGO is the primary source and a stockout there indicates total unavailability (re-routing to LEGO again wouldn't help). Make the failure mode customer-visible and accept compensation.
-
-**Effort:** Option A 1 day; Option B 30 min.
-
-**Launch-blocking?** No, but option B documentation should land before launch so operators can explain customer complaints.
-
----
-
-### B9 — Stockout retry only invalidates BrickOwl listings cache — **MEDIUM**
-
-**File:line:** `scripts/checkout/saga.py:959` (current, post-Phase-1/2; originally `:339` pre-Phase-1). The `await cache_delete(f"brickowl_listings:{stockout_eid}")` line inside the stockout-retry branch of `_execute_checkout_saga_inner`.
-
-**Symptom:**
-```python
-await cache_delete(f"brickowl_listings:{stockout_eid}")
-```
-The re-fetch at lines 348-355 hits all three marketplaces, but only BrickOwl's cache entry for that element was invalidated. If LEGO.com or BrickLink data is also stale (and they share a 1-hour TTL), the re-optimization can keep selecting the same listing that was just out-of-stock at one source and stale at another. The retry loop chews through retries on cached-stale data until `retries_left` exhausts.
-
-**Why it's not in the audit:** The audit precedes the stockout-retry path's current implementation.
-
-**Fix:** Invalidate all cached listings for the stockout element across every marketplace:
-```python
-for prefix in ("brickowl_listings", "lego_raw", "bricklink_listings"):
-    await cache_delete(f"{prefix}:{stockout_eid}")
-```
-
-Even better: have the `cache.py` module expose `cache_delete_listing(element_id)` that knows about all listing keys.
-
-**Effort:** 20 min.
-
-**Launch-blocking?** No, but worsens latency on stockout-prone elements.
-
----
-
-### B10 — Cache key construction is duck-typed across modules — **MEDIUM**
-
-**File:line:** `scripts/checkout/saga.py:959` (current, post-Phase-1/2; originally `:339` pre-Phase-1) and wherever `brickowl_client.get_all_listings` stores cache entries
-
-**Symptom:** The Saga constructs `f"brickowl_listings:{stockout_eid}"` to invalidate; the actual key is decided inside `brickowl_client.get_all_listings`. If those two strings ever drift, the delete is a silent no-op and the next retry re-fetches the cached (stockout) data → effectively infinite stockout retries until `retries_left` decrements to zero. The retry loop *looks* like it's doing work but is just hitting stale cache.
-
-**Why it's not in the audit:** No documentation in audit; this is a hidden coupling between Saga and client.
-
-**Fix:** Expose `brickowl_client.invalidate_listing(element_id)`. The cache key lives in exactly one place. Same for `lego_client`, `bricklink_client`.
-
-**Effort:** 30 min.
-
-**Launch-blocking?** No, but a one-character typo here causes a non-obvious customer-visible failure.
+**Operator implication:** if a future caching change reshapes the keys (e.g., switching to namespaced keys per shipping country), only the client module needs to update. The saga doesn't care.
 
 ---
 
@@ -522,32 +498,48 @@ Each iteration's placed/cancelled lists are immutable once written. Resumption e
 
 ---
 
-### B12 — Provider exception text leaks into customer-facing `error` field — **LOW (security-adjacent)**
+### B12 — Provider exception text leaks into customer-facing `error` field — **LOW (security-adjacent)** — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle / H1+H2)
 
-**File:line:** Throughout `scripts/checkout/saga.py` (e.g. `:238`, `:251`, `:261`, `:541`)
+**File:line:** `scripts/checkout/models.py` (`ERROR_MESSAGES` table + `customer_message` field on `CheckoutStatusResponse`); `scripts/checkout/saga.py` (paired `customer_message` at all 15 error-write sites); `scripts/checkout/router.py:~297` (passes `customer_message` through in `get_checkout_status`).
 
-**Symptom:** `error: f"Payment hold failed (permanent): {exc}"` formats may include Stripe internal reasons, PaymentIntent IDs, request IDs, or in pathological cases pieces of stack traces. `GET /status` surfaces this verbatim to the customer's frontend.
+**What shipped:**
 
-**Why it's not in the audit:** §5.3 documents the general "no customer-facing translation" issue. The L5 changes added a dozen new sites with the same problem.
+- New `ERROR_MESSAGES: dict[str, str]` in `models.py` with seven categories:
+  - `payment_permanent` — "Your payment method was declined. Please use a different card."
+  - `payment_transient` — "Our payment system is temporarily unavailable. Please retry shortly."
+  - `marketplace_failure` — "We couldn't complete one of your orders. Your card was not charged."
+  - `manual_review` — "Your order is being reviewed by our team. We'll email you within 24 hours."
+  - `drift_buffer` — "The price of your order changed. Please request a new quote." (RESERVED — no current saga path uses it; reserved for the customer-facing pre-quote-recompute UX once that ships)
+  - `gate_closed` — "Checkout is temporarily unavailable. Please try again shortly."
+  - `timeout` — "Your order took longer than expected. Our team is reviewing — no action required."
+- `CheckoutStatusResponse` gains `customer_message: Optional[str] = None` alongside the now-clearly-operator-facing `error`. Docstrings on both fields document the contract.
+- Every saga `checkout_store.update(...)` write that sets `"error": ...` now also sets `"customer_message": ERROR_MESSAGES[<category>]`. 15 sites paired (verified `grep -c '"error":'` == `grep -c '"customer_message":'` == 15).
+- The initial INITIATED save sets `"customer_message": None` explicitly so the field is always present in state.
+- Category assignment per site:
+  - Compensation MANUAL_REVIEW → `manual_review`
+  - Compensation clean COMPENSATED → `marketplace_failure` ("Your card was not charged")
+  - Timeout w/ orders placed → `manual_review` (orders are real; operator review)
+  - Timeout cleanup success → `timeout`
+  - Timeout cleanup cancel failed → `manual_review`
+  - Timeout no money moved → `timeout`
+  - Gate closed at saga start → `gate_closed`
+  - Provider unavailable → `gate_closed`
+  - Payment permanent → `payment_permanent`
+  - Payment transient → `payment_transient`
+  - Payment unexpected → `payment_transient` (see B30 below — possibly misleading on genuine code bugs; documented as a refinement opportunity)
+  - Stockout-retry compensation failed → `manual_review`
+  - Drift post-placement → `manual_review` (orders are real; the `drift_buffer` category is reserved for the future pre-placement customer prompt)
+  - Capture failed → `manual_review`
 
-**Impact:** Information leak. Stripe IDs, internal request IDs, and exception type names visible to anyone who can read /status responses.
+**Verified:** AST parse + `grep` count match (15:15). The audit check noted in CLAUDE.md is `grep -n '"error":' scripts/checkout/saga.py` returning only sites where the next line is `"customer_message":`.
 
-**Fix:** Two-tier error field:
-- `error_internal`: full exception text. Operator-only via debug endpoint or audit log.
-- `error_customer`: short, friendly, classification-based. Surfaced in `/status` response.
+**Frontend contract (NEW — coordinate before changing):**
+- `customer_message` is the ONLY string safe to surface from `/status` to customers.
+- `error` is operator-only — may contain Stripe IDs, exception class names, internal request IDs.
+- `customer_message` is `null` when (a) state is pre-error (INITIATED, STRIPE_HELD, etc.) OR (b) saga completed successfully (PAYMENT_CAPTURED). Render `null` as your normal "processing…" / "complete" UI; do not assume `null` means "no error info available" mid-failure.
+- Adding a new category requires coordinated frontend change. Don't change existing strings without coordinating.
 
-```python
-ERROR_MESSAGES = {
-    "payment_permanent": "Your payment method was declined. Please use a different card.",
-    "payment_transient": "Our payment system is temporarily unavailable. Please retry shortly.",
-    "marketplace_failure": "We couldn't complete one of your orders. Your card was not charged.",
-    "manual_review": "Your order is being reviewed by our team. We'll email you within 24 hours.",
-}
-```
-
-**Effort:** 2 hours.
-
-**Launch-blocking?** No, but flag as launch-day hardening.
+**Operator implication:** when triaging via `/status`, read both fields. `customer_message` confirms what the customer is seeing; `error` is the actionable signal.
 
 ---
 
@@ -609,61 +601,43 @@ if existing and existing.get("checkout_id") == body.checkout_id:
 
 ---
 
-### B15 — `stripe.api_version` and `stripe.api_key` are module-global, not per-instance — **LOW (forward-looking)**
+### B15 — `stripe.api_version` and `stripe.api_key` are module-global, not per-instance — **LOW (forward-looking)** — ✅ SHIPPED 2026-05-16 (doc-only; pre-DB-migration / H7)
 
-**File:line:** `scripts/checkout/payment/stripe_provider.py:168` (`stripe.api_key = key`) and `:172-174` (`stripe.api_version = api_version`)
+**File:line:** `scripts/checkout/payment/stripe_provider.py` (in-code comments above the two module-global writes: `stripe.api_key = key` and `stripe.api_version = api_version`).
 
-**Symptom:** `stripe-python` stores BOTH the API key AND the API version on the `stripe` module, not on a client instance. If H2 ever moves to multi-active providers (or tests instantiate `StripeProvider` more than once with different keys/versions), the **last constructor wins** — even live PaymentIntent calls made through an "older" provider instance will go through the most-recently-set key.
+**What shipped:** the in-code mitigation from the original entry. Two comments now make the constraint visible at the modification site:
 
-Today's single-active design (enforced by `payment/registry.py` — see [B17](#b17--register-replaces-silently-with-only-a-warning--low--shipped-2026-05-16-phase-32)) hides this. The B17 replacement guard prevents *accidental* re-registration; the module-global side-effect of `StripeProvider.__init__` still happens on intentional replacement (`LAIGO_ALLOW_REGISTRY_REPLACE=1` test path).
+- Above `stripe.api_key = key`: a 9-line comment block explaining (a) the field is module-global on `stripe-python`, (b) single-active enforcement in `payment.registry.register()` is what keeps this safe today, (c) instantiating `StripeProvider` outside the lifespan path or registering a second instance silently overwrites the key for any in-flight saga holding the OLD provider reference, (d) the multi-active migration path is `stripe.StripeClient(api_key=key)` per PRE_RELEASE §4 B15.
+- Above `stripe.api_version = api_version`: a short comment noting that `api_version` is the SAME constraint.
 
-**Why it's not in the audit:** L5 explicitly locked single-active for v1.
+**Multi-active migration NOT shipped (deferred):** the migration to per-instance `stripe.StripeClient(...)` remains a 1-day effort, justified only when LAIGO actually needs multi-active (e.g., a tooling staging process that holds both test + live providers in one Python process). Today's single-active design (B17 replacement guard) is the operational mitigation.
 
-**Fix when multi-active is needed:**
-- Migrate to `stripe.StripeClient(api_key=key)` (stripe-python ≥ 7.0 supports per-instance clients).
-- Each `StripeProvider` holds its own client; module globals become irrelevant.
-- The Saga's existing `provider = payment_registry.get_active()` flow does not change.
-
-**Doc-only mitigation in code today:** add a comment above `stripe.api_key = key` referencing this entry so the constraint is visible at the modification site.
-
-**Effort:** 2 min for the in-code comment; 1 day for the multi-active migration.
-
-**Launch-blocking?** No.
+**Operator implication:** unchanged. Production must NOT set `LAIGO_ALLOW_REGISTRY_REPLACE=1`. The in-code comments are visible to future contributors who might be tempted to instantiate `StripeProvider` outside lifespan (e.g., for an ad-hoc operator tool).
 
 ---
 
-### B16 — Sequential BrickOwl cancellation has no batching (two sites) — **LOW**
+### B16 — Sequential BrickOwl cancellation has no batching (two sites) — **LOW** — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle / H10)
 
-**File:line:** Two sites — easy to miss one:
-1. `scripts/checkout/saga.py:413-421` — `_compensate()` Phase 1: cancel BrickOwl orders in reverse (LIFO undo)
-2. `scripts/checkout/saga.py:937-957` — stockout-retry inline cancel loop inside `_execute_checkout_saga_inner`'s `while True:` body
+**File:line:** `scripts/checkout/saga.py:~109-140` (`_parallel_brickowl_cancels` helper + `_BRICKOWL_CANCEL_CONCURRENCY = 5`); `scripts/checkout/saga.py:~458-470` (site #1 — `_compensate` Phase 1); `scripts/checkout/saga.py:~1004-1028` (site #2 — stockout-retry inline cancel).
 
-Both await `brickowl_client.cancel_order(oid)` one at a time. The original audit entry only referenced site #1; site #2 was added later when the stockout-retry path matured.
+**What shipped:**
 
-**Symptom:** For a hypothetical 50-seller mosaic, either site runs 50 cancels in series. When the real Playwright-based BrickOwl cancel (roadmap #5) ships, each session is ~10-30s; total compensation could take 15-30 minutes — long enough for the customer to time out the polling UI before a terminal state lands.
+- New module-level constant `_BRICKOWL_CANCEL_CONCURRENCY: int = 5`.
+- New helper `async def _parallel_brickowl_cancels(order_ids: list[str]) -> list[tuple[str, str | None]]`:
+  - Uses `asyncio.Semaphore(_BRICKOWL_CANCEL_CONCURRENCY)` + `asyncio.gather`.
+  - Returns `[(order_id, error_or_None), ...]` preserving input-order presence.
+  - Caller decides policy — no terminal state writes inside the helper.
+- **Site #1 (`_compensate` Phase 1):** the `for order_id in reversed(...)` loop is replaced by one `_parallel_brickowl_cancels(list(reversed(...)))` call. Results fold into `outcome.brickowl_succeeded` / `outcome.brickowl_failed` after the gather. Comment notes that LIFO order no longer reflects temporal completion — the outcome dataclass is a fact set, not an ordered log.
+- **Site #2 (stockout-retry inline cancel):** behavioral change. Previously, the loop aborted on the FIRST failure and the rest of the orders were never cancelled, leaving them stranded in the customer's BrickOwl account on top of the MANUAL_REVIEW write. Now ALL cancels are attempted; on ANY failure, a single MANUAL_REVIEW write enumerates EVERY failure (`failed_summary = "; ".join(f"{oid}: {err}" for oid, err in failures)`) so the operator's cleanup work is bounded by the actual failure set.
 
-**Fix (must cover BOTH sites or it's incomplete):**
-```python
-sem = asyncio.Semaphore(5)
-async def _cancel_one(oid):
-    async with sem:
-        try:
-            await brickowl_client.cancel_order(oid)
-            return (oid, None)
-        except Exception as exc:
-            return (oid, str(exc))
+**Verified:** AST + grep checks:
+- `brickowl_client.cancel_order(` appears exactly ONCE (inside the helper).
+- `_parallel_brickowl_cancels` has 1 `async def` + 2 `await ... (` call sites.
+- The old `for order_id in reversed(` and `for oid in reversed(placed_brickowl_ids):` patterns are gone.
 
-results = await asyncio.gather(*[_cancel_one(o) for o in brickowl_order_ids])
-```
+**Behavioral change to flag:** see B28 below — individual cancel failures inside the helper are NOT retried. The single-shot policy is appropriate for the current stub `cancel_order` (a no-op log), but **will be insufficient** when the real Playwright-based BrickOwl cancel (roadmap #5) ships, where transient Playwright failures are common. B28 is the open follow-up.
 
-**Implementation notes:**
-- Site #1 needs a small reshape — currently appends to `outcome.brickowl_succeeded` / `outcome.brickowl_failed` inline; after parallelizing, fold the `results` list into the outcome at the end. Order of items in `outcome.brickowl_succeeded` no longer reflects LIFO; this is fine — the dataclass is a set of facts, not an ordered log.
-- Site #2 must still abort to MANUAL_REVIEW if ANY cancel raises (current behavior — see line 945-957). Easy to get wrong when parallelizing: a failed-cancel in the middle of a gather() must still produce a single MANUAL_REVIEW write, not multiple.
-- `Semaphore(5)` is a conservative starting point. BrickOwl rate limits are 600 req/min standard. Five concurrent Playwright sessions on a shared LAIGO buyer account is the more binding constraint — bump up only after testing.
-
-**Effort:** 30 min for both sites + outcome reshape.
-
-**Launch-blocking?** No (small orders today), but ship before the BrickOwl Playwright cancel (roadmap #5) goes live — sequential cancels at production order sizes are the difference between a 90-second compensation and a 30-minute one.
+**Operator implication:** compensation latency at production order sizes (~50 sellers) drops from sequential 15-30 min (with real Playwright cancel) to bounded ~30-90 sec (5-way concurrent). Stockout-retry compensation also bounds: rather than failing fast on first cancel error and leaving N-1 orders stranded, the customer's account gets fully cleaned and the operator gets one comprehensive failure report.
 
 ---
 
@@ -760,30 +734,49 @@ if not checkout_id:
 | B3 | `_compensate()` silently loses cancel failures | HIGH | **Yes** | ✅ Shipped 2026-05-15 |
 | B4 | No Saga-level timeout | HIGH | **Yes** | ✅ Shipped 2026-05-15 |
 | B5 | Drift check only at capture time | HIGH | **Yes** | ✅ Shipped 2026-05-16 |
-| B6 | Stripe key length disagreement | MEDIUM | No | 15 min |
-| B7 | Currency read at Saga runtime | MEDIUM | No | 20 min |
-| B8 | LEGO stockouts not retryable | MEDIUM | No (option B 30min OK) | 1 day / 30 min |
-| B9 | Stockout retry invalidates only BrickOwl cache | MEDIUM | No | 20 min |
-| B10 | Cache key duck-typed across modules | MEDIUM | No | 30 min |
-| B11 | Destructive per-iteration checkpoint | MEDIUM | No (blocks roadmap #2) | 1 day |
-| B12 | Exception text leaks to /status | LOW (security-adjacent) | No | 2 hr — **paused mid-Phase-3, top of resume queue** |
+| B6 | Stripe key length disagreement | MEDIUM | No | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; key_format.py) |
+| B7 | Currency read at Saga runtime | MEDIUM | No | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; provider.currency) |
+| B8 | LEGO stockouts not retryable | MEDIUM | No (option B 30min OK) | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; Option B doc-only branch) |
+| B9 | Stockout retry invalidates only BrickOwl cache | MEDIUM | No | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; bundled with B10) |
+| B10 | Cache key duck-typed across modules | MEDIUM | No | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; bundled with B9) |
+| B11 | Destructive per-iteration checkpoint | MEDIUM | No (blocks roadmap #2) | Open — subsumed by §9 Postgres migration (becomes `sagas.iterations` JSONB) |
+| B12 | Exception text leaks to /status | LOW (security-adjacent) | No | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; ERROR_MESSAGES table + customer_message paired with all 15 error-write sites) |
 | B13 | Master-flag reason wording | LOW | No | ✅ Shipped 2026-05-16 (Phase 3.1) |
 | B14 | /confirm 409 doesn't say in-flight vs done | LOW | No | ✅ Shipped 2026-05-16 (Phase 3.3) |
-| B15 | stripe.api_version is module-global (api_key also global) | LOW | No | 2 min (doc-only — see entry for caveats) |
-| B16 | Sequential BrickOwl cancels (two sites) | LOW | No | 30 min |
+| B15 | stripe.api_version is module-global (api_key also global) | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; in-code comments at both module-global writes) |
+| B16 | Sequential BrickOwl cancels (two sites) | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration bundle; `_parallel_brickowl_cancels` helper, both sites + behavioral change in stockout-retry site) |
 | B17 | `register()` replaces silently | LOW | No | ✅ Shipped 2026-05-16 (Phase 3.2) |
 | B18 | checkout_id→job_id fallback | LOW | No | ✅ Shipped 2026-05-15 (bundled with B3) |
 | B19 | Order placed but state write fails post-call | MEDIUM | No | ✅ Shipped 2026-05-16 |
 | B20 | `_compensate` silently swallows state-load failure | MEDIUM | No | ✅ Shipped 2026-05-15 (bundled with B3) |
 | B21 | Stripe cancel had no retry on transient errors | MEDIUM | No | ✅ Shipped 2026-05-15 (bundled with B3) |
 | B22 | `_compensate` had no terminal-state precondition | LOW | No | ✅ Shipped 2026-05-15 (bundled with B3) |
-| B23 | Concurrent `/confirm` with different `checkout_id` for same `job_id` clobbers in-flight state | MEDIUM | No (single-customer rare) | 30 min — see entry below |
-| B24 | Cache sweeper task is GC-vulnerable (no strong reference) | LOW | No | 10 min |
-| B25 | `_handle_saga_timeout` leaks non-terminal state if load() raises | MEDIUM | No (low likelihood, high severity) | 30 min |
-| B26 | `checkout_store.update()` crashes on corrupted JSON; no recovery | LOW | No (subsumed by Postgres migration) | 30 min |
+| B23 | Concurrent `/confirm` with different `checkout_id` for same `job_id` clobbers in-flight state | MEDIUM | No (single-customer rare) | Open — solved more elegantly by §9 Postgres `sagas_one_active_per_job_idx` partial unique index + `pg_advisory_xact_lock` |
+| B24 | Cache sweeper task is GC-vulnerable (no strong reference) | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration final sweep; `_sweeper_task` module global + idempotent start) |
+| B25 | `_handle_saga_timeout` leaks non-terminal state if load() raises | MEDIUM | No (low likelihood, high severity) | ✅ Shipped 2026-05-16 (pre-DB-migration final sweep; defensive MANUAL_REVIEW write + inner try/except) |
+| B26 | `checkout_store.update()` crashes on corrupted JSON; no recovery | LOW | No (subsumed by Postgres migration) | Open — subsumed by §9 (JSON files disappear) |
+| B27 | `_ALLOWED_CURRENCIES` is a hardcoded frozenset; adding a currency requires code change + deploy | LOW | No | Open — see B27 entry below |
+| B28 | `_parallel_brickowl_cancels` does not retry individual transient cancel failures | MEDIUM | No (LATENT — fires when real BrickOwl Playwright cancel ships per roadmap #5) | Open — see B28 entry below |
+| B29 | LEGO `StockoutError` branch is plumbed but `order_from_lego` doesn't raise it today | LOW | No | Open — see B29 entry below |
+| B30 | "Hold failed unexpectedly" error categorized as transient — may misguide customer on permanent bugs | LOW | No | Open — see B30 entry below |
+| B31 | CHECKOUT_AUDIT.md "now lives at" mapping table will drift as saga.py grows | DOC | No | Open — see B31 entry below |
+| B32 | Router writes `saga_status="pending"` but no `SagaStatus.PENDING` exists | MEDIUM | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass; router writes `SagaStatus.INITIATED.value`) |
+| B33 | `order_from_lego` wraps `StockoutError` as `RuntimeError` — defeats B8/H9 plumbing | MEDIUM | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass; explicit `except StockoutError: raise` before generic wrap) |
+| B34 | Optimizer Pass 2 creates ghost `{eid: 0}` entries via `defaultdict` reads | LOW (LATENT) | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass; `.get()` chain mirrors Pass 1) |
+| B35 | `checkout_store.save/update` write files non-atomically | LOW | No | Open — subsumed by §9 Postgres migration (JSON files disappear) |
+| B36 | `_parallel_brickowl_cancels` semaphore is per-call, not per-process | LOW (LATENT) | No | Open — subsumed by §9 future concurrent-saga design |
+| B37 | `debug_optimize` doesn't match `/quote` flow (missing BrickLink + free-shipping) | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass) |
+| B38 | `debug_optimize` `lego_available` initialized but never populated | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass; dead variable removed) |
+| B39 | Main.py L1 boot block used lenient `sk_live_` startswith (vs canonical `key_mode`) | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass) |
+| B40 | Router initial save missing `customer_message: None` key (B12 contract violation) | DOC | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass) |
 
 **Launch-blocking remaining: 0** — B3, B4, B5 all shipped. Phase 1 complete.
-**Phase-3-shipped:** B13, B14, B17. **Phase-3-paused:** B12 (resume first). **Open:** B6–B11, B12, B15 (doc-only), B16, B23, B24, B25, B26.
+**Pre-DB-migration bundle (2026-05-16): SHIPPED** — B6, B7, B8, B9, B10, B12, B15, B16. Newly-surfaced: B27, B28, B29, B30, B31.
+**Pre-DB-migration final sweep (2026-05-16): SHIPPED** — B24, B25.
+**Pre-DB-migration audit pass (2026-05-16): SHIPPED** — B32, B33, B34, B37, B38, B39, B40. Newly-surfaced from audit: B35, B36 (both DB-coupled, deferred).
+**Phase-3-shipped:** B13, B14, B17.
+**Open (DB-coupled, deferred to §9):** B11, B23, B26, B35, B36.
+**Open (independent of DB, gated on other work):** B27, B28, B29, B30, B31.
 
 ### B19 — Order placed but state write fails post-call — **MEDIUM** — ✅ SHIPPED 2026-05-16 (Phase 2.2)
 
@@ -835,82 +828,58 @@ If `_compensate` was somehow called when state was already terminal (defensive: 
 
 ---
 
-### B24 — Cache sweeper task is GC-vulnerable (same class as the Saga task GC bug) — **LOW**
+### B24 — Cache sweeper task is GC-vulnerable (same class as the Saga task GC bug) — **LOW** — ✅ SHIPPED 2026-05-16 (pre-DB-migration final sweep)
 
-**File:line:** `scripts/checkout/cache.py:52-54` (`start_cache_sweeper`)
+**File:line:** `scripts/checkout/cache.py` (`_sweeper_task` module global + idempotent `start_cache_sweeper`).
 
-**Symptom:** `asyncio.create_task(_sweep_loop())` is fire-and-forget; the returned Task is dropped immediately. Python 3.11+ docs: "the event loop only keeps weak references to tasks. A task that isn't referenced elsewhere may be garbage collected at any time, even before it's done." This is the EXACT defect class that the router fixed with `_running_sagas` (audit C1).
+**What shipped:**
 
-**Likelihood:** low — the sweep loop is in `while True:` with an `asyncio.sleep(300)`, so it has an active stack frame most of the time, and the event loop holds the task while it's running. But during the first scheduling slot (before the first `await`) it's eligible for GC.
+- New module-level `_sweeper_task: Optional[asyncio.Task] = None` strong reference.
+- `start_cache_sweeper()` now assigns to it and skips re-start if a non-done task already exists. Idempotent — calling twice (or after a previous task finished) re-schedules safely.
 
-**Impact:** if collected, the cache stops sweeping. Expired entries are still evicted on read (via `cache_get`'s expiry check), so this is a slow leak — not a customer-visible failure — but unbounded growth of cold keys (e.g. completed quote IDs no one is polling for) eventually consumes memory.
+Mirror of the `_running_sagas` pattern from C1.
 
-**Fix:** mirror the `_running_sagas` pattern:
-```python
-_sweeper_task: asyncio.Task | None = None
+**Verified:** AST + presence check (`_sweeper_task` and `global _sweeper_task` both present). The cache sweep task is no longer GC-eligible during the first scheduling slot.
 
-def start_cache_sweeper() -> None:
-    global _sweeper_task
-    if _sweeper_task is not None and not _sweeper_task.done():
-        return  # idempotent
-    _sweeper_task = asyncio.create_task(_sweep_loop())
-```
-
-**Verification:** instrument with `gc.get_referrers` on the task object; confirm only the module global references it.
-
-**Launch-blocking?** No.
+**Operator implication:** none in production today (the latent leak was unbounded cold-key growth over weeks of uptime). The fix removes a Render-restart cliff that would have surfaced as "memory growing slowly for no apparent reason" months from now.
 
 ---
 
-### B25 — `_handle_saga_timeout` can leave state non-terminal if state-load fails — **MEDIUM**
+### B25 — `_handle_saga_timeout` can leave state non-terminal if state-load fails — **MEDIUM** — ✅ SHIPPED 2026-05-16 (pre-DB-migration final sweep)
 
-**File:line:** `scripts/checkout/saga.py:539-548` (the state load at the top of the timeout handler)
+**File:line:** `scripts/checkout/saga.py:~590-625` (the state-load `except Exception` arm at the top of `_handle_saga_timeout`).
 
-**Symptom:**
-```python
-async def _handle_saga_timeout(job_id, checkout_id):
-    try:
-        state = await checkout_store.load(job_id) or {}
-    except Exception as exc:
-        logger.critical(f"[saga] [{checkout_id}] TIMEOUT handler could not load state: {exc}. ...")
-        return  # ← BUG: no terminal write
-```
+**What shipped:**
 
-The handler's own contract (saga.py:537) says: "The handler MUST always write a terminal state (or leave the existing terminal state in place)." The current code violates this in the load-failure branch.
+When `checkout_store.load(job_id)` raises during timeout cleanup, the handler now attempts a best-effort MANUAL_REVIEW write:
 
-**Impact:** if `checkout_store.load()` raises during timeout cleanup (JSON corruption, filesystem flap, disk full), the saga's checkpoint stays at whatever was last written (e.g. `stripe_held` or `orders_placed`). The inner asyncio task was already cancelled. `_running_sagas.discard()` fires from the done callback. Result:
-- `/status` returns `saga_status=stripe_held` forever — frontend keeps polling, never gets a terminal state.
-- Stripe authorization holds the customer's funds for up to 7 days with no automatic release.
-- No operator-visible signal beyond the CRITICAL log line.
-
-**Likelihood:** low — load() failures require a corrupted JSON file or filesystem error.
-**Severity:** high (financial — customer money held with no recovery).
-
-**Fix:** even when load fails, attempt a best-effort terminal write. Without state, we can't know what was placed, so MANUAL_REVIEW with a verbose reason is the only safe terminal:
 ```python
 try:
     state = await checkout_store.load(job_id) or {}
 except Exception as exc:
-    logger.critical(f"[saga] [{checkout_id}] TIMEOUT handler could not load state: {exc}")
+    logger.critical(...)
     try:
         await checkout_store.update(job_id, {
             "saga_status": SagaStatus.MANUAL_REVIEW,
             "manual_review_reason": (
-                f"Saga timed out after {_SAGA_TIMEOUT_SECONDS}s AND state load failed "
-                f"({exc}). Operator must: (1) check Stripe dashboard for any hold under "
-                f"this job, (2) check BrickOwl and LEGO.com for any orders placed in the "
-                f"last hour, (3) reconcile."
+                f"Saga timed out after {_SAGA_TIMEOUT_SECONDS}s AND state "
+                f"load failed ({exc}). Operator must: ..."
             ),
             "error": f"Timeout + state load failure: {exc}",
+            "customer_message": ERROR_MESSAGES["manual_review"],
         })
     except Exception as write_exc:
-        logger.critical(f"[saga] [{checkout_id}] Could not write fallback MANUAL_REVIEW: {write_exc}")
+        logger.critical(...)  # inner failure; nothing more we can do
     return
 ```
 
-**Verification:** monkey-patch `checkout_store.load` to raise; verify timeout handler writes MANUAL_REVIEW; verify if `update()` ALSO fails, two CRITICAL logs are emitted.
+The inner `update()` is wrapped in its own try/except so a second failure (state file unwritable, DB unreachable) emits a CRITICAL log but does not crash the timeout coroutine.
 
-**Launch-blocking?** No (low likelihood) but ship before launch if Postgres migration is delayed — corrupted-JSON-on-disk is more likely with filesystem state than with a DB.
+**Verified:** AST parse + presence check (`"Timeout + state load failure"` and `"best-effort MANUAL_REVIEW"` both in saga.py). The handler's contract ("MUST always write a terminal state") is now respected on the load-failure branch.
+
+**DB-migration transferability:** the fix structure is identical for filesystem state and Postgres state. `except Exception` catches both `JSONDecodeError` and `asyncpg.PostgresError` — no rework needed in §9.
+
+**Operator implication:** the "customer money held with no /status signal" failure mode is closed. A corrupted JSON file (or future DB query failure) during timeout cleanup now produces a clear MANUAL_REVIEW with verbose runbook, instead of a stuck `stripe_held` state polling forever.
 
 ---
 
@@ -991,6 +960,338 @@ if existing and existing.get("checkout_id") != body.checkout_id:
 **Effort:** 30 min.
 
 **Launch-blocking?** No (single-customer scenario is rare in practice), but ship before any marketing that surfaces multiple checkout entry points (e.g., "edit shipping address" UI that re-quotes).
+
+---
+
+### B27 — `_ALLOWED_CURRENCIES` is a hardcoded frozenset; adding a currency requires code change + deploy — **LOW**
+
+**Surfaced by:** B7/H5 shipping on 2026-05-16. The fix moved currency validation to provider construction with an in-code allowlist.
+
+**File:line:** `scripts/checkout/payment/stripe_provider.py` (`_ALLOWED_CURRENCIES: Final = frozenset({"usd", "eur", "gbp", "cad"})`).
+
+**Symptom:** when LAIGO expands to a market that needs a new currency (e.g., AUD for Australia), the new currency is rejected at boot with `PaymentProviderUnavailable: STRIPE_CURRENCY='aud' is not in the allowlist [...]`. The fix is a code change + redeploy — not an env-var change.
+
+**Why this is open:** the trade is intentional. An env-driven allowlist (e.g., `STRIPE_ALLOWED_CURRENCIES=usd,eur,gbp,cad,aud`) would let an operator add currencies without a deploy, but also lets a typo silently widen the surface area (`STRIPE_ALLOWED_CURRENCIES=usd,ueo,gbp` would accept "ueo" as valid). The in-code allowlist requires a PR + code review for every new currency, which is the right friction at LAIGO's scale.
+
+**Impact:** medium-friction at expansion time. LAIGO ships in USD today; adding EUR/GBP/CAD requires (a) adding to the allowlist, (b) deploying, (c) updating `.env` on Render. Three steps; ~10 min total.
+
+**Fix when needed:** edit `_ALLOWED_CURRENCIES`, add the new code in lowercase, deploy. The validation error message at boot already lists the allowed values, so the gap is loud (not silent).
+
+**Effort:** 10 min when the time comes; no work needed pre-launch.
+
+**Launch-blocking?** No.
+
+---
+
+### B28 — `_parallel_brickowl_cancels` does not retry individual transient cancel failures — **MEDIUM** (LATENT until roadmap #5)
+
+**Surfaced by:** B16/H10 shipping on 2026-05-16. The new helper wraps `brickowl_client.cancel_order(oid)` in `try/except Exception` and returns `(oid, error_or_None)` — a single-shot policy, no retries on transient errors.
+
+**File:line:** `scripts/checkout/saga.py:~109-140` (`_parallel_brickowl_cancels` helper).
+
+**Symptom (latent today):** `brickowl_client.cancel_order` is currently a logged no-op stub. The single-shot policy is fine — there's nothing to fail. When the real Playwright-based BrickOwl cancel (roadmap #5) ships, individual Playwright sessions are subject to transient failures (network flap, BrickOwl rate-limit response, browser pool exhaustion). A single transient failure during compensation produces a single `(oid, str(exc))` result, which the caller (both sites — `_compensate` and stockout-retry) treats as a permanent failure → MANUAL_REVIEW.
+
+**Why this is open:** `_cancel_hold_with_retry` exists for Stripe cancel and uses the same `_CAPTURE_BACKOFFS_SECONDS = (1, 4, 16)` schedule. The BrickOwl cancel helper does NOT mirror this. Adding per-order retry inside the helper is the right structural fix when the real cancel ships:
+
+```python
+async def _cancel_one(oid: str) -> tuple[str, str | None]:
+    async with sem:
+        for attempt in range(len(_CAPTURE_BACKOFFS_SECONDS) + 1):
+            try:
+                await brickowl_client.cancel_order(oid)
+                return (oid, None)
+            except <PlaywrightTransientError> as exc:
+                if attempt == len(_CAPTURE_BACKOFFS_SECONDS):
+                    return (oid, str(exc))
+                await asyncio.sleep(_CAPTURE_BACKOFFS_SECONDS[attempt])
+            except Exception as exc:
+                return (oid, str(exc))
+```
+
+The blocker is: `<PlaywrightTransientError>` isn't a class today — `brickowl_client.cancel_order` doesn't classify failures. The fix requires both (a) the real cancel implementation, AND (b) a transient/permanent classification (the same pattern as `PaymentRetryableError` vs `PaymentPermanentError` from `payment/base.py`).
+
+**Impact (latent):** at production order sizes (~50 sellers), a single transient blip during compensation forces MANUAL_REVIEW for the whole saga. Operator picks up a customer report; ~10-30 min cleanup per stuck cancel.
+
+**Fix when needed:** ships alongside roadmap #5 (real BrickOwl Playwright cancel). Bundle as one commit: classify failure modes in `brickowl_client`, then add per-order retry inside `_parallel_brickowl_cancels`. Mirror the `_cancel_hold_with_retry` shape exactly so the policy is uniform across BrickOwl + Stripe cancellation.
+
+**Effort:** 2-3 hours when the real cancel ships. Not before.
+
+**Launch-blocking?** No (latent; current stub doesn't fail). MUST ship before roadmap #5 goes to production.
+
+---
+
+### B29 — LEGO `StockoutError` branch is plumbed but `order_from_lego` doesn't raise it today — **LOW**
+
+**Surfaced by:** B8/H9 shipping on 2026-05-16 (Option B). The new `except StockoutError as exc:` branch in the LEGO order step is present but currently unreachable.
+
+**File:line:** `scripts/checkout/saga.py:~1085-1106` (the new branch); `scripts/checkout/clients/lego_client.py` (`order_from_lego` — does NOT raise `StockoutError`).
+
+**Symptom:** `lego_client.order_from_lego` catches all Playwright/HTTP failures and re-raises them as generic `Exception`. The B8 branch matches `StockoutError`, which never fires today. Every LEGO failure — including a DOM-detected stockout — surfaces as `"LEGO.com order failed: <exc>"` in the `error` field rather than the dedicated `"LEGO.com stockout (no retry path): <exc>"`.
+
+**Why this is open:** Option A from the original B8 entry (make `order_from_lego` raise `StockoutError` when its Playwright flow detects the out-of-stock UI) is a 1-day effort because it requires reliable DOM-state detection. Shipped as deferred follow-up.
+
+**Impact:** operator triage is slightly less precise. Support-staff explanation to a customer is the same either way (LEGO order failed; customer refunded). The dedicated branch was shipped to establish the contract — wiring is a clean follow-up.
+
+**Fix:** in `lego_client.order_from_lego`, detect the stockout DOM signal (an out-of-stock badge in the cart's product row) and raise `StockoutError(element_id)`. Same exception class as BrickOwl uses — already exported from `models.py`. No saga changes needed.
+
+**Effort:** 1 day including DOM-detection robustness testing across the LEGO.com UI variants.
+
+**Launch-blocking?** No. The Option B contract is shipped; B29 is purely a wiring follow-up that improves the operator runbook precision.
+
+---
+
+### B30 — "Hold failed unexpectedly" categorized as `payment_transient` — may misguide on permanent bugs — **LOW**
+
+**Surfaced by:** B12/H1+H2 shipping on 2026-05-16. The third hold-failure site (generic `except Exception` after `PaymentPermanentError` and `PaymentRetryableError`) was mapped to `ERROR_MESSAGES["payment_transient"]`.
+
+**File:line:** `scripts/checkout/saga.py:~815-820` (the `except Exception as exc:` arm in the hold step).
+
+**Symptom:** when a hold attempt raises an unexpected exception (a bug in our code, a bug in the Stripe SDK, an OS-level failure), the customer sees `"Our payment system is temporarily unavailable. Please retry shortly."` Customer retries with the SAME card; same bug fires; same message. The customer's retry budget is wasted on a non-transient condition.
+
+**Why this is open:** the alternative is to map "unexpected" to `payment_permanent` ("Your payment method was declined. Please use a different card.") — but that's also wrong, because the issue may not be card-related at all. There is no fourth category like `"system_error"` ("Something went wrong on our end; please contact support.") today.
+
+**Impact:** low. The vast majority of hold failures will surface as `PaymentPermanentError` or `PaymentRetryableError` (Stripe's own exception classifications). The unexpected-arm is a defensive catch-all that should rarely fire.
+
+**Fix (when justified):** add a new `ERROR_MESSAGES["system_error"]` category and update the unexpected-arm to use it. Frontend renders a "contact support" CTA rather than a "retry" prompt.
+
+**Effort:** 30 min including frontend coordination.
+
+**Launch-blocking?** No. Acceptable launch-day behavior; refine after a few real fail-data points show the unexpected-arm actually fires in production.
+
+---
+
+### B31 — CHECKOUT_AUDIT.md "now lives at" mapping table will drift as saga.py grows — **DOC**
+
+**Surfaced by:** H12 shipping on 2026-05-16. The 15-row mapping table at the top of `docs/CHECKOUT_AUDIT.md` (under the historical disclaimer) translates audit-doc line refs to current saga.py positions.
+
+**File:line:** `docs/CHECKOUT_AUDIT.md` (the "Quick map of the most-cited historical references" table inside the boxed disclaimer at the top).
+
+**Symptom:** every saga.py edit that crosses one of the listed line ranges silently invalidates a row in the mapping table. Within ~3 future commits, the table will be lying about where things are.
+
+**Why this is open:** the mapping table is a useful artifact today (an operator reading the frozen audit doc gets a fresh pointer), but maintaining it on every commit is friction. Two viable strategies:
+
+- **Strategy A — accept drift, refresh occasionally.** Set a quarterly calendar trigger to re-run a sed-update on the mapping table. Operators understand that the table is a "best effort at last refresh" pointer.
+- **Strategy B — replace line refs with stable anchors.** Tag the saga.py code with comments like `# AUDIT_ANCHOR: 0008_lego_order_step` and have the mapping table reference anchors instead of line numbers. Grep-able + drift-immune.
+
+Strategy A is acceptable for v1. Strategy B is the right structural fix if the audit doc becomes a regularly-consulted artifact post-launch.
+
+**Effort:** Strategy A: 30 min refresh per quarter. Strategy B: 1-2 hours to introduce anchors + update doc + update grep guide in CLAUDE.md.
+
+**Launch-blocking?** No.
+
+---
+
+### B32 — Router writes `saga_status="pending"` but no `SagaStatus.PENDING` exists — **MEDIUM** — ✅ SHIPPED 2026-05-16 (pre-DB-migration audit pass)
+
+**Surfaced by:** 2026-05-16 codebase audit (after the pre-DB-migration final sweep).
+
+**File:line:** `scripts/checkout/router.py:~240` (initial `checkout_store.save()` call in `confirm_checkout`).
+
+**Original symptom:** the router's initial state save wrote `"saga_status": "pending"` as a literal string. The `SagaStatus` enum in `models.py` has no `PENDING` member — its values are `initiated`, `stripe_held`, `orders_placed`, `fallback_ordered`, `payment_captured`, `compensated`, `failed`, `manual_review`. A customer polling `/status` in the brief window between the router's `save()` and the saga's first `INITIATED` checkpoint (which happens after gate pre-flight + provider acquisition + the initial INITIATED `update`) would hit `CheckoutStatusResponse`'s Pydantic validation:
+
+```python
+class CheckoutStatusResponse(BaseModel):
+    saga_status: SagaStatus   # required to be a valid enum value
+```
+
+Pydantic would try `SagaStatus("pending")` → `ValueError` → 500 internal server error. The PRE_RELEASE §4 B14 documentation explicitly said `"pending"` was valid; the contract didn't match the code.
+
+**What shipped:**
+
+- Router's initial save now writes `"saga_status": SagaStatus.INITIATED.value` (the string `"initiated"`).
+- `SagaStatus` added to router.py's `from .models import (...)` block.
+- No new enum value added — the brief window now correctly serializes as INITIATED (which is what the saga overwrites it to anyway, milliseconds later).
+- Frontend contract note removed from B14 entry (well, not literally removed — B14's mention of `"pending"` is stale but the saga shape now never produces that value, so it's a frozen historical contract reference).
+
+**Verified:** AST + grep — `"saga_status": "pending"` no longer present in router.py; `SagaStatus.INITIATED.value` is the new literal.
+
+**Frontend implication:** the `"pending"` value listed as valid in B14's saga_status enumeration is **never written** by current code. Frontend can drop any special handling. The saga_status field on `/status` is always a real `SagaStatus` member.
+
+---
+
+### B33 — `order_from_lego` wraps `StockoutError` as `RuntimeError` — **MEDIUM** — ✅ SHIPPED 2026-05-16 (pre-DB-migration audit pass)
+
+**Surfaced by:** 2026-05-16 codebase audit. Discovered while auditing B8/H9 plumbing for completeness.
+
+**File:line:** `scripts/checkout/clients/lego_client.py:~305-322` (the try/except wrapping `_run_checkout` in `order_from_lego`).
+
+**Original symptom:** the wrapping `except Exception as exc: raise RuntimeError(...) from exc` caught *every* exception including `StockoutError`. Even if a future `_run_checkout` raised `StockoutError` (per B29's Option A wiring), the saga's B8/H9 `except StockoutError` branch would never match — saga would see `RuntimeError` and fall through to the generic "LEGO.com order failed" compensation path. The B8 plumbing was unreachable for TWO independent reasons: (a) B29 (no DOM detection yet) AND (b) B33 (the exception wrapping).
+
+**What shipped:**
+
+- Explicit `except StockoutError:` branch added above the generic `except Exception` in `order_from_lego`. Takes a debug screenshot (`ERROR_lego_stockout`) and bare-`raise`s — preserving the exception class so the saga's match works.
+- `StockoutError` imported from `..models` in lego_client.py.
+
+**Verified:** AST + grep — `except StockoutError:` appears before `except Exception as exc` in `order_from_lego`. StockoutError import present.
+
+**Operator implication:** the B8/H9 contract is now correctly wired for the future B29 work. Once B29 ships (LEGO DOM stockout detection raising `StockoutError`), the saga's dedicated branch will fire automatically — no further coordination required.
+
+---
+
+### B34 — Optimizer Pass 2 creates ghost `defaultdict` entries — **LOW (LATENT)** — ✅ SHIPPED 2026-05-16 (pre-DB-migration audit pass)
+
+**Surfaced by:** 2026-05-16 codebase audit while reviewing optimizer for correctness.
+
+**File:line:** `scripts/checkout/optimizer.py:~142` (Pass 2 consolidation feasibility check).
+
+**Original symptom:** Pass 2 iterates over `b_sid` (seller B) and inspects every other seller `a_sid` (seller A) as a potential merge target. For each piece B has, the code checked A's remaining stock via `a_already = allocation[a_sid][eid]`. Because `allocation` is `defaultdict(lambda: defaultdict(int))`, this read with a missing `eid` key **created** `allocation[a_sid][eid] = 0` as a ghost entry. If the merge then DIDN'T happen (because `extra_cost >= b_shipping` or A wasn't the best target), the ghost stayed.
+
+Downstream, the build-result loop iterates `allocation[sid].items()` and includes the ghost `{eid: 0}` in `AllocationEntry.items`. Two consequences:
+
+1. The customer-facing `/quote` response shows `{eid: 0}` entries in the per-seller breakdown — visually ugly but not catastrophic.
+2. `brickowl_client.create_order(items=entry.items)` (today a `NotImplementedError` stub; per roadmap #5) would be called with 0-quantity items when it ships — likely a 400 from BrickOwl or a silent no-op.
+
+LEGO aggregation tolerates this (`lego_items[eid] += 0` is harmless), so the LEGO ordering path is unaffected.
+
+Pass 1 explicitly avoids this same defect via `.get()` (see comment at optimizer.py:95-96). Pass 2 forgot the pattern.
+
+**What shipped:**
+
+- Replaced `a_already = allocation[a_sid][eid]` with `a_already = allocation.get(a_sid, {}).get(eid, 0)` — the same defaultdict-safe `.get()` chain Pass 1 uses.
+- Added a B34 comment explaining the pattern.
+- Did NOT touch the post-merge writes (`allocation[best_a_sid][eid] += qty` at line 161): those are legitimate writes that intentionally create the entry.
+
+**Verified:** AST + grep — the `.get(a_sid, {}).get(eid, 0)` pattern is in place; the bare `allocation[a_sid][eid]` read is gone.
+
+**Operator implication:** quote responses no longer show 0-qty ghost entries. The LATENT brickowl `create_order` issue is closed before it surfaces.
+
+---
+
+### B35 — `checkout_store.save()` and `update()` write files non-atomically — **LOW** — Open (subsumed by §9 Postgres migration)
+
+**Surfaced by:** 2026-05-16 codebase audit.
+
+**File:line:** `scripts/checkout/checkout_store.py:55, 65`.
+
+**Symptom:** `path.write_text(json.dumps(...))` opens, truncates, writes. If the process is killed mid-write (Render kill -9, disk full mid-flush, OS crash), the file is left in a half-written corrupt state. The next `load()` raises `JSONDecodeError`.
+
+**Why it's open:** the B25 fix (defensive write on timeout-handler state-load failure) handles the load-failure case from the saga's perspective. But the on-disk corruption persists across restarts and would re-fire on every poll. Fix would be the classic temp-and-rename pattern:
+
+```python
+tmp = path.with_suffix(path.suffix + ".tmp")
+tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+tmp.replace(path)  # atomic on POSIX; atomic on Windows for same-drive
+```
+
+**Status:** §9 Postgres migration eliminates JSON files entirely; asyncpg transactions are atomic by construction. Fixing pre-§9 is throwaway work (~10 min) that would be re-removed during Phase C cutover. Acceptable to defer.
+
+**Effort:** 10 min if shipped pre-§9. Zero post-§9 (the surface goes away).
+
+**Launch-blocking?** No.
+
+---
+
+### B36 — `_parallel_brickowl_cancels` semaphore is per-call, not per-process — **LOW (LATENT)** — Open (subsumed by §9 future concurrent-saga design)
+
+**Surfaced by:** 2026-05-16 codebase audit while reviewing B16/H10 implementation.
+
+**File:line:** `scripts/checkout/saga.py:~130` (`sem = asyncio.Semaphore(_BRICKOWL_CANCEL_CONCURRENCY)` inside `_parallel_brickowl_cancels`).
+
+**Symptom:** the `Semaphore(5)` is created fresh per call to `_parallel_brickowl_cancels`. If two compensation paths run concurrently (different sagas, different `job_id`s), each gets its own Sem(5), so total concurrent BrickOwl cancels could reach 5×N. The intent was a global cap.
+
+**Why it's open:** single-active saga today means concurrent compensations cannot occur — the saga timeout (B4) ensures at most one in-flight saga per checkout_id, and `_running_sagas` doesn't prevent multi-job parallelism but each job has its own state lock. The latent case fires when (a) multi-saga concurrency becomes real (post-§9 with row-level locks + multi-worker), AND (b) the real BrickOwl Playwright cancel ships (roadmap #5) so each cancel is heavy enough that the 5×N concurrency matters for account lockouts.
+
+**Fix when needed:** move the semaphore to module level so all callers share it:
+
+```python
+_brickowl_cancel_sem = asyncio.Semaphore(_BRICKOWL_CANCEL_CONCURRENCY)
+
+async def _parallel_brickowl_cancels(order_ids):
+    ...
+    async def _cancel_one(oid):
+        async with _brickowl_cancel_sem:
+            ...
+```
+
+But: module-level `asyncio.Semaphore()` binds to the event loop at construction. Lifespan-time construction is fine; import-time construction would fail if no loop is running. The lazy `_get_semaphore()` pattern in brickowl_client.py (lines 41-45) is the proven shape — mirror it here.
+
+**Effort:** 15 min when needed.
+
+**Launch-blocking?** No.
+
+---
+
+### B37 — `debug_optimize` doesn't match `/quote` flow (missing BrickLink + free-shipping) — **LOW** — ✅ SHIPPED 2026-05-16 (pre-DB-migration audit pass)
+
+**Surfaced by:** 2026-05-16 codebase audit while sweeping `debug_router.py`.
+
+**File:line:** `scripts/checkout/debug_router.py:~315-334`.
+
+**Original symptom:** `debug_optimize` called `merge_listings(lego, brickowl)` — only 2 sources — AND skipped `apply_free_shipping_thresholds`. The customer-facing `/quote` flow includes BrickLink AND applies the free-shipping threshold. Operators previewing `/quote` totals via the debug endpoint saw **higher** totals than the customer would.
+
+**What shipped:**
+
+- `debug_optimize` now calls `merge_listings(lego_listings, brickowl_listings, bricklink_listings)` — matching the saga's quote flow.
+- Wraps the result in `apply_free_shipping_thresholds(...)` — same as saga.
+- `bricklink_client` import + `apply_free_shipping_thresholds` import added to `debug_router.py`.
+
+**Verified:** AST + grep — `bricklink_client.get_all_listings` and `apply_free_shipping_thresholds(optimize` both present in `debug_optimize`.
+
+**Operator implication:** debug previews now match what customers actually see. Bug-hunting via the debug endpoint no longer has hidden price drift.
+
+---
+
+### B38 — `debug_optimize` `lego_available` initialized but never populated — **LOW** — ✅ SHIPPED 2026-05-16 (pre-DB-migration audit pass)
+
+**Surfaced by:** 2026-05-16 codebase audit (paired discovery with B37).
+
+**File:line:** `scripts/checkout/debug_router.py:~337-338`.
+
+**Original symptom:** `lego_available = []` was set unconditionally and never appended to. The response returned `lego_fallback_items=lego_available` (always empty) and `unsourceable_items=allocation.lego_fallback_items`. With LEGO as a primary source (post-L5), `lego_fallback_items` IS the set of unsourceable pieces — the old `lego_available` distinction was vestigial from the pre-LEGO-as-primary design.
+
+**What shipped:**
+
+- Removed the dead `lego_available = []` variable.
+- Both `lego_fallback_items` and `unsourceable_items` in the response now point to the same `unsourceable` list (`allocation.lego_fallback_items`).
+- Comment documenting that the duplicate response field is kept for backward-compat of the response shape; collapse it in a future cleanup.
+
+**Verified:** AST + grep — `lego_available = []` is gone.
+
+**Operator implication:** debug response previously reported `lego_fallback_items: []` always, which was misleading. Now it correctly reflects unsourceable pieces.
+
+---
+
+### B39 — Main.py L1 boot block used lenient `sk_live_` startswith — **LOW** — ✅ SHIPPED 2026-05-16 (pre-DB-migration audit pass)
+
+**Surfaced by:** 2026-05-16 codebase audit while sweeping the L1 boot block for consistency with the B6/H4 (key_format.py) work.
+
+**File:line:** `scripts/Main.py:~164`.
+
+**Original symptom:** the L1 defense-in-depth check used `stripe_key.startswith("sk_live_")` to classify the key as live before refusing boot. This is the LENIENT check — would classify a too-short malformed key (e.g., `sk_live_xyz`) as "live". The B6/H4 work moved key validation to `payment/key_format.py` (strict ≥8 chars beyond prefix). With B6 shipped, gate.py and stripe_provider.py both use `key_format.key_mode`; Main.py's L1 was the third site and was still using the old lenient check.
+
+In practice the inconsistency was invisible because line 153's "CHECKOUT_ENABLED true + gate DISABLED" check fires first for a malformed key (StripeProvider refuses to construct → registry empty → gate DISABLED → line 153 refuses boot). But the duplication wasn't aligned with the canonical helper.
+
+**What shipped:**
+
+- Replaced `stripe_key.startswith("sk_live_")` with `_stripe_key_mode(stripe_key) == "live"` (importing `key_mode as _stripe_key_mode` from `.checkout.payment.key_format`).
+- All three layers (L0 gate, L1 boot, L5 provider) now classify keys identically.
+
+**Verified:** AST + grep — the startswith call is gone; the canonical helper import is in place.
+
+**Operator implication:** none in current operation. The fix is structural — eliminates a divergent classification that could surface later if the L1 block is ever moved or restructured.
+
+---
+
+### B40 — Router initial save missing `customer_message: None` key — **DOC** — ✅ SHIPPED 2026-05-16 (pre-DB-migration audit pass)
+
+**Surfaced by:** 2026-05-16 codebase audit while verifying the B12 grep invariant.
+
+**File:line:** `scripts/checkout/router.py:~250` (the `customer_message` key in the initial `checkout_store.save()` dict).
+
+**Original symptom:** the router's initial state save dict included `"error": None` but not `"customer_message": None`. The B12 contract (documented in CLAUDE.md) says: every site that writes `error` to state must also write a paired `customer_message`. The router's initial save violated this for the "no error yet" case.
+
+Functionally fine — Pydantic's `Optional[str] = None` default handled missing keys — but the audit-grep invariant in CLAUDE.md was broken.
+
+**What shipped:**
+
+- Added `"customer_message": None` to the router's initial save dict, paired with the existing `"error": None`.
+- Comment referencing B12 contract.
+
+**Verified:** AST + grep — `"customer_message": None` present in router.py.
+
+**Operator implication:** the CLAUDE.md audit grep (`grep -n '"error":' scripts/checkout/`) now finds matched `"customer_message":` lines at every site, including the router's initial save. The B12 contract is fully enforced.
+
+---
 
 ## 5. Open product questions
 
@@ -1089,104 +1390,77 @@ When a launch-blocking item in this file moves to ✅, update §0 and link the c
 
 ---
 
-## 8. Hardening list (post-Phase-3)
+## 8. Hardening list (post-Phase-3 + pre-DB-migration bundle)
 
-Defects + latent landmines that remain after Phases 1/2/3 closed B1, B3, B4, B5, B13, B14, B17, B18–B22. Listed in implementation priority. Each entry: severity, location, what to do, how to verify, and **dependencies on other items** so the work can be batched coherently.
+Defects + latent landmines that remain after Phases 1/2/3 closed B1, B3, B4, B5, B13, B14, B17, B18–B22 AND the pre-DB-migration bundle (2026-05-16) closed B6, B7, B8, B9, B10, B12, B15, B16. Listed in implementation priority. Each entry: severity, location, what to do, how to verify, and **dependencies on other items** so the work can be batched coherently.
 
 This list IS authoritative for "what comes next." Do not work from memory of an earlier list.
 
-### Tier 1 — Customer-visible / security-adjacent (do first)
+### Tier 1 — Customer-visible / security-adjacent
 
-#### H1. B12 — Customer-facing error translation **[PAUSED — RESUME FIRST]**
+#### H1. B12 — Customer-facing error translation — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-**Why first:** Every other open defect is internal. B12 leaks operator-facing strings (Stripe error text, exception type names, internal gate reason strings, PaymentIntent IDs) to anyone polling `/status`. Customer-visible information leak.
+Full details under the B12 entry in §4. Summary of what shipped:
 
-**Scope:**
-- Add `customer_message: Optional[str]` to `CheckoutStatusResponse` in `scripts/checkout/models.py`.
-- Add `customer_message: str` to the state dict written by every saga path that sets `error` (saga.py has ~8 sites — gate-closed, provider-unavailable, hold-permanent, hold-transient, hold-unexpected, capture-failed, post-placement drift, timeout handler).
-- Frontend renders `customer_message` only; `error` becomes operator-only.
-- Translation table — single source of truth in `models.py`:
-  ```python
-  ERROR_MESSAGES = {
-      "payment_permanent":   "Your payment method was declined. Please use a different card.",
-      "payment_transient":   "Our payment system is temporarily unavailable. Please retry shortly.",
-      "marketplace_failure": "We couldn't complete one of your orders. Your card was not charged.",
-      "manual_review":       "Your order is being reviewed by our team. We'll email you within 24 hours.",
-      "drift_buffer":        "The price of your order changed. Please request a new quote.",
-      "gate_closed":         "Checkout is temporarily unavailable. Please try again shortly.",
-      "timeout":             "Your order took longer than expected. Our team is reviewing — no action required.",
-  }
-  ```
-- Each saga write site picks the right key and includes both `error` (full internal text) and `customer_message` (translated).
-
-**Verification:**
-- Curl `/status` after each saga failure path; verify `customer_message` does not contain Stripe IDs, exception class names, or env var names.
-- The full `error` field stays populated for operator triage.
-- Frontend contract update: explicit text in `docs/ORDER_OPTIMIZER.md §8` about which field to surface.
-
-**Dependencies:** none. Self-contained.
+- `ERROR_MESSAGES` table in `scripts/checkout/models.py` with seven categories (payment_permanent, payment_transient, marketplace_failure, manual_review, drift_buffer [reserved], gate_closed, timeout).
+- `customer_message: Optional[str]` added to `CheckoutStatusResponse`; threaded through `router.py` `get_checkout_status`.
+- All 15 saga `"error":` write sites paired with a `"customer_message":` write.
+- Audit check: `grep -c '"error":'` == `grep -c '"customer_message":'` == 15.
 
 ---
 
-#### H2. Saga `error` field audit — find any remaining leak sites
+#### H2. Saga `error` field audit — ✅ SHIPPED 2026-05-16 (bundled with H1)
 
-After H1, sweep `saga.py` for any `error: ...` write that doesn't have a matched `customer_message: ...` write. Add a static check (grep-based or AST-based) to CI later so new sites don't drift.
+The static check fires cleanly today (15:15 paired). Re-run the check after any future error-write addition:
 
-**Verification:** `grep -n 'error.*: f"' scripts/checkout/saga.py` should return only paired sites.
+```
+grep -n '"error":' scripts/checkout/saga.py
+# every match should be followed on the next line by `"customer_message":`
+```
 
-**Dependencies:** must come AFTER H1.
-
----
-
-### Tier 2 — Drift / duplication (fast wins, ship together)
-
-#### H3. Consolidate `is_truthy` across 4 sites
-
-Today: `gate.py:99` (canonical, public), `stripe_provider.py:97` (private duplicate to avoid cross-import), `registry.py:43-46` (inlined inside `_is_replace_allowed`), `Main.py:52-53` (inlined during pre-import bootstrap).
-
-All four use the same truthy set `{"1", "true", "yes", "on"}`. Drift risk if one is changed without the others.
-
-**Fix:** move `is_truthy` to `scripts/checkout/_env.py` (new, dependency-free module) and import from there in:
-- `gate.py` (re-export as public-name for backward compat)
-- `stripe_provider.py` (drop `_is_truthy`)
-- `registry.py` (drop the inline set)
-- `Main.py` (after import order is verified — currently bootstraps env BEFORE the checkout package is reachable, may need ordering tweak)
-
-**Verification:** static check that there is exactly one `("1", "true", "yes", "on")` literal in `scripts/checkout/`.
-
-**Dependencies:** none, but bundle with H4 (same touch surface).
+CLAUDE.md memorialized this audit-check pattern in its anti-patterns section.
 
 ---
 
-#### H4. B6 — Stripe key length disagreement between gate and provider
+### Tier 2 — Drift / duplication
 
-`gate._stripe_key_mode` accepts `sk_test_`/`sk_live_` with any suffix. `stripe_provider._key_mode` requires ≥8 chars beyond the prefix.
+#### H3. Consolidate `is_truthy` across 4 sites — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-**Fix:** move `_key_mode` to a new `scripts/checkout/payment/key_format.py`. Both `gate.py` and `stripe_provider.py` import it. Single source of validation.
-
-**Verification:** test fixture `STRIPE_SECRET_KEY=sk_test_` produces identical gate reason text in both code paths.
-
-**Dependencies:** none, but bundle with H3 (related cleanup).
-
----
-
-#### H5. B7 — Validate currency at provider construction
-
-Saga currently reads `os.environ.get("STRIPE_CURRENCY", "usd")` fresh on every hold (`saga.py:772`). Drift-risk on restart-mid-saga; no allowlist.
-
-**Fix:** read once in `StripeProvider.__init__`, validate against `_ALLOWED_CURRENCIES = frozenset({"usd", "eur", "gbp", "cad"})`, expose as `provider.currency`. Saga uses `provider.currency`.
-
-**Verification:** `STRIPE_CURRENCY=zzz` causes `StripeProvider.__init__` to raise `PaymentProviderUnavailable` at boot (visible in `/checkout/gate` reasons).
-
-**Dependencies:** none.
+- New `scripts/checkout/_env.py` (dependency-free) exports `is_truthy(value)` + the `_TRUTHY` frozenset.
+- `gate.py` re-exports for backward compat (`from ._env import is_truthy`).
+- `payment/registry.py` and `payment/stripe_provider.py` import directly.
+- `Main.py` boot block replaced its inline literal check with `if not is_truthy(os.getenv("RENDER"))`.
+- Verified: exactly one `("1", "true", "yes", "on")` literal under `scripts/checkout/` (in `_env.py`).
 
 ---
 
-#### H6. B17-followup — Wire `_reset_for_tests()` into Main.py lifespan shutdown
+#### H4. B6 — Stripe key length disagreement — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-Today, if FastAPI lifespan ever runs twice in the same Python process, the second `register(StripeProvider())` raises `RuntimeError` (B17 safety check) and crashes lifespan startup. Production today is unaffected (uvicorn spawns fresh child processes per lifespan) but the contract is unstated.
+Full details under the B6 entry in §4. Summary:
 
-**Fix:** one line in `Main.py` lifespan shutdown block, AFTER the executor shutdown:
+- New `scripts/checkout/payment/key_format.py` exports strict `key_mode(key)` (≥8 chars beyond `sk_test_`/`sk_live_` prefix).
+- `gate.py` and `stripe_provider.py` both import it. Identical contract by construction.
+- Behavioral verification: `key_mode("sk_live_")` → `None`; `key_mode("sk_test_abcd1234")` → `"test"`; `key_mode("pk_test_abcd1234")` → `None`.
+
+---
+
+#### H5. B7 — Validate currency at provider construction — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
+
+Full details under the B7 entry in §4. Summary:
+
+- `_ALLOWED_CURRENCIES = frozenset({"usd", "eur", "gbp", "cad"})` in `stripe_provider.py`.
+- `STRIPE_CURRENCY` read once in `StripeProvider.__init__`, validated, locked as `self.currency: Final`.
+- `PaymentProvider` Protocol declares `currency: str` as required.
+- Saga reads `provider.currency`.
+- Follow-up flagged as B27: hardcoded allowlist requires deploy for new currencies.
+
+---
+
+#### H6. B17-followup — Wire `_reset_for_tests()` into Main.py lifespan shutdown — ✅ SHIPPED 2026-05-16 (pre-DB-migration final sweep)
+
+**File:line:** `scripts/Main.py` lifespan shutdown block (after `app.state.executor.shutdown()`).
+
+**What shipped:**
 ```python
 try:
     from .checkout.payment import registry as payment_registry
@@ -1195,162 +1469,141 @@ except Exception:
     log.debug("registry reset on shutdown skipped (already cleared)")
 ```
 
-Despite the name, the function is safe to call in production shutdown — it just clears the module-level `_active`. Rename to `_clear_active()` in a follow-up if the test-only naming feels misleading.
+Despite the name, the function is safe to call in production shutdown — it just clears the module-level `_active`. The `try/except` covers the case where the registry was already cleared (idempotent).
 
-**Verification:** subprocess test that runs `with TestClient(app):` twice in a row — second `with` block enters lifespan startup without RuntimeError.
+**Verified:** AST parse + presence check (`payment_registry._reset_for_tests()` appears in Main.py). Future test that runs `with TestClient(app):` twice will no longer hit the B17 RuntimeError on the second lifespan startup.
 
-**Dependencies:** none.
+**Operator implication:** none in production today (uvicorn still spawns fresh child processes per lifespan). The fix is preventative against future test-framework or hot-reload tooling that re-runs lifespan in the same process.
 
 ---
 
-#### H7. Add B15 in-code comment for `stripe.api_key` global
+#### H7. Add B15 in-code comment for `stripe.api_key` global — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-One-line comment above `stripe.api_key = key` (stripe_provider.py:168) referencing B15. Future multi-active work won't miss the key global the way the current doc-only entry would have.
-
-**Verification:** comment present.
-
-**Dependencies:** none. 2-minute change.
+Two in-code comment blocks added above `stripe.api_key = key` and `stripe.api_version = api_version` in `stripe_provider.py`, referencing B15 and the multi-active migration path. See the B15 entry in §4 for full text.
 
 ---
 
 ### Tier 3 — Marketplace / cache correctness
 
-#### H8. B9 + B10 — Cache invalidation symmetry across marketplaces
+#### H8. B9 + B10 — Cache invalidation symmetry across marketplaces — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-**B9 (saga.py:959):** stockout retry only invalidates `brickowl_listings:{eid}`. LEGO and BrickLink caches retain stale data.
-**B10 (saga.py:959):** the key string is constructed by the Saga, but the actual key is owned by `brickowl_client`. Typo would silently miss.
+Full details under the B9 + B10 entries in §4. Summary:
 
-**Fix (bundle both):**
-- Each client module gets `invalidate_listing(element_id) -> Awaitable[None]` that owns its own key naming.
-- Saga calls `await asyncio.gather(brickowl_client.invalidate_listing(eid), lego_client.invalidate_listing(eid), bricklink_client.invalidate_listing(eid))` on stockout.
-
-**Verification:**
-- Unit: each client's `invalidate_listing(eid)` matches the key its `get_all_listings` writes.
-- Integration: stockout retry behavior unchanged in single-marketplace test, no longer reuses stale LEGO/BrickLink cache.
-
-**Dependencies:** none, but bundle B9 and B10 — same touch surface.
+- `brickowl_client.invalidate_listing`, `lego_client.invalidate_listing`, `bricklink_client.invalidate_listing` (stub) — each owns its own cache key naming.
+- Saga calls `asyncio.gather(...)` over all three on stockout.
+- Verified: each client's `invalidate_listing` matches the cache key its `get_all_listings` writes.
 
 ---
 
-#### H9. B8 — LEGO.com stockout retryability (or document the asymmetry)
+#### H9. B8 — LEGO.com stockout asymmetry — ✅ SHIPPED 2026-05-16 (Option B; pre-DB-migration bundle)
 
-Option B (30 min): explicit `except StockoutError` for LEGO path with a comment that LEGO is the primary source and re-routing to LEGO wouldn't help.
-Option A (1 day): make `lego_client.order_from_lego` raise `StockoutError` on DOM-detected stockout; add LEGO path to the retry loop.
+Full details under the B8 entry in §4. Summary:
 
-Recommend Option B before launch; Option A as a Tier-3 follow-up.
-
-**Dependencies:** none for Option B. Option A requires reliable Playwright stockout DOM detection.
+- Option B shipped: explicit `except StockoutError as exc:` branch above the generic `except Exception` in the LEGO order step. Compensates without retry; documents that LEGO is the primary source so re-routing wouldn't help.
+- B29 (LOW) tracks the follow-up: wire `lego_client.order_from_lego` to actually raise `StockoutError` on DOM-detected stockouts. Branch is currently plumbed but unreachable.
 
 ---
 
-#### H10. B16 — Parallelize BrickOwl cancels (BOTH sites)
+#### H10. B16 — Parallelize BrickOwl cancels (BOTH sites) — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-See the updated B16 entry above. Two sites: `_compensate` (saga.py:413) and stockout-retry inline cancel (saga.py:937). Both must be parallelized.
+Full details under the B16 entry in §4. Summary:
 
-**Verification:** test fixture with N=10 stub cancels confirms the gather pattern; failed cancel in the middle still produces a single MANUAL_REVIEW (site #2) or single outcome update (site #1).
-
-**Dependencies:** ideally ship before roadmap #5 (real BrickOwl Playwright cancel) goes live.
+- `_parallel_brickowl_cancels` helper uses `Semaphore(5)` + `asyncio.gather`.
+- Both sites refactored (`_compensate` Phase 1 + stockout-retry inline cancel).
+- Stockout-retry site behavior changed: no longer aborts on first failure; waits for all, writes one MANUAL_REVIEW with all failures enumerated.
+- B28 (MEDIUM, LATENT) tracks the follow-up: per-order retry inside the helper, gated on the real BrickOwl Playwright cancel shipping (roadmap #5).
 
 ---
 
 ### Tier 4 — Hygiene / latent
 
-#### H11. B23 — Concurrent `/confirm` with different `checkout_id` for same `job_id`
+#### H11. B23 — Concurrent `/confirm` with different `checkout_id` for same `job_id` — OPEN (deferred to §9)
 
-See the new B23 entry above. Option B (reject unless existing is terminal) is the v1 recommendation. 30 min.
-
-**Verification:** integration test that fires two `/confirm` calls with different checkout_ids and confirms the second returns 409 with `code: "JOB_HAS_ACTIVE_CHECKOUT"`.
-
-**Dependencies:** none.
+See the B23 entry in §4. Solved more elegantly in §9's Postgres design via `sagas_one_active_per_job_idx` partial unique index + `pg_advisory_xact_lock(hashtext(job_id))`. App-level 422 catch on `UniqueViolationError` replaces the manual TOCTOU check. Bundle with §9 Phase C.
 
 ---
 
-#### H12. Documentation: refresh stale line numbers in CHECKOUT_AUDIT.md
+#### H12. Documentation: refresh stale line numbers in CHECKOUT_AUDIT.md — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-`docs/CHECKOUT_AUDIT.md` has many `saga.py:XXX` references that pre-date Phase 1/2/3. The saga grew from ~500 to 1200+ lines. Operators following the audit doc may chase wrong line numbers.
-
-**Fix:** pass through CHECKOUT_AUDIT.md §1–§6, sed-replace stale references. Reasonable acceptance criterion: every `saga.py:N` reference in the doc points at a line that exists and is plausibly related to the topic of the surrounding paragraph.
-
-**Verification:** spot-check 20 random `saga.py:N` references for plausibility.
-
-**Dependencies:** none.
+- Strengthened the HISTORICAL disclaimer at the top of `docs/CHECKOUT_AUDIT.md` (line count updated from "1200+" to "1280+"; explicit list of post-disclaimer hardening waves).
+- Added a 15-row "audit doc says → now lives at" mapping table inside the disclaimer covering the most-cited references.
+- B31 (DOC) tracks the follow-up risk: the mapping table itself will drift as saga.py continues to grow.
 
 ---
 
-#### H13. `_locks` dict grows unbounded (audit FMEA #16)
+#### H13. `_locks` dict grows unbounded (audit FMEA #16) — OPEN (subsumed by §9)
 
 `checkout_store._locks[job_id]` is added on first access and never removed. Per-job entry; memory leak proportional to lifetime job count.
 
-**Fix:** integrate with `Main.py`'s cleanup thread — when a `job_id`'s output directory is purged on TTL, also `_locks.pop(job_id, None)`. Note: an in-flight saga still holds a strong reference to its lock via `_get_lock(job_id)`'s acquire, so pop-during-saga is safe (lock just becomes the saga's only reference).
+**Fix:** integrate with `Main.py`'s cleanup thread — when a `job_id`'s output directory is purged on TTL, also `_locks.pop(job_id, None)`. Note: an in-flight saga still holds a strong reference to its lock via `_get_lock(job_id)`'s acquire, so pop-during-saga is safe.
 
-**Verification:** stress test with 10k synthetic jobs followed by cleanup; `len(_locks)` should fall back to 0.
-
-**Dependencies:** subsumed by roadmap #2 (Postgres state) when that ships — locks become per-row, no in-process dict. Tier-4 cleanup only if Postgres is delayed.
+**Status:** subsumed by §9 Phase C (Postgres state). Locks become per-row via `pg_advisory_xact_lock`; in-process dict disappears. Tier-4 cleanup ONLY if Postgres is delayed; not worth touching pre-§9.
 
 ---
 
-#### H14. `SagaStatus.FALLBACK_ORDERED` — unused enum value
+#### H14. `SagaStatus.FALLBACK_ORDERED` reservation comment — ✅ SHIPPED 2026-05-16 (pre-DB-migration bundle)
 
-Defined in `models.py:89`, never written by any saga path. Either dead code or unimplemented feature.
-
-**Decision:** ORDER_OPTIMIZER.md §8 notes this is preserved for forward compatibility (will be reachable when BrickOwl supplies some pieces and LEGO.com handles overflow). Keep but document with a `# RESERVED — see ORDER_OPTIMIZER.md §8` comment in `models.py`.
-
-**Dependencies:** none.
+Added `# RESERVED — see docs/ORDER_OPTIMIZER.md §8` comment in `models.py` above `FALLBACK_ORDERED`, documenting that the enum value is preserved for the future BrickOwl-primary + LEGO-overflow flow.
 
 ---
 
-#### H15. `load/save/update` in `checkout_store` use sync IO under asyncio.Lock
+#### H15. `load/save/update` in `checkout_store` use sync IO under asyncio.Lock — OPEN (subsumed by §9)
 
-`path.read_text()` / `path.write_text()` block the event loop while the `asyncio.Lock` is held. Negligible at current scale (small JSON, low traffic), would bite at scale.
+`path.read_text()` / `path.write_text()` block the event loop while the `asyncio.Lock` is held. Negligible at current scale.
 
-**Fix when needed:** wrap file IO in `asyncio.to_thread`. Already a pattern used in `stripe_provider.py` for SDK calls.
+**Fix when needed:** wrap file IO in `asyncio.to_thread`.
 
-**Dependencies:** subsumed by roadmap #2 (Postgres state).
+**Status:** subsumed by §9 Phase C. asyncpg replaces file IO entirely; not worth touching pre-§9.
 
 ---
 
-### Hardening summary table
+### Hardening summary table (post-2026-05-16 bundle)
 
-| H# | Bug ID | Severity | Effort | Bundleable with | Customer-visible? |
-|---|---|---|---|---|---|
-| H1 | B12 | LOW (security) | 2 hr | H2 | **YES** |
-| H2 | — | LOW | 30 min | H1 | indirect |
-| H3 | — | LOW | 30 min | H4 | No |
-| H4 | B6 | MEDIUM | 30 min | H3 | No |
-| H5 | B7 | MEDIUM | 30 min | — | No |
-| H6 | B17 followup | LOW | 5 min | — | No |
-| H7 | B15 | LOW | 2 min | H3/H4 | No |
-| H8 | B9 + B10 | MEDIUM | 1 hr | — | indirect (retry latency) |
-| H9 | B8 (Option B) | MEDIUM | 30 min | — | indirect |
-| H10 | B16 | LOW | 30 min | — | indirect (compensation latency) |
-| H11 | B23 | MEDIUM | 30 min | — | **YES** |
-| H12 | doc-drift | doc | 1 hr | — | No |
-| H13 | FMEA-16 | LOW | 30 min | roadmap #2 | No |
-| H14 | enum cleanup | doc | 5 min | — | No |
-| H15 | sync-IO-under-lock | LOW | — | roadmap #2 | No |
+| H# | Bug ID | Severity | Effort | Status |
+|---|---|---|---|---|
+| H1 | B12 | LOW (security) | 2 hr | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H2 | — | LOW | 30 min | ✅ Shipped 2026-05-16 (bundled with H1) |
+| H3 | — | LOW | 30 min | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H4 | B6 | MEDIUM | 30 min | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H5 | B7 | MEDIUM | 30 min | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H6 | B17 followup | LOW | 5 min | ✅ Shipped 2026-05-16 (pre-DB-migration final sweep) |
+| H7 | B15 | LOW | 2 min | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H8 | B9 + B10 | MEDIUM | 1 hr | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H9 | B8 (Option B) | MEDIUM | 30 min | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H10 | B16 | LOW | 30 min | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H11 | B23 | MEDIUM | 30 min | ❌ Open — subsumed by §9 Phase C |
+| H12 | doc-drift | doc | 1 hr | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H13 | FMEA-16 | LOW | 30 min | ❌ Open — subsumed by §9 |
+| H14 | enum cleanup | doc | 5 min | ✅ Shipped 2026-05-16 (pre-DB-migration bundle) |
+| H15 | sync-IO-under-lock | LOW | — | ❌ Open — subsumed by §9 |
 
-**Recommended sequencing (pre-database-migration view):**
-1. **H1 + H2** (B12) — customer-visible info leak; resume the paused Phase 3.4 work.
-2. **H6** (B17 lifespan) — protect against latent test-framework crash; 5 min.
-3. **H3 + H4 + H7** (drift cleanup bundle) — touch the same files (gate.py, stripe_provider.py, registry.py); ship together.
-4. **H5** (currency validation) — adjacent to H4.
-5. **H11** (B23) — customer-visible scenario, even if rare.
-6. **H8** (B9 + B10) — marketplace cache correctness.
-7. **H10** (B16) — must ship before roadmap #5 (real BrickOwl Playwright cancel).
-8. **H9** (B8 Option B doc-only) — before launch so support staff can explain LEGO stockout customer complaints.
-9. **H12 + H14** — doc cleanup pass.
-10. **H13 + H15** — defer to roadmap #2 (Postgres state).
+**Newly-surfaced from the 2026-05-16 bundle (see §4 for full entries):**
 
-Total for items 1–9: roughly **7 hours focused work**, ignoring per-item testing time. Add ~2 hours for testing per Tier-1/2 item if integration tests need to be written from scratch.
+| ID | Title | Severity | Trigger |
+|---|---|---|---|
+| B27 | `_ALLOWED_CURRENCIES` hardcoded; new currency requires deploy | LOW | LAIGO ships in a market needing a new currency |
+| B28 | `_parallel_brickowl_cancels` no per-order retry | MEDIUM (LATENT) | Roadmap #5 (real BrickOwl Playwright cancel) ships |
+| B29 | LEGO `StockoutError` plumbed but not raised | LOW | Whenever Option A is justified (DOM-detection work) |
+| B30 | "Hold failed unexpectedly" mapped to transient | LOW | Production data shows unexpected-arm actually firing |
+| B31 | CHECKOUT_AUDIT.md mapping table drift | DOC | Saga.py edit crosses listed line ranges |
 
-**Sequencing decision (2026-05-16):** the database migration (§9 below) supersedes this order. Several hardening items (H6, H13, H15, B11, B25, B26) become moot once persistent state lands. Recommended new sequence:
+---
 
-1. **§9 database migration — Rounds 1/2/3.** All Tier-0 structural defects (S1, S4 partial) close together.
-2. **H1 + H2** (B12) — only remaining Tier-1 customer-visible defect.
-3. **H11** (B23) — solved more elegantly with row-level locks in Postgres than with app-level checks.
-4. **H3 + H4 + H7** (drift cleanup) — independent of DB; can be done any time.
-5. **L6 audit log** — schema already designed; write directly to Postgres rather than NDJSON. Saves a migration round trip.
-6. **Remaining H5, H8, H9, H10** — independent of DB; can interleave.
+**Recommended sequencing (post-2026-05-16 final sweep):**
+
+The pre-DB-migration bundle + final sweep closed every defect that was fixable without DB-migration tech debt. The remaining order:
+
+1. **§9 database migration — Rounds 1/2/3** (Neon locked in as host). DB-coupled items collapse:
+   - H11 (B23) → solved by `sagas_one_active_per_job_idx` partial unique index.
+   - H13 (`_locks` unbounded) → in-process dict deleted; row locks via `pg_advisory_xact_lock`.
+   - H15 (sync-IO-under-lock) → asyncpg replaces file IO.
+   - B11 (destructive iteration checkpoint) → becomes `sagas.iterations` JSONB design.
+   - B26 (corrupted JSON) → JSON files disappear.
+2. **B28** — bundle with roadmap #5 (real BrickOwl Playwright cancel). LATENT until then.
+3. **B29** — bundle with the LEGO DOM-stockout-detection work (when justified).
+4. **B27, B30, B31** — DOC/LOW; opportunistic.
+
+**Zero independent-of-DB pre-launch work remaining.** The 2026-05-16 bundle + final sweep cleared the pre-§9 runway completely. Every remaining open item is either (a) gated on the DB migration, (b) gated on other deferred work (roadmap #5 / DOM detection / production data), or (c) opportunistic doc cleanup.
 
 ---
 
@@ -1360,7 +1613,20 @@ Total for items 1–9: roughly **7 hours focused work**, ignoring per-item testi
 **Owner:** Grant Benson.
 **Driver decision:** asyncpg (raw SQL, no ORM). Rationale in §9.1.4.
 **Scope:** ALL persistent state — mosaic generation jobs AND checkout state. Operator can see job failures in one place.
-**Host decision:** OPEN — Round 1 §9.1.3 compares four options in depth; user makes the call.
+**Host decision:** Neon (locked in 2026-05-16; see §9.3.11.1).
+
+### Terminology (READ FIRST)
+
+This section uses the word "branch" for two different things. Always read it qualified:
+
+| Term | Meaning |
+|---|---|
+| **git branch** | A version-control branch in the LAIGO repo (e.g., the `E2E` git branch, "merge to git main"). Lives in `.git/`. |
+| **Neon branch** | A copy-on-write database clone in Neon (e.g., the Neon `dev` branch, the Neon `main` branch). Lives in your Neon project; created via dashboard or `neon branch create`. Completely independent of git. |
+
+When this document says **`main`** without qualification inside a Neon context (e.g., "create the `dev` branch off `main`"), `main` is the Neon `main` branch (Neon's default production branch — the one your `DATABASE_URL` points at in Render). When you see "merge to main" in a git/PR context, that's the git `main` branch.
+
+A useful mental model: Neon branches are to your database what git branches are to your code. The two systems share a naming convention by coincidence, not by design.
 
 This is a **three-round document** by design:
 - **Round 1** (§9.1) — goals, scope, host comparison, driver rationale, schema sketch, sequencing.
@@ -2508,7 +2774,7 @@ The `-pooler` host-suffix is what selects Neon's built-in PgBouncer-transaction-
 2. Copy the **pooled** connection string (host contains `-pooler`).
 3. Save in `.env.secrets` as `DATABASE_URL=postgresql://...?sslmode=require`. The `.env.secrets` file is gitignored.
 4. Verify TLS works: `python -c "import asyncpg, asyncio, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']).close())"` exits cleanly.
-5. (Optional pre-Phase-B) Create a `dev` branch off main for local development: `neon branch create dev`.
+5. (Optional pre-Phase-B) Create a `dev` Neon branch off the Neon `main` branch for local development: `neon branch create dev`.
 
 ##### 9.3.11.5 Q5 follow-up — pool size numbers explained
 
@@ -2536,7 +2802,7 @@ No, 10 per worker is generous. 2 × 10 = 20 connections, well under Neon's poole
 
 With Q1=Neon locked in, the local-dev question gets a much cleaner answer than under Supabase.
 
-**Decision: Neon dev branch.** Create a `dev` branch off `main` once Phase A provisioning is done; point each developer's local `DATABASE_URL` at it (or per-developer sub-branches if/when we grow beyond a solo dev).
+**Decision: Neon dev branch.** Create a `dev` Neon branch off the Neon `main` branch once Phase A provisioning is done; point each developer's local `DATABASE_URL` at the `dev` branch's pooler DSN (or per-developer sub-branches if/when we grow beyond a solo dev).
 
 **Why:**
 - **Production parity.** Same asyncpg config, same pooler behavior (transaction-mode PgBouncer, statement_cache_size=0), same TLS handshake. Bugs related to those (statement-cache misconfigurations, TLS cert chain issues, pooler-specific timing) reproduce locally instead of surfacing only after deploy.
@@ -2549,7 +2815,7 @@ With Q1=Neon locked in, the local-dev question gets a much cleaner answer than u
 - Working offline routinely (Neon needs an internet connection).
 - Local iteration is hot enough that the network round-trip latency to Neon matters (Neon median is ~10-30ms; Docker localhost is <1ms).
 
-If you switch to Docker, accept the drift risk and validate against a real Neon branch before each merge to main:
+If you switch to Docker, accept the drift risk and validate against a real Neon branch before each merge to the git `main` branch:
 
 ```bash
 docker run -e POSTGRES_PASSWORD=dev -p 5432:5432 -d postgres:16
@@ -2557,11 +2823,11 @@ DATABASE_URL=postgres://postgres:dev@localhost:5432/postgres alembic upgrade hea
 ```
 
 **Action during Phase A:**
-1. Create the `dev` branch: `neon branch create dev --parent main`.
+1. Create the `dev` Neon branch: `neon branch create dev --parent main` (where `--parent main` is the Neon `main` branch — Neon's default production branch — not the git `main` branch).
 2. Copy its pooler connection string into a gitignored `.env.local`: `DATABASE_URL=postgresql://...?sslmode=require`.
-3. Confirm `alembic upgrade head` runs cleanly against `dev` (it will be a no-op on a fresh branch until Phase B writes the first migration).
+3. Confirm `alembic upgrade head` runs cleanly against the `dev` Neon branch (it will be a no-op on a fresh Neon branch until Phase B writes the first migration).
 
-**NEVER point local dev at the production branch.** Use `.env.local` (gitignored) for the dev connection string; `.env.secrets` holds the prod string and lives only on Render.
+**NEVER point local dev at the Neon production branch (Neon `main`).** Use `.env.local` (gitignored) for the dev connection string pointing at the `dev` Neon branch; `.env.secrets` holds the production string pointing at Neon `main` and lives only on Render.
 
 ##### 9.3.11.10 Q10 follow-up — keep `.progress` file (caveat)
 
@@ -2663,8 +2929,8 @@ What this migration plan does NOT cover:
 **Status (2026-05-16):** All §9.3.11 decisions resolved. Q1 = **Neon** (locked in — see §9.3.11.1 for rationale). Q1a tier path = **Free during dev → Launch $19/mo at go-live**. Q9 = **Neon dev branch** for local. All other questions previously bound.
 
 1. **Provision the Neon project.** Dashboard or CLI (`neon project create laigo`). Copy the **pooler** connection string (host suffix contains `-pooler`). Store as `DATABASE_URL` in `.env.secrets` (gitignored). Verify TLS handshake with a one-line asyncpg connect test.
-2. **Create the `dev` branch** off `main`: `neon branch create dev`. Copy its pooler connection string into a gitignored `.env.local`. This is where local dev points.
-3. **Write the schema migration.** Phase B. Test on a throwaway branch (`neon branch create migration-test-<date>`), then delete the branch and apply to `main`.
+2. **Create the `dev` Neon branch** off the Neon `main` branch: `neon branch create dev`. Copy its pooler connection string into a gitignored `.env.local`. This is where local dev points. (Neon branch, not git branch — see Terminology block at top of §9.)
+3. **Write the schema migration.** Phase B. Test on a throwaway Neon branch (`neon branch create migration-test-<date>`), then delete that Neon branch and apply the migration to the Neon `main` branch.
 4. **Migrate `checkout_store`.** Phase C. Keep the JSON path behind `DB_BACKEND` flag (Q11 decision — see §9.3.11.11).
 5. **Migrate mosaic lifecycle.** Phase D.
 6. **Add resume-on-startup + reconciliation.** Phase E. Add `emit()` for L6 audit log (Q8).
@@ -2673,3 +2939,921 @@ What this migration plan does NOT cover:
 9. **Set calendar triggers** for the deferred items in §9.3.11.X (audit table growth check, pool exhaustion check, Neon storage usage approaching 10 GB).
 
 After this lands, the remaining H1–H15 hardening items proceed against a much-easier-to-reason-about system. The whole "what happens on restart" class of bugs is closed.
+
+---
+
+### 9.5 Per-phase operational playbook
+
+Rounds 1–3 above explain *what* and *why*. This section is the *how* — step-by-step for an operator (you or a future maintainer) executing each phase. Each playbook is self-contained: it says which files to create/edit, which commands to run, what to verify before moving on, and when to commit. References to deeper technical content point back to §9.1/§9.2/§9.3.
+
+**Conventions used in this section:**
+- 🔧 = code/file change
+- 💻 = shell command
+- ✅ = verification step (must pass before moving on)
+- 📦 = commit checkpoint
+- 🛑 = stop / get human confirmation
+- All "branch" references are qualified per the §9 Terminology block (Neon branch vs git branch).
+
+---
+
+#### 9.5.A Phase A — Provision & connect ✅ SHIPPED 2026-05-16
+
+**Status:** Complete. Documented here for reference and rollback guidance.
+
+**What shipped:**
+- Neon `laigo` project on PostgreSQL 17.8 / AWS us-east-1 / ARM64 compute.
+- Pooler DSN saved to `.env.secrets` as `DATABASE_URL` (with `channel_binding=require` for SCRAM hardening).
+- `scripts/db.py` — pool init/close, `DB_BACKEND`-gated, refuses direct endpoint, `statement_cache_size=0`, `command_timeout=10s`.
+- `Main.py` lifespan wiring — `init_pool()` first, `close_pool()` last; no-op when `DB_BACKEND=json`.
+- `scripts/smoke_test_db.py` — reusable diagnostic.
+- `requirements.txt` — `asyncpg~=0.29`, `alembic~=1.13` (resolved to asyncpg 0.31 + alembic 1.18 locally).
+- Terminology block at top of §9.
+- CLAUDE.md design note for `scripts/db.py`.
+
+**Verified:**
+- ✅ `SELECT 1` round-trip via asyncpg + TLS + pooler + `statement_cache_size=0`.
+- ✅ Neon `main` branch on PG 17.8 confirmed by `SELECT version()`.
+- ✅ Region alignment (Render us-east + Neon us-east-1).
+
+**Rollback (if Phase A becomes a problem retroactively):**
+- Set `DB_BACKEND=json` in `.env`. `scripts/db.py` no-ops; everything else behaves as pre-Phase-A. Pool isn't even created.
+- Delete the Neon project from the Neon dashboard if you decide to switch hosts (no production data to lose).
+
+---
+
+#### 9.5.B Phase B — Schema + alembic (≈1 day)
+
+**Goal:** Versioned, repeatable schema migrations. Six tables created in one initial migration. Verified on a throwaway Neon branch before touching production.
+
+**Prerequisites:**
+- ✅ Phase A complete (DATABASE_URL works, asyncpg installed).
+- ✅ alembic installed (was installed alongside asyncpg in Phase A).
+- 🛑 **Make a fresh git branch for Phase B work:** `git checkout -b phase-b-schema-migration`. Keeps the WIP isolated and lets you abandon cleanly if needed.
+
+**Step 1 — Initialize alembic skeleton** (≈ 15 min)
+
+🔧 Create `alembic.ini` at the project root:
+
+```ini
+[alembic]
+script_location = scripts/migrations
+file_template = %%(rev)s_%%(slug)s
+# DO NOT set sqlalchemy.url here — env.py reads it from os.environ
+# to avoid the URL appearing in committed config.
+
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S
+```
+
+🔧 Create `scripts/migrations/` directory structure:
+
+```
+scripts/migrations/
+  env.py              ← (next step)
+  script.py.mako      ← (alembic-provided template — copy from `alembic init` scratch dir)
+  versions/           ← empty for now; the first migration lands here
+  sql/                ← .up.sql / .down.sql files; raw DDL lives here
+```
+
+The cleanest way to get `script.py.mako` is to run `alembic init alembic-scratch/` in a throwaway dir, copy `script.py.mako` into `scripts/migrations/`, then delete `alembic-scratch/`. (Alembic ships the template inside its package, but the file isn't trivially accessible via stdlib paths.)
+
+🔧 Create `scripts/migrations/env.py` (per §9.2.10 with a small hardening):
+
+```python
+"""alembic environment — reads DATABASE_URL from environment, not alembic.ini.
+
+The direct endpoint is required for alembic operations (session mode is needed
+for the migration transactions; PgBouncer transaction mode would break things
+like CREATE INDEX CONCURRENTLY in a future migration). To run against Neon:
+    1. In the Neon dashboard, copy the DIRECT (non-pooler) connection string.
+    2. Set ALEMBIC_DATABASE_URL=<direct DSN> in your shell (NOT in .env).
+    3. Run: alembic upgrade head
+If ALEMBIC_DATABASE_URL is unset, falls back to DATABASE_URL (pooler) — works
+for app-side reads but may not for all schema operations.
+"""
+import os
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+dsn = os.environ.get("ALEMBIC_DATABASE_URL") or os.environ.get("DATABASE_URL")
+if not dsn:
+    raise RuntimeError(
+        "Neither ALEMBIC_DATABASE_URL nor DATABASE_URL is set. "
+        "Set ALEMBIC_DATABASE_URL to the Neon DIRECT (non-pooler) DSN before running alembic."
+    )
+config.set_main_option("sqlalchemy.url", dsn)
+
+
+def run_migrations_online() -> None:
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    with connectable.connect() as connection:
+        context.configure(connection=connection)
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+run_migrations_online()
+```
+
+✅ Verify alembic is configured: `alembic current` should print `(empty)` (no migrations applied yet to the configured DSN). If it errors with a connection issue, fix `ALEMBIC_DATABASE_URL` first.
+
+📦 **Commit checkpoint 1:** "Phase B step 1 — alembic skeleton wired (env.py reads ALEMBIC_DATABASE_URL or DATABASE_URL; no migrations yet)."
+
+**Step 2 — Write the initial schema migration** (≈ 2 hours)
+
+🔧 Create `scripts/migrations/sql/0001_initial_schema.up.sql` — copy the full DDL from §9.2.1 (six `CREATE TABLE` statements + the indices block). Do NOT modify the schema during this step; that's a separate decision with its own RFC. The job here is "translate §9.2.1 verbatim into a file."
+
+🔧 Create `scripts/migrations/sql/0001_initial_schema.down.sql`:
+
+```sql
+-- Reverse of 0001_initial_schema.up.sql
+-- Order: drop indices implicitly via DROP TABLE; drop tables in reverse FK order.
+DROP TABLE IF EXISTS audit_events CASCADE;
+DROP TABLE IF EXISTS payment_holds CASCADE;
+DROP TABLE IF EXISTS sagas CASCADE;
+DROP TABLE IF EXISTS checkouts CASCADE;
+DROP TABLE IF EXISTS job_progress CASCADE;
+DROP TABLE IF EXISTS jobs CASCADE;
+DROP EXTENSION IF EXISTS pgcrypto;
+```
+
+🔧 Create the alembic version file `scripts/migrations/versions/0001_initial_schema.py`:
+
+```python
+"""initial schema — jobs, job_progress, checkouts, sagas, payment_holds, audit_events"""
+
+from pathlib import Path
+from alembic import op
+
+revision = "0001"
+down_revision = None
+branch_labels = None
+depends_on = None
+
+_SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
+
+
+def upgrade() -> None:
+    op.execute((_SQL_DIR / "0001_initial_schema.up.sql").read_text(encoding="utf-8"))
+
+
+def downgrade() -> None:
+    op.execute((_SQL_DIR / "0001_initial_schema.down.sql").read_text(encoding="utf-8"))
+```
+
+✅ Verify the migration parses (without running it): `alembic check` (alembic ≥1.9). Or just `alembic history` — should show one revision `0001`.
+
+📦 **Commit checkpoint 2:** "Phase B step 2 — initial schema migration written (not yet applied)."
+
+**Step 3 — Test against a throwaway Neon branch** (≈ 30 min)
+
+This is the killer-feature use of Neon. We create a disposable Neon branch off Neon `main`, apply the migration, verify, then delete the Neon branch. Neon `main` stays untouched until we're confident.
+
+💻 Create the throwaway Neon branch via dashboard or CLI:
+
+```bash
+# CLI form (requires `neon` CLI installed + logged in):
+neon branch create --project-id <laigo-project-id> --name migration-test-2026-MM-DD --parent main
+
+# Then grab its DIRECT endpoint DSN (NOT pooler — alembic uses direct):
+neon connection-string --project-id <laigo-project-id> --branch migration-test-2026-MM-DD --pooled false
+```
+
+If you don't have the `neon` CLI: do this in the dashboard. Neon Console → laigo project → Branches → New Branch → parent `main` → name `migration-test-2026-MM-DD`. Then open the branch detail and copy the **direct** (non-pooled) connection string.
+
+💻 Apply the migration to the throwaway Neon branch:
+
+```bash
+$env:ALEMBIC_DATABASE_URL = "postgresql://...direct.../neondb?sslmode=require"   # PowerShell
+alembic upgrade head
+```
+
+✅ Expected output: `Running upgrade  -> 0001, initial schema — jobs, job_progress, checkouts, sagas, payment_holds, audit_events`.
+
+✅ Verify table presence:
+
+```bash
+$env:ALEMBIC_DATABASE_URL = "postgresql://...direct.../neondb?sslmode=require"
+python -c "import asyncio, asyncpg, os; asyncio.run((lambda: asyncpg.connect(os.environ['ALEMBIC_DATABASE_URL']))().__anext__()) if False else None"  # placeholder
+```
+
+A simpler verify: open the Neon dashboard → throwaway-branch SQL editor → run:
+
+```sql
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'public' ORDER BY table_name;
+-- Expected: alembic_version, audit_events, checkouts, job_progress, jobs, payment_holds, sagas
+
+SELECT indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY indexname;
+-- Expected: includes sagas_one_active_per_job_idx (the B23 partial unique index)
+
+SELECT version_num FROM alembic_version;
+-- Expected: 0001
+```
+
+🛑 **Pause:** look at every table in the dashboard's table editor. Confirm column types match §9.2.1. JSONB columns appear as `jsonb`. Timestamps appear as `timestamp with time zone`. If anything looks wrong, fix the `.up.sql` and re-test on a fresh throwaway branch (`neon branch delete` + `neon branch create` again — cheap).
+
+**Step 4 — Apply to Neon `main` (production)** (≈ 5 min)
+
+💻 With the throwaway branch verified, point `ALEMBIC_DATABASE_URL` at the Neon `main` direct endpoint:
+
+```bash
+$env:ALEMBIC_DATABASE_URL = "postgresql://...main-direct.../neondb?sslmode=require"
+alembic upgrade head
+```
+
+✅ Re-run the same dashboard SQL queries against Neon `main`. Same expected output.
+
+💻 Delete the throwaway Neon branch:
+
+```bash
+neon branch delete --project-id <laigo-project-id> --name migration-test-2026-MM-DD
+```
+
+**Step 5 — Wire boot-time schema verification** (≈ 30 min)
+
+Per §9.3.3, the app should refuse to boot if the deployed code expects a schema version different from what's in the DB. Implement `verify_schema()` in `scripts/db.py`:
+
+🔧 Add to `scripts/db.py`:
+
+```python
+_EXPECTED_SCHEMA_VERSION = "0001"  # bump this string each time a new alembic migration is added
+
+
+async def verify_schema() -> None:
+    """Refuse boot if DB schema version != expected. Catches deploy-order mistakes."""
+    if not is_postgres_backend():
+        return
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT version_num FROM alembic_version")
+    if row is None:
+        raise RuntimeError(
+            "alembic_version table empty — schema migrations never applied. "
+            "Run: ALEMBIC_DATABASE_URL=<direct DSN> alembic upgrade head"
+        )
+    current = row["version_num"]
+    if current != _EXPECTED_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Schema version mismatch: DB at {current}, app expects {_EXPECTED_SCHEMA_VERSION}. "
+            f"Run alembic upgrade head against the production DSN before redeploying."
+        )
+```
+
+🔧 In `Main.py` lifespan, immediately after `init_pool()`:
+
+```python
+from .db import init_pool, close_pool, is_postgres_backend, verify_schema
+await init_pool()
+await verify_schema()  # ← NEW: refuse boot on schema mismatch
+```
+
+✅ Verify: with `DB_BACKEND=postgres` and DATABASE_URL pointing at Neon `main` (now at revision `0001`), run `uvicorn Main:app` — should boot cleanly with `INFO` log "DB pool initialized." If you intentionally bump `_EXPECTED_SCHEMA_VERSION` to `"9999"` for a test, boot should fail with the mismatch error.
+
+📦 **Commit checkpoint 3:** "Phase B step 5 — boot-time schema version check added; refuses boot on alembic_version mismatch."
+
+**Step 6 — Render pre-deploy hook** (≈ 15 min, only when ready to deploy to Render)
+
+Render lets you configure a "pre-deploy command" that runs before the web service starts. This is where alembic should live in production — never bundled with app boot.
+
+🛑 **Don't do this until you're ready for Phase F.** Phase B's job is to prove the schema works against Neon. The Render pre-deploy hook is configured when we actually want it to run on every deploy.
+
+When ready (Phase F): Render dashboard → laigo service → Settings → Build & Deploy → **Pre-deploy command**:
+
+```bash
+ALEMBIC_DATABASE_URL=$DATABASE_URL_DIRECT alembic upgrade head
+```
+
+(Where `DATABASE_URL_DIRECT` is a separate Render env var pointing at the Neon **direct** endpoint, since alembic needs session mode.)
+
+**Phase B exit criteria:**
+- ✅ `alembic upgrade head` runs cleanly against a throwaway Neon branch.
+- ✅ All six tables + indices + extensions present per §9.2.1.
+- ✅ `alembic upgrade head` runs cleanly against Neon `main`.
+- ✅ Throwaway Neon branch deleted.
+- ✅ `verify_schema()` shipped + wired into lifespan.
+- ✅ Phase B git branch merged to git `main`.
+- 📦 §0 status snapshot updated; §9.6 progress dashboard updated.
+
+---
+
+#### 9.5.C Phase C — Checkout state to Postgres (≈2 days)
+
+**Goal:** `checkout_store.{load, save, update, read_order_list}` keeps its exact public API; internals become DB queries when `DB_BACKEND=postgres`. The saga is untouched. Per-job locks become Postgres advisory locks. The B23 partial unique index becomes the authoritative race-condition defense.
+
+**Prerequisites:**
+- ✅ Phase B complete (schema deployed, `verify_schema()` wired).
+- ✅ Neon `dev` branch created (needed for local-against-Postgres dev — see §9.3.11.9).
+- 🛑 **Fresh git branch:** `git checkout -b phase-c-checkout-store-pg`.
+
+**Step 1 — Create `checkout_store_pg.py` alongside the existing module** (≈ 4 hours)
+
+Don't edit `checkout_store.py` in place. Add `scripts/checkout/checkout_store_pg.py` with the same public surface. The dispatcher (Step 2) chooses one at import time based on `DB_BACKEND`. This keeps the JSON path runnable until Phase F.
+
+🔧 Public surface mirror (must match `checkout_store.py` exactly):
+
+```python
+# scripts/checkout/checkout_store_pg.py
+async def load(job_id: str) -> Optional[dict]: ...
+async def save(job_id: str, state: dict) -> None: ...
+async def update(job_id: str, partial: dict) -> dict: ...
+def read_order_list(job_id: str) -> dict: ...   # stays filesystem-backed — see §9.2.6
+```
+
+🔧 `save()` implementation maps to two table inserts: one row in `checkouts` (the quote-time row) and one row in `sagas` (the saga lifecycle row). The split mirrors the schema design from §9.2.1 — `checkouts` is the quote artifact, `sagas` is the run.
+
+🔧 `update()` uses Pattern 2 from §9.2.5 (single-transaction read-modify-write with `SELECT ... FOR UPDATE`). The asyncpg.Lock that `checkout_store.py` uses today disappears entirely — Postgres' row-level lock handles it.
+
+🔧 `load()` is a single `SELECT * FROM sagas WHERE job_id=$1 ORDER BY initiated_at DESC LIMIT 1` joined to the latest checkouts row. Returns the merged dict.
+
+🔧 `read_order_list()` stays **unchanged** — `order_list.json` is an artifact written by the mosaic pipeline (see §9.2.6). Importable from `checkout_store_pg.py` directly: `from .checkout_store import read_order_list`.
+
+**Step 2 — Add the dispatcher** (≈ 30 min)
+
+🔧 New file `scripts/checkout/checkout_store_dispatch.py`:
+
+```python
+"""Resolves checkout_store to the correct backend at import time.
+
+DB_BACKEND=json (default): re-exports the existing checkout_store module.
+DB_BACKEND=postgres:       re-exports checkout_store_pg.
+
+The dispatch happens ONCE at import time. Lifespan reads env once; the rest
+of the codebase imports from this module so callers don't branch.
+"""
+import os
+
+if os.environ.get("DB_BACKEND", "json").lower() == "postgres":
+    from .checkout_store_pg import load, save, update, read_order_list  # noqa: F401
+else:
+    from .checkout_store import load, save, update, read_order_list  # noqa: F401
+```
+
+🔧 Update every caller to import from the dispatcher instead of the concrete module:
+
+- `scripts/checkout/saga.py` — change `from . import checkout_store` to `from . import checkout_store_dispatch as checkout_store`.
+- `scripts/checkout/router.py` — same change.
+- `scripts/checkout/debug_router.py` — same change.
+
+✅ Verify: `grep -rn "from .checkout_store import\|from . import checkout_store" scripts/checkout/` returns only the dispatcher line.
+
+📦 **Commit checkpoint 1:** "Phase C step 1-2 — checkout_store_pg.py added (no callers yet); dispatch module routes via DB_BACKEND."
+
+**Step 3 — B23 partial unique index race handling** (≈ 1 hour)
+
+Today's B23 fix is application-level (router checks for an active saga before insert). With the partial unique index `sagas_one_active_per_job_idx` enforcing at the DB layer, the application check becomes redundant AND a UniqueViolationError needs to translate to the existing 422 response.
+
+🔧 In `scripts/checkout/router.py` (or wherever the saga INSERT lives in `checkout_store_pg.save`):
+
+```python
+from asyncpg.exceptions import UniqueViolationError
+
+try:
+    await checkout_store.save(job_id, initial_state)
+except UniqueViolationError as exc:
+    # B23: another non-terminal saga already exists for this job_id.
+    # The partial unique index enforces this at the DB level — the previous
+    # application-level check is redundant in DB_BACKEND=postgres mode but
+    # left in place for DB_BACKEND=json compatibility.
+    raise HTTPException(status_code=422, detail={
+        "error": "An active checkout already exists for this job_id",
+        "code": "ACTIVE_CHECKOUT_EXISTS",
+    })
+```
+
+🔧 The application-level check stays in place for `DB_BACKEND=json` (where there's no DB index to enforce it). Both paths produce the same 422 to the customer. The two implementations converge after Phase F's JSON-path deletion.
+
+**Step 4 — Per-job advisory lock for write coordination** (≈ 2 hours)
+
+Today: `checkout_store._locks: dict[str, asyncio.Lock]` is acquired inside `update()`. Works for one FastAPI process. Breaks for multiple.
+
+With Postgres: drop `_locks` entirely from `checkout_store_pg.py`. Use `pg_advisory_xact_lock(hashtext($1))` inside the transaction. Pattern 3 from §9.2.5 is the template.
+
+🔧 Inside `checkout_store_pg.update()`:
+
+```python
+async with pool.acquire() as conn:
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", job_id)
+        # Now this transaction is the only one mutating this job_id's saga.
+        row = await conn.fetchrow("SELECT * FROM sagas WHERE job_id=$1 FOR UPDATE", job_id)
+        ...  # merge partial, UPDATE, return merged dict
+```
+
+✅ Verify: stress-test locally with 100 concurrent `update()` calls for the same `job_id`. All should serialize cleanly; no `UniqueViolationError`, no lost updates.
+
+📦 **Commit checkpoint 2:** "Phase C step 3-4 — B23 enforced by partial unique index; pg_advisory_xact_lock replaces _locks for DB backend."
+
+**Step 5 — Test against the Neon `dev` branch end-to-end** (≈ 4 hours)
+
+🛑 **You need the Neon `dev` branch by this point.** If you haven't created it, do it now (`neon branch create dev --parent main`). Save its **pooler** DSN into `.env.local` (gitignored — confirm with `git status` after touching it). Phase C is the first phase that requires local Postgres iteration speed.
+
+💻 Local run with Postgres backend:
+
+```bash
+$env:DB_BACKEND = "postgres"
+$env:DATABASE_URL = "postgresql://...dev-pooler.../neondb?sslmode=require"
+uvicorn Main:app --reload
+```
+
+✅ Smoke test the saga flow via Swagger UI at http://127.0.0.1:8000/docs:
+1. `POST /generate` with an image → wait for job complete.
+2. `POST /jobs/{job_id}/checkout/quote` → confirm 200 with allocation breakdown.
+3. `POST /jobs/{job_id}/checkout/confirm` → confirm 200 with checkout_id, saga starts.
+4. `GET /jobs/{job_id}/checkout/{checkout_id}/status` → poll until saga_status reaches a terminal state.
+5. In Neon SQL editor: `SELECT * FROM sagas WHERE job_id=$1`. Verify state matches what `/status` returned.
+
+🛑 **CRITICAL:** the saga itself MUST be in TEST mode for this — never run Phase C verification against `sk_live_` keys. The L0–L5 gate will refuse this automatically if not configured, but double-check `GET /checkout/gate` returns `mode=test`.
+
+**Step 6 — Verify B23 enforcement works in practice** (≈ 30 min)
+
+✅ Race-test B23 with two concurrent `/confirm` calls for the same `job_id` from two different checkout_ids:
+
+```bash
+# Generate quote A, generate quote B (both for same job_id, different checkout_ids).
+# Then fire both confirms back-to-back. Expected:
+# - First /confirm: 200, saga starts.
+# - Second /confirm: 422 with ACTIVE_CHECKOUT_EXISTS (NOT a 500).
+```
+
+If the second `/confirm` returns 500 or wins the race, the partial unique index isn't doing its job — check the index exists with `\d sagas` in psql.
+
+📦 **Commit checkpoint 3:** "Phase C step 5-6 — end-to-end saga verified against Neon dev branch; B23 race-tested."
+
+**Phase C exit criteria:**
+- ✅ `checkout_store_pg.py` has the full public API.
+- ✅ Dispatcher routes via `DB_BACKEND` at import time.
+- ✅ End-to-end saga in TEST mode runs cleanly against Neon dev branch.
+- ✅ `_locks` dict is gone from `checkout_store_pg.py`; advisory locks replace it.
+- ✅ B23 race produces 422, not 500.
+- ✅ Phase C git branch merged to git `main`.
+- 📦 §0 + §9.6 updated.
+
+**Phase C non-goal:** The mosaic pipeline (`Main.py` `app.state.jobs` etc.) stays JSON-backed at the end of Phase C. That's Phase D's job. The split lets us validate the simpler half (checkout) first.
+
+---
+
+#### 9.5.D Phase D — Mosaic job lifecycle to Postgres (≈2 days)
+
+**Goal:** `app.state.jobs / queue_order / active_jobs / jobs_lock / progress_lock / queue_lock` go away. Replaced by `jobs` and `job_progress` table rows + Postgres locks. Worker subprocess unchanged (still writes `.progress` file; scheduler thread mirrors to DB).
+
+**Prerequisites:**
+- ✅ Phase C complete (checkout side validated; the DB path is no longer hypothetical).
+- 🛑 **Fresh git branch:** `git checkout -b phase-d-mosaic-lifecycle-pg`.
+
+**Step 1 — Add `jobs_store_pg.py` mirroring `Main.py`'s in-memory shape** (≈ 6 hours)
+
+Today `Main.py` mutates `app.state.jobs[job_id] = {...}` directly. Centralize all access through a new module:
+
+🔧 New `scripts/jobs_store_pg.py`:
+
+```python
+async def insert_job(job_id: str, image_path: str, settings: dict) -> None: ...
+async def get_job(job_id: str) -> Optional[dict]: ...
+async def list_queued() -> list[dict]: ...                    # for scheduler
+async def list_running() -> list[dict]: ...                   # for active_jobs count
+async def mark_running(job_id: str) -> None: ...
+async def mark_complete(job_id: str, manifest: dict) -> None: ...
+async def mark_failed(job_id: str, error: str) -> None: ...
+async def mark_timed_out(job_id: str) -> None: ...
+async def write_progress(job_id: str, pct: float) -> None: ...
+async def cleanup_expired() -> list[str]: ...                 # returns job_ids whose dirs to rm
+```
+
+🔧 Each function uses Pattern 2 (single-tx RMW with `FOR UPDATE` on the row). `cleanup_expired()` runs a single DELETE...RETURNING to get the deleted job_ids, then the cleanup thread `shutil.rmtree(outputs/{job_id})` outside the transaction.
+
+**Step 2 — Add `jobs_store_dispatch.py`** (≈ 30 min)
+
+Mirror Phase C's dispatcher pattern:
+
+🔧 New `scripts/jobs_store_dispatch.py`:
+
+```python
+import os
+if os.environ.get("DB_BACKEND", "json").lower() == "postgres":
+    from .jobs_store_pg import *  # noqa: F401, F403
+else:
+    from .jobs_store_json import *  # noqa: F401, F403  ← create this as a wrapper around app.state.jobs
+```
+
+🔧 Extract today's `app.state.jobs` mutations from `Main.py` into a new `scripts/jobs_store_json.py` module with the SAME public API as `jobs_store_pg.py`. This is the larger refactor.
+
+**Step 3 — Worker progress file → DB scheduler poll** (≈ 2 hours)
+
+Today the worker subprocess writes `.progress` files; the main process reads them on demand. With the DB backend, the scheduler thread reads `.progress` and mirrors to `job_progress` (or a `progress_pct` column on `jobs`).
+
+🔧 Scheduler thread tick (every loop iteration):
+
+```python
+for running_job in await jobs_store.list_running():
+    pct = read_progress_file(running_job["job_id"])
+    if pct is not None and pct != running_job["progress_pct"]:
+        await jobs_store.write_progress(running_job["job_id"], pct)
+```
+
+🔧 Worker stays untouched. It doesn't need a DB connection — that's the cleaner design and avoids putting asyncpg into the subprocess (see §9.3.11.10).
+
+**Step 4 — Cleanup thread** (≈ 1 hour)
+
+🔧 Replace `app.state.jobs` iteration + manual TTL check with:
+
+```python
+expired_job_ids = await jobs_store.cleanup_expired()
+for jid in expired_job_ids:
+    shutil.rmtree(OUTPUT_DIR / jid, ignore_errors=True)
+```
+
+**Step 5 — Queue draining** (≈ 1 hour)
+
+Today: `queue.Queue` decouples HTTP intake from the executor. With DB backend, the scheduler queries `SELECT job_id FROM jobs WHERE status='queued' ORDER BY queued_at LIMIT 1 FOR UPDATE SKIP LOCKED` to safely dequeue across multiple workers.
+
+🔧 Scheduler tick (DB backend):
+
+```python
+async with pool.acquire() as conn:
+    async with conn.transaction():
+        row = await conn.fetchrow("""
+            SELECT job_id FROM jobs WHERE status='queued'
+            ORDER BY queued_at LIMIT 1 FOR UPDATE SKIP LOCKED
+        """)
+        if row is None:
+            return  # nothing to do
+        await conn.execute("UPDATE jobs SET status='running', started_at=NOW() WHERE job_id=$1", row["job_id"])
+# Submit to executor outside the transaction
+app.state.executor.submit(run_job, row["job_id"], ...)
+```
+
+`FOR UPDATE SKIP LOCKED` is the multi-worker-safe pattern — if worker A grabbed the row, worker B's query skips it without blocking.
+
+**Step 6 — End-to-end test** (≈ 2 hours)
+
+✅ With `DB_BACKEND=postgres`, run a full mosaic generation + checkout against Neon dev branch. Verify:
+- `jobs` row created on `POST /generate`.
+- Status transitions visible via `SELECT status, ... FROM jobs WHERE job_id=$1`.
+- `job_progress` updates visible.
+- After cleanup TTL: row deleted AND output dir removed.
+
+📦 **Commit checkpoint:** "Phase D — mosaic lifecycle on Postgres; queue + progress + cleanup migrated."
+
+**Phase D exit criteria:**
+- ✅ `app.state.jobs / queue_order / active_jobs / *_lock` removed in `DB_BACKEND=postgres` path.
+- ✅ Worker subprocess unchanged; scheduler mirrors `.progress` to DB.
+- ✅ `FOR UPDATE SKIP LOCKED` proven to handle concurrent workers.
+- ✅ Cleanup deletes both DB rows and output dirs.
+- ✅ Phase D git branch merged to git `main`.
+- 📦 §0 + §9.6 updated.
+
+**Optional after Phase D:** raise `MAX_WORKERS` above 1. With Postgres-coordinated locks, multi-worker becomes safe. Memory requirement: ~500MB per worker (see CLAUDE.md CPU section). Render Standard tier or higher only.
+
+---
+
+#### 9.5.E Phase E — Resume-on-startup + reconciliation (≈1 day)
+
+**Goal:** The behavior the entire migration exists for. Every restart routes orphaned sagas. A periodic task reconciles stripe holds against the live API. The L6 audit log (§2) finds its writer.
+
+**Prerequisites:**
+- ✅ Phases B+C+D complete (DB is authoritative for state).
+- 🛑 **Fresh git branch:** `git checkout -b phase-e-resume-reconcile`.
+
+**Step 1 — Implement `resume_in_flight_sagas`** (≈ 2 hours)
+
+The reference implementation is in §9.2.7 verbatim. Copy it to `scripts/checkout/saga_resume.py`.
+
+🔧 Wire into `Main.py` lifespan AFTER `init_pool()` and `verify_schema()`, BEFORE the executor + scheduler start:
+
+```python
+await init_pool()
+await verify_schema()
+if is_postgres_backend():
+    from .checkout.saga_resume import resume_in_flight_sagas
+    await resume_in_flight_sagas()
+# … then payment registry, gate, executor, scheduler …
+```
+
+✅ Verify routing decisions for each saga_status case using SQL-injected test rows:
+
+| Test setup | Expected outcome |
+|---|---|
+| `INSERT ... saga_status='initiated'` | `resume_in_flight_sagas` marks it FAILED with reason "abandoned by process restart" |
+| `INSERT ... saga_status='stripe_held', payment_hold_id='pi_test_...'` | provider.cancel called; saga marked FAILED on success, MANUAL_REVIEW on cancel failure |
+| `INSERT ... saga_status='orders_placed', brickowl_order_ids=['ord_1']` | marked MANUAL_REVIEW with full runbook in manual_review_reason |
+
+🛑 **Use the Stripe TEST API for the `stripe_held` case.** Never resume-cancel against `sk_live_` keys during testing.
+
+**Step 2 — Implement orphan-hold reconciliation task** (≈ 3 hours)
+
+🔧 New `scripts/checkout/reconcile.py`:
+
+```python
+async def reconcile_orphan_holds() -> None:
+    """Every 5 minutes: ask Stripe about old uncaptured holds; release stranded ones."""
+    pool = get_pool()
+    rows = await pool.fetch("""
+        SELECT ph.hold_id, ph.amount_authorized_cents, ph.created_at,
+               s.saga_status, s.checkout_id, s.job_id
+        FROM payment_holds ph
+        LEFT JOIN sagas s ON s.payment_hold_id = ph.hold_id
+        WHERE ph.last_known_status = 'requires_capture'
+          AND ph.last_reconciled_at < NOW() - INTERVAL '1 hour'
+        ORDER BY ph.created_at
+    """)
+    provider = payment_registry.get_active()
+    for row in rows:
+        try:
+            await _reconcile_one(row, provider, pool)
+        except Exception as exc:
+            logger.error(f"reconcile: hold {row['hold_id']} failed: {exc}")
+```
+
+Decision matrix inside `_reconcile_one`:
+
+| Saga status | Stripe status | Action |
+|---|---|---|
+| terminal (`payment_captured`, `compensated`, `failed`, `manual_review`) | `requires_capture` | Stripe still has the hold — cancel it; update payment_holds last_known_status |
+| `stripe_held` AND saga older than 1hr (saga itself orphaned, didn't restart-recover) | `requires_capture` | mark saga MANUAL_REVIEW (something prevented resume from running); leave Stripe alone for operator |
+| any | `succeeded` (already captured by us) | update payment_holds.last_known_status='succeeded'; no action |
+| any | `canceled` | update payment_holds.last_known_status='canceled'; no action |
+| any | error from Stripe (network, API key issue) | log + retry next tick |
+
+🔧 Start the task from `Main.py` lifespan after the scheduler is up, holding a strong reference per the C1/B24 pattern:
+
+```python
+import asyncio
+
+_reconcile_task: Optional[asyncio.Task] = None
+
+if is_postgres_backend():
+    async def _reconcile_loop():
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await reconcile_orphan_holds()
+            except Exception as exc:
+                logger.error(f"reconcile loop iteration failed: {exc}")
+    _reconcile_task = asyncio.create_task(_reconcile_loop())  # strong reference
+```
+
+Same GC-resilience pattern as `_running_sagas` (C1) and `_sweeper_task` (B24). Don't lose the reference.
+
+**Step 3 — Implement L6 `audit.emit`** (≈ 3 hours)
+
+This is L6 from §2. It's been deferred until Postgres exists; Phase E is the right moment.
+
+🔧 New `scripts/checkout/audit.py` per the §2.1 envelope schema:
+
+```python
+async def emit(event: str, *, request_id: Optional[str] = None,
+               actor: Optional[dict] = None, subject: Optional[dict] = None,
+               data: Optional[dict] = None) -> None:
+    """Write an audit event to audit_events table. Never raises — failures
+    log CRITICAL and are swallowed (audit must never fail the request)."""
+    try:
+        pool = get_pool()
+        await pool.execute("""
+            INSERT INTO audit_events (event, ts, request_id, job_id, checkout_id, actor, data)
+            VALUES ($1, NOW(), $2, $3, $4, $5::jsonb, $6::jsonb)
+        """,
+        event, request_id,
+        (subject or {}).get("job_id"),
+        (subject or {}).get("checkout_id"),
+        json.dumps(actor or {}),
+        json.dumps(data or {}))
+    except Exception as exc:
+        logger.critical(f"AUDIT EMIT FAILED for event={event}: {exc}", exc_info=True)
+```
+
+🔧 Replace the `logger.warning(...)` call in `dependencies.require_checkout_gate_open` with `audit.emit("gate.confirm_rejected", ...)` per the CLAUDE.md design note. This is the first call site; the rest of §2.2's event vocabulary gets wired one event at a time over the following commits (track in `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §2` checklist).
+
+**Step 4 — End-to-end recovery test** (≈ 2 hours)
+
+✅ Force a restart mid-saga and verify recovery:
+1. Submit a `/confirm` in TEST mode → saga reaches `stripe_held` state.
+2. While the saga is in `stripe_held`, kill the uvicorn process (`Ctrl+C` or `taskkill /F /IM python.exe`).
+3. Restart `uvicorn Main:app`.
+4. Lifespan boot should log `[resume] examined 1 in-flight sagas`.
+5. `SELECT * FROM sagas WHERE checkout_id='...'` should show `saga_status='failed'` with reason "Resumed after restart; hold released".
+6. Stripe Dashboard → Payments → the test hold should show `canceled`.
+
+📦 **Commit checkpoint:** "Phase E — saga resume + orphan reconciliation + L6 audit emit shipped."
+
+**Phase E exit criteria:**
+- ✅ `resume_in_flight_sagas()` routes every documented saga_status.
+- ✅ `reconcile_orphan_holds()` runs every 5min, held by strong reference, idempotent.
+- ✅ `audit.emit()` works against `audit_events`; first call site (`gate.confirm_rejected`) wired.
+- ✅ Mid-saga restart test passes.
+- ✅ Phase E git branch merged to git `main`.
+- 📦 §0 + §9.6 updated.
+
+---
+
+#### 9.5.F Phase F — Cutover (≈½ day, plus 1-week observation window)
+
+**Goal:** Flip the production switch. `DB_BACKEND=postgres` on Render. Validate. Wait one week. Delete the JSON code path.
+
+**Prerequisites:**
+- ✅ Phases B+C+D+E complete on the git `main` branch.
+- ✅ Render env has `DATABASE_URL` set (Neon `main` pooler DSN).
+- ✅ Render env has `DATABASE_URL_DIRECT` set (Neon `main` direct DSN, for alembic).
+- ✅ Render pre-deploy hook configured per §9.5.B Step 6.
+- 🛑 **Schedule the cutover during low-traffic hours.** Pre-launch this is moot, but make it a habit.
+- 🛑 **Upgrade Neon project to Launch tier ($19/mo) in the same window.** Free tier autosuspend would cold-start the first `/status` poll of the day. Per §9.4 step 7.
+
+**Step 1 — Deploy with `DB_BACKEND=json` first** (≈ 15 min)
+
+🛑 Critical sequencing: do NOT flip `DB_BACKEND` and deploy at the same time.
+
+💻 In Render dashboard, deploy the current git `main` (which has Phases B-E code AND defaults to `DB_BACKEND=json`). This proves the new code coexists with the old behavior. The DB pool initializes (pre-deploy hook runs `alembic upgrade head`), but no app code reads from it.
+
+✅ Verify on the live URL:
+- `GET /health` returns 200.
+- `GET /` returns the existing landing.
+- `POST /generate` with a test image succeeds (mosaic pipeline still JSON-backed).
+- `GET /checkout/gate` returns `mode=test` (assuming TEST keys; live keys would be `mode=live`).
+
+**Step 2 — Smoke test the DB pool is open even though unused** (≈ 5 min)
+
+💻 SSH/Render shell: `psql $DATABASE_URL -c "SELECT 1"` from a Render shell tab (if accessible). Otherwise: trust the lifespan log line `"DB pool initialized (Neon Postgres backend active)"` — wait, that log line only appears when `DB_BACKEND=postgres`. With `DB_BACKEND=json`, the line is `"DB pool skipped (DB_BACKEND=json; Phase F not yet flipped)"`.
+
+✅ Confirm the "DB pool skipped" log line appears. That confirms `DB_BACKEND=json` is the active path.
+
+**Step 3 — Flip the switch** (≈ 5 min)
+
+💻 Render dashboard → laigo service → Environment → `DB_BACKEND=postgres`. Save. Render restarts the service.
+
+✅ Watch the deploy logs:
+- `"DB pool initialized (Neon Postgres backend active)"` ← MUST appear
+- `verify_schema()` success ← MUST appear (proves alembic_version matches)
+- `[resume] examined 0 in-flight sagas` ← expected (empty DB; pre-launch)
+- Service comes up healthy.
+
+🛑 **If anything in the lifespan errors,** flip `DB_BACKEND=json` immediately, redeploy, investigate offline. The deploy halts on lifespan failure — Render will report the service as unhealthy.
+
+**Step 4 — End-to-end production smoke** (≈ 30 min)
+
+✅ Run the full flow against the live URL (still TEST mode, no real money):
+1. `POST /generate` with a real image → job completes.
+2. `POST /jobs/{job_id}/checkout/quote` → 200 with allocation.
+3. `POST /jobs/{job_id}/checkout/confirm` → 200, saga starts.
+4. `GET /jobs/{job_id}/checkout/{checkout_id}/status` → poll to terminal.
+5. Neon SQL editor: `SELECT * FROM jobs WHERE job_id='...'` and `SELECT * FROM sagas WHERE job_id='...'`. Confirm rows exist.
+
+**Step 5 — Upgrade to Neon Launch tier** (≈ 5 min, in same window)
+
+💻 Neon dashboard → laigo project → Billing → upgrade to Launch ($19/mo). Confirms autosuspend OFF, multi-branch limit raised.
+
+✅ Verify the project status badge changes to "Launch."
+
+**Step 6 — One-week observation window** (calendar)
+
+🛑 **Do NOT delete the JSON code path yet.** Leave the dispatchers + `checkout_store.py` / `jobs_store_json.py` in place. Rollback to JSON must remain a single-env-var flip for one week.
+
+Daily for 7 days:
+- Check `SELECT COUNT(*) FROM sagas WHERE saga_status='manual_review' AND last_transition_at > NOW() - INTERVAL '1 day'`.
+- Check Render error log for any `verify_schema` mismatches or pool exhaustion.
+- Check Neon dashboard for slow queries or connection-cap warnings.
+
+If any of those flare: roll back to `DB_BACKEND=json`, file the issue, fix offline, re-attempt cutover.
+
+**Step 7 — Delete the JSON code path** (≈ 1 hour, after 7 clean days)
+
+🔧 Once 7 consecutive days have passed without incident:
+- Delete `scripts/checkout/checkout_store.py` (the JSON impl).
+- Delete `scripts/checkout/checkout_store_dispatch.py` (dispatcher).
+- Delete `scripts/jobs_store_json.py`.
+- Delete `scripts/jobs_store_dispatch.py`.
+- Rename `scripts/checkout/checkout_store_pg.py` → `scripts/checkout/checkout_store.py`.
+- Rename `scripts/jobs_store_pg.py` → `scripts/jobs_store.py`.
+- Update all import sites to drop the dispatch layer.
+- Remove the `DB_BACKEND` env var from `.env` and Render config.
+- Remove `is_postgres_backend()` from `scripts/db.py` (no longer needed; pool is always required).
+- Remove `init_pool()`'s no-op-when-json branch.
+- Update CLAUDE.md to drop `DB_BACKEND` from the config table.
+
+🔧 Update `Main.py` lifespan to require pool on boot (no graceful skip).
+
+📦 **Commit checkpoint (separate commit, ≥7 days after Step 3):** "Phase F cleanup — delete DB_BACKEND dispatcher, JSON backend, no-op branches."
+
+**Phase F exit criteria:**
+- ✅ Live service running on `DB_BACKEND=postgres` for ≥7 days.
+- ✅ Neon Launch tier active.
+- ✅ JSON path deleted in a follow-up commit.
+- ✅ `DB_BACKEND` env var removed everywhere.
+- 📦 §0 status updated to "Phase 9 complete."
+- 📦 Project memory file updated.
+- 📦 Audit FMEA #3 (saga crashes mid-flight, RPN 450) closed.
+
+**Phase F rollback (any time before Step 7):**
+- Render dashboard → set `DB_BACKEND=json` → restart. The JSON path resumes immediately. Any rows already in Postgres are orphaned (pre-launch, this is fine — recreate the database from scratch on the next attempt).
+
+---
+
+### 9.6 Current progress dashboard
+
+**Last updated:** 2026-05-16.
+**Single-pane status:** everything-you-need-to-know in one table. Update this when you complete a phase OR a sub-step.
+
+#### 9.6.1 Phase-by-phase status
+
+| Phase | Status | Owner | Notes |
+|---|---|---|---|
+| A — Provision & connect | ✅ Shipped 2026-05-16 | Grant | Neon `laigo` / PG 17.8 / us-east-1 / ARM64. Pooler DSN in `.env.secrets`. `scripts/db.py` + `Main.py` lifespan + smoke test. asyncpg 0.31 + alembic 1.18 installed locally via `--trusted-host` workaround. Neon `dev` branch deferred to Phase C. |
+| B — Schema + alembic | 🟦 Ready to start | Grant | All prerequisites met. Estimated 1 engineer-day. Playbook: §9.5.B. |
+| C — Checkout state to Postgres | ⏸ Blocked by B | Grant | Estimated 2 days. Requires Neon `dev` branch (not yet created). Playbook: §9.5.C. |
+| D — Mosaic job lifecycle to Postgres | ⏸ Blocked by C | Grant | Estimated 2 days. Playbook: §9.5.D. Optional `MAX_WORKERS>1` follow-up requires Render Standard tier. |
+| E — Resume-on-startup + reconciliation | ⏸ Blocked by D | Grant | Estimated 1 day. The actual point of the migration. L6 audit emit ships here. Playbook: §9.5.E. |
+| F — Cutover | ⏸ Blocked by E | Grant | ≈½ day for the flip + 1 week observation + 1 hour cleanup. Triggers Neon Free→Launch tier change. Playbook: §9.5.F. |
+
+#### 9.6.2 Open user actions (operator decisions / external work)
+
+| # | Action | Phase trigger | Blocker level |
+|---|---|---|---|
+| U1 | Resolve corporate-proxy SSL cert root cause (so `pip install` works without `--trusted-host`) | Eventually | LOW — `--trusted-host` is a working bypass for now |
+| U2 | Create Neon `dev` branch (Neon dashboard → Branches → New Branch off `main`) | Phase C | MEDIUM — Phase C cannot run locally without it (Phase B doesn't need it) |
+| U3 | Configure Render pre-deploy hook for `alembic upgrade head` | Phase F | MEDIUM — Phase F cannot proceed without it |
+| U4 | Add `DATABASE_URL` + `DATABASE_URL_DIRECT` env vars to Render | Phase F | MEDIUM — Phase F prerequisite |
+| U5 | Upgrade Neon project Free → Launch ($19/mo) | Phase F (in same window as flag flip) | HIGH at cutover — autosuspend would cold-start the first customer poll |
+| U6 | Commit packaging strategy for Phase A scaffolding (no commits made yet during entire L0-L5 + Phase A work) | Whenever | LOW — work is local and reversible until committed |
+
+#### 9.6.3 Defect catalog interaction (which defects this migration resolves)
+
+The DB migration is the structural fix for several open defects. Phase rows show when each defect lands:
+
+| Defect | Resolved by | Mechanism |
+|---|---|---|
+| S1 (persistent state needed) | Phase C+D | Postgres replaces all in-memory state |
+| B11 (per-iteration saga history) | Phase C (optional — JSONB column on `sagas`) | `iterations` column accumulates per-iteration state if/when wanted |
+| B23 (same-job re-confirm race) | Phase C | `sagas_one_active_per_job_idx` partial unique index enforces at DB level |
+| B26 (orphaned saga state files) | Phase F | JSON files deleted entirely; rows have explicit TTL via cleanup |
+| B35 (non-atomic JSON file writes) | Phase F | JSON files gone |
+| B36 (semaphore-per-call concurrency) | Phase D+ | Once `MAX_WORKERS>1` is enabled, refactor to module-global semaphore is in scope |
+| H6 (registry reset on shutdown — already shipped) | n/a | Shipped 2026-05-16, but DB-backed registry is a future-proofing option not pursued |
+| H11 (saga state persistence beyond restart) | Phase E | resume_in_flight_sagas + reconcile |
+| H13 (orphan-hold reconciliation) | Phase E | reconcile_orphan_holds task |
+| H15 (audit log persistence) | Phase E | audit.emit writes to audit_events |
+| Audit FMEA #3 (saga crashes mid-flight, RPN 450) | Phase E | resume_in_flight_sagas |
+| Audit FMEA #5 (no operator dashboard) | Phase D+E | `docs/operator_sql.md` queries become possible |
+| Audit FMEA #16 (no reconciliation surface) | Phase E | reconcile_orphan_holds |
+| Audit FMEA #17 (orphan Stripe holds) | Phase E | reconcile_orphan_holds |
+
+#### 9.6.4 Risk register for in-flight migration
+
+| Risk | Phase | Mitigation already in place | Mitigation still needed |
+|---|---|---|---|
+| Schema bug discovered after deploy | B → F | Throwaway Neon branch test before applying to `main` | Hot-fix migration (forward-only) preferred over rollback |
+| Pool exhaustion under load | D+ | `max_size=10` headroom; `command_timeout=10s` | Bump to 20 if `MAX_WORKERS>1`; alert on `PoolExhausted` |
+| Neon outage during cutover | F | Pre-launch — no customer impact | Eventually: documented incident response |
+| `--trusted-host` install becomes habit | n/a | Documented as one-shot bypass | U1: solve root cert problem |
+| Engineer forgets `ALEMBIC_DATABASE_URL` setup | B-F | Documented in §9.5.B Step 3 + env.py error message | Shell alias / helper script |
+| `DB_BACKEND` flag left at `postgres` locally without DSN | C+ | `init_pool()` refuses boot with clear error | None additional needed |
+
+#### 9.6.5 What to read next when picking this up
+
+If you're returning to this work cold:
+
+1. Read the Terminology block at the top of §9 (Neon branch vs git branch).
+2. Read §9.6.1 to see where you are.
+3. Open the playbook for the next non-shipped phase (§9.5.B, etc.).
+4. Resolve any open user actions in §9.6.2 that block the next phase.
+5. Begin.
+
+Do not skip step 1 even on a quick return — the branch terminology is the single most common source of confusion in this migration.

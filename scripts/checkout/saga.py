@@ -590,12 +590,38 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
     try:
         state = await checkout_store.load(job_id) or {}
     except Exception as exc:
-        # State file unreadable — log and exit. /status will return whatever
-        # the last successful write left behind.
+        # B25: state unreadable (JSON corruption, asyncpg query failure,
+        # disk full, etc.). Without state we can't know what was placed —
+        # MANUAL_REVIEW with a verbose runbook is the only safe terminal
+        # state. The handler's contract (see docstring) says it MUST write
+        # a terminal state; the original code violated this by just logging.
         logger.critical(
             f"[saga] [{checkout_id}] TIMEOUT handler could not load state: {exc}. "
-            "State file may be corrupt; manual inspection required."
+            "State file may be corrupt; writing best-effort MANUAL_REVIEW."
         )
+        try:
+            await checkout_store.update(job_id, {
+                "saga_status": SagaStatus.MANUAL_REVIEW,
+                "manual_review_reason": (
+                    f"Saga timed out after {_SAGA_TIMEOUT_SECONDS}s AND state "
+                    f"load failed ({exc}). Operator must: "
+                    "(1) check Stripe dashboard for any hold under this job, "
+                    "(2) check BrickOwl and LEGO.com for any orders placed in "
+                    "the last hour, (3) reconcile manually."
+                ),
+                "error": f"Timeout + state load failure: {exc}",
+                "customer_message": ERROR_MESSAGES["manual_review"],
+            })
+        except Exception as write_exc:
+            # Inner write ALSO failed (state file permission, DB unreachable).
+            # Nothing more we can do — /status will return whatever the last
+            # successful write left behind, but at least the audit log shows
+            # both failures.
+            logger.critical(
+                f"[saga] [{checkout_id}] could not write fallback MANUAL_REVIEW "
+                f"after state-load failure: {write_exc}. /status is stuck on "
+                "the last persisted state until operator intervention."
+            )
         return
 
     last_status = state.get("saga_status")

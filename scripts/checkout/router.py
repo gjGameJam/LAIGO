@@ -37,6 +37,7 @@ from .models import (
     QuoteRequest, QuoteResponse, SellerAllocationResponse,
     ConfirmRequest, ConfirmResponse,
     CheckoutStatusResponse, AllocationResult,
+    SagaStatus,
 )
 from . import checkout_store, saga as saga_module
 from .clients import lego_client, brickowl_client, bricklink_client
@@ -237,7 +238,13 @@ async def confirm_checkout(
         "shipping_country": cached["shipping_country"],
         "shipping_zip": cached["shipping_zip"],
         "customer_email": cached["customer_email"],
-        "saga_status": "pending",
+        # B32: use SagaStatus.INITIATED here (not the literal "pending") so a
+        # /status poll arriving between this save and the saga's first
+        # checkpoint passes CheckoutStatusResponse Pydantic validation. The
+        # saga overwrites to INITIATED anyway in its first update, so this is
+        # behaviorally a no-op except that the brief window now serializes
+        # cleanly instead of 500-ing on a missing enum value.
+        "saga_status": SagaStatus.INITIATED.value,
         "brickowl_order_ids": [],
         "lego_order_id": None,
         # Provider-agnostic naming (L5). The Saga overwrites these once the
@@ -250,6 +257,11 @@ async def confirm_checkout(
         "payment_mode": None,
         "total_charged_cents": None,
         "error": None,
+        # B40: paired with `error` per the B12 contract (CLAUDE.md). Even though
+        # the initial save has no error, the field must be present so the
+        # audit-grep invariant ("every error-writing site has a customer_message")
+        # holds when this file is grepped.
+        "customer_message": None,
         "manual_review_reason": None,
         "completed_at": None,
     })

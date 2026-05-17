@@ -29,7 +29,19 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/checkout/saga.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(git add *)",
       "Bash(git reset *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "PowerShell($ErrorActionPreference='Stop'; & '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"import ast, pathlib; [ast.parse\\(pathlib.Path\\(p\\).read_text\\(encoding='utf-8'\\)\\) for p in ['scripts/db.py','scripts/Main.py']]; print\\('AST OK'\\)\")",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"import asyncpg; print\\('asyncpg', asyncpg.__version__\\)\" 2>&1)",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m pip install 'asyncpg~=0.29' 'alembic~=1.13' 2>&1 | Select-Object -Last 5)",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' --version)",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m pip install asyncpg alembic 2>&1 | Select-Object -Last 8)",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"import ast, sys, pathlib; src = pathlib.Path\\('scripts/db.py'\\).read_text\\(encoding='utf-8'\\); tree = ast.parse\\(src\\); imports = [n for n in ast.walk\\(tree\\) if isinstance\\(n,\\(ast.Import,ast.ImportFrom\\)\\)]; print\\('imports:', len\\(imports\\)\\); [print\\('  from', n.module or '.', 'import', [a.name for a in n.names]\\) for n in imports if isinstance\\(n,ast.ImportFrom\\)]\")",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"import ast, pathlib; src=pathlib.Path\\('scripts/Main.py'\\).read_text\\(encoding='utf-8'\\); tree=ast.parse\\(src\\); names=set\\(\\); [names.add\\(n.id\\) for n in ast.walk\\(tree\\) if isinstance\\(n,ast.Name\\)]; print\\('init_pool used:', 'init_pool' in names\\); print\\('close_pool used:', 'close_pool' in names\\); print\\('is_postgres_backend used:', 'is_postgres_backend' in names\\)\")",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"import ast, pathlib; [ast.parse\\(pathlib.Path\\(p\\).read_text\\(encoding='utf-8'\\)\\) for p in ['scripts/db.py','scripts/Main.py']]; print\\('AST OK'\\)\")",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m pip install --upgrade pip 2>&1 | Select-Object -Last 8)",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org 'asyncpg~=0.29' 'alembic~=1.13' 2>&1 | Select-Object -Last 10)",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"import asyncpg, alembic; print\\('asyncpg', asyncpg.__version__\\); print\\('alembic', alembic.__version__\\)\")",
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m scripts.smoke_test_db 2>&1)"
     ]
   },
   "enabledPlugins": {}

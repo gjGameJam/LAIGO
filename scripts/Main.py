@@ -101,6 +101,24 @@ async def lifespan(app: FastAPI):
     log.info("Starting LAIGO API...")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # DB POOL (Phase 9 — Neon Postgres migration).
+    #
+    # init_pool() is a no-op when DB_BACKEND != postgres (default 'json'), so
+    # local dev without a provisioned Neon project still boots. When
+    # DB_BACKEND=postgres, the call refuses to boot on missing/malformed
+    # DATABASE_URL or wrong endpoint (direct vs pooler). Pool must exist
+    # BEFORE payment registration, gate computation, or any router can serve
+    # — checkout_store and (eventually) job lifecycle acquire from it.
+    # See docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.2.4.
+    # ─────────────────────────────────────────────────────────────────────────
+    from .db import init_pool, close_pool, is_postgres_backend
+    await init_pool()
+    if is_postgres_backend():
+        log.info("DB pool initialized (Neon Postgres backend active)")
+    else:
+        log.info("DB pool skipped (DB_BACKEND=json; Phase F not yet flipped)")
+
+    # ─────────────────────────────────────────────────────────────────────────
     # PAYMENT PROVIDER REGISTRATION (Layer 5).
     #
     # Construct + register the active PaymentProvider BEFORE computing the
@@ -159,9 +177,16 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Checkout gate misconfigured — see CRITICAL log line above")
 
     stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
+    # B39: use the canonical key_mode helper so this defense-in-depth check
+    # agrees with gate.py and stripe_provider.py. The previous lenient
+    # `startswith("sk_live_")` could mis-classify a too-short malformed key as
+    # "live" (StripeProvider's strict ≥8-char check would have rejected it
+    # entirely). With the canonical helper, all three layers (L1 boot,
+    # L0 gate, L5 provider) classify keys identically.
     # is_truthy (not raw truthiness): RENDER="false"/"0"/"no" must NOT count
     # as "we're on Render." Defect D1 in CHECKOUT_AUDIT.md §10.
-    if stripe_key.startswith("sk_live_") and not is_truthy(os.environ.get("RENDER")):
+    from .checkout.payment.key_format import key_mode as _stripe_key_mode
+    if _stripe_key_mode(stripe_key) == "live" and not is_truthy(os.environ.get("RENDER")):
         log.critical(
             "Live Stripe key (sk_live_...) detected outside the Render environment. "
             "This is never allowed — use sk_test_... for local development. "
@@ -230,6 +255,28 @@ async def lifespan(app: FastAPI):
         log.info("Executor shut down cleanly")
     except Exception as e:
         log.error(f"Error during shutdown: {e}", exc_info=True)
+
+    # H6 (B17 followup): clear the single-active payment provider registry on
+    # shutdown so a second lifespan run in the same Python process (TestClient
+    # used twice, future hot-reload tooling) doesn't hit the B17 replacement
+    # guard and crash startup. Production today (uvicorn child-per-lifespan)
+    # is unaffected either way; this just removes a latent test-framework
+    # crash. The function is safe in production: it clears a module-level
+    # `_active` and nothing else.
+    try:
+        from .checkout.payment import registry as payment_registry
+        payment_registry._reset_for_tests()
+    except Exception:
+        log.debug("registry reset on shutdown skipped (already cleared)")
+
+    # DB pool LAST — every other subsystem may still want to write a final
+    # audit row, flush a state checkpoint, etc. close_pool() is idempotent
+    # and a no-op when init_pool() was skipped (DB_BACKEND=json).
+    try:
+        await close_pool()
+        log.info("DB pool closed cleanly")
+    except Exception as e:
+        log.error(f"Error closing DB pool: {e}", exc_info=True)
 
 
 app = FastAPI(lifespan=lifespan)
