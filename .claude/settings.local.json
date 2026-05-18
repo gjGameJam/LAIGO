@@ -41,7 +41,20 @@
       "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m pip install --upgrade pip 2>&1 | Select-Object -Last 8)",
       "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org 'asyncpg~=0.29' 'alembic~=1.13' 2>&1 | Select-Object -Last 10)",
       "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"import asyncpg, alembic; print\\('asyncpg', asyncpg.__version__\\); print\\('alembic', alembic.__version__\\)\")",
-      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m scripts.smoke_test_db 2>&1)"
+      "PowerShell(& '.\\\\.venv\\\\Scripts\\\\python.exe' -m scripts.smoke_test_db 2>&1)",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m alembic --version)",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -c \"import alembic; print\\('alembic', alembic.__version__\\)\")",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m alembic history)",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m alembic heads)",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m alembic show 0001)",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\('scripts/db.py'\\).read\\(\\)\\); print\\('db.py: OK'\\)\")",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\('scripts/Main.py'\\).read\\(\\)\\); print\\('Main.py: OK'\\)\")",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\('scripts/migrations/env.py'\\).read\\(\\)\\); print\\('env.py: OK'\\)\")",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\('scripts/migrations/versions/0001_initial_schema.py'\\).read\\(\\)\\); print\\('0001 version: OK'\\)\")",
+      "Bash('C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe' -c ' *)",
+      "Bash(C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe *)",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m pip install \"psycopg2-binary~=2.9\")",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org \"psycopg2-binary~=2.9\")"
     ]
   },
   "enabledPlugins": {}

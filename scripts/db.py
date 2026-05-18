@@ -24,6 +24,7 @@ import asyncio
 import os
 import ssl
 from typing import Optional
+from urllib.parse import urlsplit
 
 import asyncpg
 
@@ -74,20 +75,33 @@ async def init_pool() -> None:
                 "Set it in .env.secrets (Neon pooler DSN — host must contain '-pooler')."
             )
 
-        if "-pooler" not in dsn and "neon" in dsn:
+        # Parse the host explicitly instead of substring-matching the whole DSN —
+        # a password coincidentally containing 'pooler' or 'neon' would otherwise
+        # mis-trigger this guard.
+        host = (urlsplit(dsn).hostname or "").lower()
+        if "neon.tech" in host and "-pooler" not in host:
             raise RuntimeError(
                 "DATABASE_URL points at the Neon DIRECT endpoint, not the pooler. "
                 "App traffic must use the pooled endpoint (host suffix contains '-pooler'). "
                 "The direct endpoint is reserved for migrations and psql debugging."
             )
 
+        # TLS: enable when the DSN explicitly requests it OR when targeting a
+        # Neon host (Neon always requires TLS). Hostname parsed via urlsplit
+        # for the same reason as the pooler check above — avoid password
+        # substring false positives.
         ssl_ctx: Optional[ssl.SSLContext]
-        if "sslmode=" in dsn or "neon" in dsn:
+        if "sslmode=" in dsn or "neon.tech" in host:
             ssl_ctx = ssl.create_default_context()
         else:
             ssl_ctx = None
 
-        _pool = await asyncpg.create_pool(
+        # Atomicity: assign the module-level _pool ONLY after the connectivity
+        # smoke test succeeds. Previously, create_pool() assigned _pool first
+        # and then SELECT 1 ran — if the smoke test failed, _pool stayed set to
+        # an unhealthy pool, and a retry of init_pool() would short-circuit at
+        # the `if _pool is not None` guard above and falsely report success.
+        new_pool = await asyncpg.create_pool(
             dsn=dsn,
             min_size=2,
             max_size=10,
@@ -96,9 +110,17 @@ async def init_pool() -> None:
             command_timeout=10.0,
             ssl=ssl_ctx,
         )
+        try:
+            async with new_pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+        except Exception:
+            # Best-effort close so we don't leak the half-initialized pool's
+            # background connections. asyncpg.Pool.close() awaits in-flight
+            # work; on a fresh pool with no callers this is near-instant.
+            await new_pool.close()
+            raise
 
-        async with _pool.acquire() as conn:
-            await conn.execute("SELECT 1")
+        _pool = new_pool
 
 
 async def close_pool() -> None:
@@ -108,6 +130,56 @@ async def close_pool() -> None:
         if _pool is not None:
             await _pool.close()
             _pool = None
+
+
+# ─── schema version verification (Phase B step 5) ───────────────────────────
+# Bump this string each time a new alembic migration is added. The value MUST
+# equal the latest revision identifier under scripts/migrations/versions/.
+# Refusing boot on a mismatch catches the classic deploy-order mistake:
+# new app code shipped against an old DB schema (or vice versa).
+_EXPECTED_SCHEMA_VERSION = "0001"
+
+
+async def verify_schema() -> None:
+    """Refuse boot if the DB schema revision != _EXPECTED_SCHEMA_VERSION.
+
+    No-op when DB_BACKEND != postgres (the JSON path has no schema concept).
+    Raises RuntimeError on:
+      * alembic_version table missing (migrations never applied)
+      * alembic_version table empty (initial migration partially applied)
+      * version mismatch (deploy ordering bug)
+
+    Call AFTER init_pool() in the lifespan; the pool must be live.
+
+    See docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.5.B step 5 and §9.3.3.
+    """
+    if not is_postgres_backend():
+        return
+
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("SELECT version_num FROM alembic_version")
+    except asyncpg.UndefinedTableError as exc:
+        raise RuntimeError(
+            "alembic_version table missing — schema migrations were never applied "
+            "to this database. From a shell pointed at the Neon DIRECT endpoint:\n"
+            "    $env:ALEMBIC_DATABASE_URL = '<direct DSN>'\n"
+            "    alembic upgrade head"
+        ) from exc
+
+    if row is None:
+        raise RuntimeError(
+            "alembic_version table is empty — a migration likely failed mid-apply. "
+            "Inspect the DB, then re-run: alembic upgrade head"
+        )
+
+    current = row["version_num"]
+    if current != _EXPECTED_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Schema version mismatch: DB at {current!r}, app expects "
+            f"{_EXPECTED_SCHEMA_VERSION!r}. Run `alembic upgrade head` against "
+            f"the Neon DIRECT endpoint BEFORE redeploying app code."
+        )
 
 
 async def _reset_for_tests() -> None:

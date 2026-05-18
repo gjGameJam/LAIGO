@@ -20,3 +20,7 @@ playwright~=1.44
 # Database (Phase 9 — Neon Postgres migration)
 asyncpg~=0.29
 alembic~=1.13
+# Sync Postgres driver for alembic (SQLAlchemy default for postgresql:// URLs).
+# asyncpg is async-only and not usable by alembic's standard engine flow.
+# psycopg2-binary ships pre-built wheels — no compiler needed on Windows.
+psycopg2-binary~=2.9

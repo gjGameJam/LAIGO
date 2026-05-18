@@ -11,33 +11,77 @@ LAIGO converts photos into LEGO mosaic building kits. Given an image, it:
 
 ## Running locally
 
-Activate the virtual environment and navigate into the scripts package before running anything:
+Activate the virtual environment from the project root:
 
-```bash
-.venv\Scripts\activate.bat   # Windows
-cd LAIGO/scripts             # needed so relative imports resolve
+```powershell
+.venv\Scripts\activate.ps1   # Windows / PowerShell
 ```
 
-**API server** (primary interface):
-```bash
-uvicorn Main:app --reload
+**API server** (primary interface). Run from the **project root** with the
+package-qualified app path — `Main.py` uses relative imports (`from .picToMosiac …`)
+that only resolve when imported as `scripts.Main`:
+
+```powershell
+uvicorn scripts.Main:app --reload
 # Swagger UI: http://127.0.0.1:8000/docs
 ```
 
-**Standalone CLI** (for quick local testing):
-```bash
+(`cd scripts; uvicorn Main:app` will fail with
+`attempted relative import with no known parent package`.)
+
+**Standalone CLIs** (for quick local testing). These are scripts, not modules,
+so run them from inside `scripts/`:
+```powershell
+cd scripts
 python picToMosiac.py <width_blocks> <2d|3d> <background_pct> <True|False>
 # Example: python picToMosiac.py 5 3d 50 True
 # Note: image path is hardcoded to ../images/stella1.jpg in __main__
-```
 
-**Color quantization demo** (standalone, not part of the pipeline):
-```bash
 python colorQuant.py <num_colors>
 # Note: image path is hardcoded to ../images/labrador.jpg
 ```
 
 There are no automated tests. Manual testing is done via the Swagger UI at `/docs`.
+
+### Troubleshooting pip installs (corporate SSL proxy)
+
+Some environments intercept TLS and break pip's certificate verification with
+`SSLError(SSLCertVerificationError(...))`. Workaround that ships throughout
+this project's playbooks:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org <package>
+```
+
+Use sparingly — the right long-term fix is installing the corporate root CA
+into Python's certifi bundle (see open user action U1 in
+`docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.6.2`).
+
+### Database migrations (alembic)
+
+Schema lives in `scripts/migrations/sql/000N_<slug>.{up,down}.sql`; thin
+alembic wrappers in `scripts/migrations/versions/000N_<slug>.py`. To apply
+against a Neon branch:
+
+```powershell
+# Direct (non-pooler) endpoint required — alembic needs session mode.
+$env:ALEMBIC_DATABASE_URL = "<direct DSN — no '-pooler' in host>"
+alembic upgrade head
+```
+
+The `env.py` guard refuses pooler DSNs with an actionable error.
+
+**Adding a new migration `000N`:**
+1. Author `scripts/migrations/sql/000N_<slug>.up.sql` and `.down.sql`. Do
+   NOT wrap in `BEGIN; … COMMIT;` — alembic wraps in a transaction; an inner
+   COMMIT commits prematurely (Postgres has no nested transactions). For
+   psql replay outside alembic, wrap at the shell with `psql -1 -f …`.
+2. Author the wrapper `scripts/migrations/versions/000N_<slug>.py` with
+   `revision = "000N"`, `down_revision = "000(N-1)"`.
+3. Bump `_EXPECTED_SCHEMA_VERSION` in `scripts/db.py` to `"000N"` (manual,
+   no automated check today — see PRE_RELEASE §9.5.B exit criteria for the
+   open follow-up).
+4. Test on a throwaway Neon branch before applying to `main` and `dev`.
 
 ## Configuration
 

@@ -111,12 +111,19 @@ async def lifespan(app: FastAPI):
     # — checkout_store and (eventually) job lifecycle acquire from it.
     # See docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.2.4.
     # ─────────────────────────────────────────────────────────────────────────
-    from .db import init_pool, close_pool, is_postgres_backend
+    from .db import init_pool, close_pool, is_postgres_backend, verify_schema
     await init_pool()
     if is_postgres_backend():
         log.info("DB pool initialized (Neon Postgres backend active)")
     else:
         log.info("DB pool skipped (DB_BACKEND=json; Phase F not yet flipped)")
+
+    # Phase B step 5 — refuse boot if the deployed app expects a different
+    # alembic revision than what's actually in the DB. No-op on the JSON path.
+    # See docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.5.B step 5.
+    await verify_schema()
+    if is_postgres_backend():
+        log.info("DB schema verified (alembic revision matches _EXPECTED_SCHEMA_VERSION)")
 
     # ─────────────────────────────────────────────────────────────────────────
     # PAYMENT PROVIDER REGISTRATION (Layer 5).

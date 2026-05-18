@@ -21,7 +21,7 @@ This file consolidates material that previously lived in `docs/CHECKOUT_AUDIT.md
 | L6 audit log subsystem | ❌ Not built | This document, §2 |
 | Capture retry + MANUAL_REVIEW | ✅ Shipped | `scripts/checkout/saga.py` |
 | 5% hold buffer + drift fail-closed | ✅ Shipped | `scripts/checkout/saga.py` |
-| Postgres-backed state + resume-on-restart | 🟡 Phase A shipped 2026-05-16. Phases B–F pending; per-phase status in §9.6.1. Host = **Neon** (PG 17.8 / us-east-1; locked 2026-05-16; §9.3.11.1). 6 tables; 6.5 engineer-days planned. **Per-phase operational playbooks: §9.5. Live progress dashboard: §9.6.** | §3 roadmap item 2 / §9 |
+| Postgres-backed state + resume-on-restart | 🟡 Phases A + B shipped (A: 2026-05-16, B: 2026-05-17). Phases C–F pending; per-phase status in §9.6.1. Host = **Neon** (PG 17.8 / us-east-1; locked 2026-05-16; §9.3.11.1). 6 tables; 6.5 engineer-days planned. **Per-phase operational playbooks: §9.5. Live progress dashboard: §9.6.** | §3 roadmap item 2 / §9 |
 | Pre-commit revalidation | ❌ Not built | §3 roadmap item 3 |
 | MarketplaceAdapter Protocol | ❌ Not built | §3 roadmap item 4 |
 | BrickOwl cancellation (Playwright) | ❌ Not built | §3 roadmap item 5 |
@@ -2975,19 +2975,27 @@ Rounds 1–3 above explain *what* and *why*. This section is the *how* — step-
 - ✅ Neon `main` branch on PG 17.8 confirmed by `SELECT version()`.
 - ✅ Region alignment (Render us-east + Neon us-east-1).
 
+**Phase A defects surfaced and corrected during Phase B (2026-05-17):**
+- `psycopg2-binary` was missing from the install set. Alembic uses SQLAlchemy's standard sync engine for `postgresql://` URLs, which needs a sync driver (asyncpg is async-only). Phase A's smoke test exercised asyncpg directly via `smoke_test_db.py`, not alembic, so the gap wasn't caught. Phase B added `psycopg2-binary~=2.9` to `requirements.txt`. Installed locally via the `--trusted-host` workaround.
+- `init_pool()` had an atomicity defect: if `create_pool()` succeeded but the `SELECT 1` smoke query failed, `_pool` stayed assigned to an unhealthy pool and a retry of `init_pool()` short-circuited at the idempotent-re-entry guard. Phase B fixed this by assigning `_pool` only after the smoke query passes and closing the partially-initialized pool on failure.
+- The pooler-endpoint check used substring-matching on the whole DSN (`if "-pooler" not in dsn`). A password coincidentally containing `-pooler` would mis-trigger the guard. Phase B switched to parsing the DSN host with `urllib.parse.urlsplit`.
+
 **Rollback (if Phase A becomes a problem retroactively):**
 - Set `DB_BACKEND=json` in `.env`. `scripts/db.py` no-ops; everything else behaves as pre-Phase-A. Pool isn't even created.
 - Delete the Neon project from the Neon dashboard if you decide to switch hosts (no production data to lose).
 
 ---
 
-#### 9.5.B Phase B — Schema + alembic (≈1 day)
+#### 9.5.B Phase B — Schema + alembic ✅ SHIPPED 2026-05-17 (originally ≈1 day)
 
 **Goal:** Versioned, repeatable schema migrations. Six tables created in one initial migration. Verified on a throwaway Neon branch before touching production.
 
+This playbook is preserved for reference. The actual run on 2026-05-17 surfaced 6 additional defects beyond the original Tier-1 doc drift; all are corrected in the snippets below. See the retrospective notes inline at each step (marked `🔎 2026-05-17 retro note`) for what changed vs the original draft.
+
 **Prerequisites:**
 - ✅ Phase A complete (DATABASE_URL works, asyncpg installed).
-- ✅ alembic installed (was installed alongside asyncpg in Phase A).
+- ✅ `alembic` installed (was added in Phase A).
+- ✅ `psycopg2-binary` installed. **Phase A missed this** — alembic uses SQLAlchemy's standard sync engine for `postgresql://` URLs and asyncpg can't fulfill that. Phase B added `psycopg2-binary~=2.9` to `requirements.txt` and installed via the `--trusted-host` workaround (corporate SSL proxy). Confirm with `python -c "import psycopg2; print(psycopg2.__version__)"`.
 - 🛑 **Make a fresh git branch for Phase B work:** `git checkout -b phase-b-schema-migration`. Keeps the WIP isolated and lets you abandon cleanly if needed.
 
 **Step 1 — Initialize alembic skeleton** (≈ 15 min)
@@ -3048,55 +3056,14 @@ scripts/migrations/
 
 The cleanest way to get `script.py.mako` is to run `alembic init alembic-scratch/` in a throwaway dir, copy `script.py.mako` into `scripts/migrations/`, then delete `alembic-scratch/`. (Alembic ships the template inside its package, but the file isn't trivially accessible via stdlib paths.)
 
-🔧 Create `scripts/migrations/env.py` (per §9.2.10 with a small hardening):
+🔧 Create `scripts/migrations/env.py`. The shipped version (see the actual file in tree) includes three hardenings beyond the original sketch — copy from the file, not from any older snippet:
+1. **`postgres://` → `postgresql://` normalization.** Neon's dashboard sometimes emits the bare `postgres://` form; SQLAlchemy only accepts the `postgresql://` form.
+2. **Pooler-endpoint guard.** Parses the DSN hostname with `urllib.parse.urlsplit` (NOT substring-matching the whole DSN — a password containing `-pooler` would mis-trigger that) and refuses to proceed if the host ends in `neon.tech` and contains `-pooler`. Alembic needs session mode; the pooler runs PgBouncer in transaction mode.
+3. **Actionable error messages** pointing the operator at the corrective dashboard click.
 
-```python
-"""alembic environment — reads DATABASE_URL from environment, not alembic.ini.
+🔎 2026-05-17 retro note: the original snippet had none of these hardenings. The pooler-guard in particular is essential — without it, an operator who copies the pooler DSN into the alembic shell gets confusing partial failures.
 
-The direct endpoint is required for alembic operations (session mode is needed
-for the migration transactions; PgBouncer transaction mode would break things
-like CREATE INDEX CONCURRENTLY in a future migration). To run against Neon:
-    1. In the Neon dashboard, copy the DIRECT (non-pooler) connection string.
-    2. Set ALEMBIC_DATABASE_URL=<direct DSN> in your shell (NOT in .env).
-    3. Run: alembic upgrade head
-If ALEMBIC_DATABASE_URL is unset, falls back to DATABASE_URL (pooler) — works
-for app-side reads but may not for all schema operations.
-"""
-import os
-from logging.config import fileConfig
-
-from alembic import context
-from sqlalchemy import engine_from_config, pool
-
-config = context.config
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-dsn = os.environ.get("ALEMBIC_DATABASE_URL") or os.environ.get("DATABASE_URL")
-if not dsn:
-    raise RuntimeError(
-        "Neither ALEMBIC_DATABASE_URL nor DATABASE_URL is set. "
-        "Set ALEMBIC_DATABASE_URL to the Neon DIRECT (non-pooler) DSN before running alembic."
-    )
-config.set_main_option("sqlalchemy.url", dsn)
-
-
-def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    with connectable.connect() as connection:
-        context.configure(connection=connection)
-        with context.begin_transaction():
-            context.run_migrations()
-
-
-run_migrations_online()
-```
-
-✅ Verify alembic is configured: `alembic current` should print `(empty)` (no migrations applied yet to the configured DSN). If it errors with a connection issue, fix `ALEMBIC_DATABASE_URL` first.
+✅ Verify alembic is configured: `alembic history` should show `<base> -> 0001 (head)` after step 2 is written. (`alembic current` requires a real DSN; `alembic history` reads only local version files.)
 
 📦 **Commit checkpoint 1:** "Phase B step 1 — alembic skeleton wired (env.py reads ALEMBIC_DATABASE_URL or DATABASE_URL; no migrations yet)."
 
@@ -3107,21 +3074,28 @@ run_migrations_online()
 🔧 Create `scripts/migrations/sql/0001_initial_schema.down.sql`:
 
 ```sql
--- Reverse of 0001_initial_schema.up.sql
--- Order: drop indices implicitly via DROP TABLE; drop tables in reverse FK order.
-DROP TABLE IF EXISTS audit_events CASCADE;
+-- Reverse of 0001_initial_schema.up.sql.
+-- NO inner BEGIN/COMMIT — alembic wraps `downgrade()` in a transaction.
+-- An inner COMMIT would commit prematurely (Postgres has no nested
+-- transactions) and leave alembic_version out of sync with reality.
+-- Order: drop tables in reverse FK dependency order; CASCADE handles indices.
+DROP TABLE IF EXISTS audit_events  CASCADE;
 DROP TABLE IF EXISTS payment_holds CASCADE;
-DROP TABLE IF EXISTS sagas CASCADE;
-DROP TABLE IF EXISTS checkouts CASCADE;
-DROP TABLE IF EXISTS job_progress CASCADE;
-DROP TABLE IF EXISTS jobs CASCADE;
+DROP TABLE IF EXISTS sagas         CASCADE;
+DROP TABLE IF EXISTS checkouts     CASCADE;
+DROP TABLE IF EXISTS jobs          CASCADE;
+DROP TABLE IF EXISTS schema_meta   CASCADE;
 DROP EXTENSION IF EXISTS pgcrypto;
 ```
+
+🔎 2026-05-17 retro notes on this snippet:
+- `job_progress` → `schema_meta`: §9.2.1 consolidated progress into a `progress_pct` column on `jobs`. There is no `job_progress` table.
+- Inner `BEGIN; … COMMIT;` removed. Alembic wraps in a transaction; an inner COMMIT commits prematurely (Postgres has no nested transactions). The original snippet also had this; both `.up.sql` and `.down.sql` were corrected on 2026-05-17.
 
 🔧 Create the alembic version file `scripts/migrations/versions/0001_initial_schema.py`:
 
 ```python
-"""initial schema — jobs, job_progress, checkouts, sagas, payment_holds, audit_events"""
+"""initial schema — jobs, checkouts, sagas, payment_holds, audit_events, schema_meta"""
 
 from pathlib import Path
 from alembic import op
@@ -3142,7 +3116,7 @@ def downgrade() -> None:
     op.execute((_SQL_DIR / "0001_initial_schema.down.sql").read_text(encoding="utf-8"))
 ```
 
-✅ Verify the migration parses (without running it): `alembic check` (alembic ≥1.9). Or just `alembic history` — should show one revision `0001`.
+✅ Verify the migration parses (without running it): `alembic history` — should show `<base> -> 0001 (head), initial schema — jobs, checkouts, sagas, payment_holds, audit_events, schema_meta`. (`alembic check` requires a real DSN; `alembic history` reads only local version files.)
 
 📦 **Commit checkpoint 2:** "Phase B step 2 — initial schema migration written (not yet applied)."
 
@@ -3169,21 +3143,14 @@ $env:ALEMBIC_DATABASE_URL = "postgresql://...direct.../neondb?sslmode=require"  
 alembic upgrade head
 ```
 
-✅ Expected output: `Running upgrade  -> 0001, initial schema — jobs, job_progress, checkouts, sagas, payment_holds, audit_events`.
+✅ Expected output: `Running upgrade  -> 0001, initial schema — jobs, checkouts, sagas, payment_holds, audit_events, schema_meta`.
 
-✅ Verify table presence:
-
-```bash
-$env:ALEMBIC_DATABASE_URL = "postgresql://...direct.../neondb?sslmode=require"
-python -c "import asyncio, asyncpg, os; asyncio.run((lambda: asyncpg.connect(os.environ['ALEMBIC_DATABASE_URL']))().__anext__()) if False else None"  # placeholder
-```
-
-A simpler verify: open the Neon dashboard → throwaway-branch SQL editor → run:
+✅ Verify table presence in the Neon dashboard → throwaway-branch SQL editor:
 
 ```sql
 SELECT table_name FROM information_schema.tables
 WHERE table_schema = 'public' ORDER BY table_name;
--- Expected: alembic_version, audit_events, checkouts, job_progress, jobs, payment_holds, sagas
+-- Expected: alembic_version, audit_events, checkouts, jobs, payment_holds, sagas, schema_meta
 
 SELECT indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY indexname;
 -- Expected: includes sagas_one_active_per_job_idx (the B23 partial unique index)
@@ -3192,7 +3159,7 @@ SELECT version_num FROM alembic_version;
 -- Expected: 0001
 ```
 
-🛑 **Pause:** look at every table in the dashboard's table editor. Confirm column types match §9.2.1. JSONB columns appear as `jsonb`. Timestamps appear as `timestamp with time zone`. If anything looks wrong, fix the `.up.sql` and re-test on a fresh throwaway branch (`neon branch delete` + `neon branch create` again — cheap).
+🛑 **Pause:** look at every table in the dashboard's table editor. Confirm column types match §9.2.1. JSONB columns appear as `jsonb`. Timestamps appear as `timestamp with time zone`. `customer_ip` / `actor_ip` appear as `inet`. If anything looks wrong, fix the `.up.sql` and re-test on a fresh throwaway branch (`neon branch delete` + `neon branch create` again — cheap).
 
 **Step 4 — Apply to Neon `main` (production)** (≈ 5 min)
 
@@ -3213,42 +3180,39 @@ neon branch delete --project-id <laigo-project-id> --name migration-test-2026-MM
 
 **Step 5 — Wire boot-time schema verification** (≈ 30 min)
 
-Per §9.3.3, the app should refuse to boot if the deployed code expects a schema version different from what's in the DB. Implement `verify_schema()` in `scripts/db.py`:
+Per §9.3.3, the app should refuse to boot if the deployed code expects a schema version different from what's in the DB. Implement `verify_schema()` in `scripts/db.py` — see the shipped function in tree for the authoritative version. It distinguishes three failure modes with separate, actionable error messages:
 
-🔧 Add to `scripts/db.py`:
+| Failure | Cause | Operator action |
+|---|---|---|
+| `asyncpg.UndefinedTableError` on `alembic_version` | Migrations never applied | Run `alembic upgrade head` against the direct DSN |
+| `fetchrow` returns `None` | Migration crashed mid-apply | Inspect DB state, then re-run `alembic upgrade head` |
+| `version_num` ≠ `_EXPECTED_SCHEMA_VERSION` | Deploy ordering bug | Run `alembic upgrade head` BEFORE redeploying app code |
 
-```python
-_EXPECTED_SCHEMA_VERSION = "0001"  # bump this string each time a new alembic migration is added
-
-
-async def verify_schema() -> None:
-    """Refuse boot if DB schema version != expected. Catches deploy-order mistakes."""
-    if not is_postgres_backend():
-        return
-    pool = get_pool()
-    row = await pool.fetchrow("SELECT version_num FROM alembic_version")
-    if row is None:
-        raise RuntimeError(
-            "alembic_version table empty — schema migrations never applied. "
-            "Run: ALEMBIC_DATABASE_URL=<direct DSN> alembic upgrade head"
-        )
-    current = row["version_num"]
-    if current != _EXPECTED_SCHEMA_VERSION:
-        raise RuntimeError(
-            f"Schema version mismatch: DB at {current}, app expects {_EXPECTED_SCHEMA_VERSION}. "
-            f"Run alembic upgrade head against the production DSN before redeploying."
-        )
-```
+🔎 2026-05-17 retro note: the original sketch only handled the second two failures. The first (`UndefinedTableError`) is the most common in practice — happens any time a developer points the app at a fresh Neon branch they forgot to migrate.
 
 🔧 In `Main.py` lifespan, immediately after `init_pool()`:
 
 ```python
 from .db import init_pool, close_pool, is_postgres_backend, verify_schema
 await init_pool()
-await verify_schema()  # ← NEW: refuse boot on schema mismatch
+await verify_schema()  # ← refuses boot on schema mismatch
 ```
 
-✅ Verify: with `DB_BACKEND=postgres` and DATABASE_URL pointing at Neon `main` (now at revision `0001`), run `uvicorn Main:app` — should boot cleanly with `INFO` log "DB pool initialized." If you intentionally bump `_EXPECTED_SCHEMA_VERSION` to `"9999"` for a test, boot should fail with the mismatch error.
+✅ Verify: with `DB_BACKEND=postgres` and DATABASE_URL pointing at any Neon branch at revision `0001`, run from the project root:
+
+```powershell
+uvicorn scripts.Main:app --reload
+```
+
+(NOTE: must be `scripts.Main:app`, not `Main:app` from inside `scripts/`. Main.py uses relative imports — `from .picToMosiac …` — which only resolve when imported as a member of the `scripts` package. Earlier drafts of this playbook said `cd scripts; uvicorn Main:app`; that fails with `attempted relative import with no known parent package`. Same fix in CLAUDE.md "Running locally".)
+
+Expected log lines on startup:
+```
+INFO ... DB pool initialized (Neon Postgres backend active)
+INFO ... DB schema verified (alembic revision matches _EXPECTED_SCHEMA_VERSION)
+```
+
+Mismatch test: temporarily bump `_EXPECTED_SCHEMA_VERSION = "0001"` in `scripts/db.py` to `"9999"`, restart — boot should fail with `RuntimeError: Schema version mismatch: DB at '0001', app expects '9999'. ...`. Revert.
 
 📦 **Commit checkpoint 3:** "Phase B step 5 — boot-time schema version check added; refuses boot on alembic_version mismatch."
 
@@ -3266,14 +3230,22 @@ ALEMBIC_DATABASE_URL=$DATABASE_URL_DIRECT alembic upgrade head
 
 (Where `DATABASE_URL_DIRECT` is a separate Render env var pointing at the Neon **direct** endpoint, since alembic needs session mode.)
 
-**Phase B exit criteria:**
-- ✅ `alembic upgrade head` runs cleanly against a throwaway Neon branch.
-- ✅ All six tables + indices + extensions present per §9.2.1.
-- ✅ `alembic upgrade head` runs cleanly against Neon `main`.
-- ✅ Throwaway Neon branch deleted.
-- ✅ `verify_schema()` shipped + wired into lifespan.
-- ✅ Phase B git branch merged to git `main`.
-- 📦 §0 status snapshot updated; §9.6 progress dashboard updated.
+**Phase B exit criteria (all ✅ on 2026-05-17):**
+- ✅ `alembic upgrade head` ran cleanly against throwaway branch `migration-test-2026-05-17` (endpoint `ep-tiny-credit-ap307eut`).
+- ✅ All 7 tables (6 from §9.2.1 + `alembic_version`) + 11 indices + `pgcrypto` extension verified in Neon SQL editor on throwaway.
+- ✅ `alembic upgrade head` ran cleanly against Neon `main` and Neon `dev`; both verified the same.
+- ✅ Throwaway branch `migration-test-2026-05-17` deleted.
+- ✅ `verify_schema()` shipped + wired into lifespan; smoke-tested locally (`uvicorn scripts.Main:app --reload` logged `DB pool initialized` + `DB schema verified`).
+- ⏳ Phase B git branch merged to git `main` (user driving commits).
+- ✅ §0 status snapshot updated; §9.6.1 progress dashboard updated.
+
+**Additional fixes shipped alongside Phase B (2026-05-17 retrospective):**
+- `psycopg2-binary~=2.9` added to `requirements.txt` (Phase A gap; alembic needs a sync driver).
+- `scripts/db.py init_pool()` atomicity fix — assign `_pool` only after `SELECT 1` smoke query succeeds; close + raise the partial pool on failure.
+- DSN host parsing tightened in both `scripts/db.py` and `scripts/migrations/env.py` — use `urllib.parse.urlsplit` to inspect the hostname only, not substring-match the whole DSN (avoids password-coincidence false positives).
+- Inner `BEGIN; … COMMIT;` removed from `0001_initial_schema.up.sql` and `down.sql` — alembic's transactional wrapping is the atomicity guarantee; an inner COMMIT was committing the outer alembic transaction prematurely.
+- CLAUDE.md "Running locally" corrected to `uvicorn scripts.Main:app --reload` from project root; new "Database migrations" + "Troubleshooting" subsections added.
+- §9.5.C plan clarified — see retro notes in that section.
 
 ---
 
@@ -3285,6 +3257,34 @@ ALEMBIC_DATABASE_URL=$DATABASE_URL_DIRECT alembic upgrade head
 - ✅ Phase B complete (schema deployed, `verify_schema()` wired).
 - ✅ Neon `dev` branch created (needed for local-against-Postgres dev — see §9.3.11.9).
 - 🛑 **Fresh git branch:** `git checkout -b phase-c-checkout-store-pg`.
+
+**Step 0 — Resolve these 4 API-shape decisions BEFORE coding (≈ 30 min)**
+
+The original §9.5.C draft glossed over ambiguities that will bite the implementer mid-stream. Decide each up front:
+
+1. **`save()` signature — one function or two?** The current API `save(job_id, state)` is called BOTH at /quote (creates the checkouts row) and at /confirm (creates the sagas row). In Postgres these are two distinct tables. Pick:
+   - **(a)** Split into `save_checkout(job_id, state)` and `save_saga(checkout_id, state)`. Cleaner; requires updating callers.
+   - **(b)** Keep single `save()` and dispatch internally based on a `stage` field in `state`. Less call-site churn; more internal complexity.
+   - **(c)** Use UPSERT (`INSERT ... ON CONFLICT DO UPDATE`) on both tables in every save(). Idempotent; smaller diff; potentially confusing semantics for the "this row already exists, update it" case.
+
+2. **`load(job_id)` semantics when multiple sagas exist for one job_id.** A job_id can have a COMPENSATED saga from attempt #1 then a new INITIATED saga from attempt #2. Pick:
+   - **(a)** Return the most recent non-terminal saga. If none, return the most recent terminal saga. If none, return None.
+   - **(b)** Return the saga matching the most recent checkouts row (one-to-one via FK).
+   - **(c)** Take `checkout_id` instead of `job_id` and return that specific saga; callers that have only `job_id` use a separate `list_sagas(job_id)`.
+
+3. **INSERT ordering in the Postgres backend.** Schema FK: `sagas.checkout_id → checkouts.checkout_id ON DELETE RESTRICT`. The implementer MUST insert the checkouts row BEFORE the sagas row. Document this explicitly in `checkout_store_pg.py`. (Not a decision — a hard constraint.)
+
+4. **`B23` race defense — DB-level only, or belt-and-suspenders?** Postgres partial unique index `sagas_one_active_per_job_idx` enforces "at most one non-terminal saga per job_id" structurally. Pick:
+   - **(a)** Drop the application-level check entirely once Phase C ships; catch `UniqueViolationError` and 422. Simpler, single source of truth.
+   - **(b)** Keep both — app-level check for DB_BACKEND=json mode, DB-level for postgres mode. Diverges between backends. Convergent after Phase F removes the JSON path.
+
+Recommended defaults (lowest implementation risk):
+1. **(c)** UPSERT — fits the "same public API, different backend" goal best.
+2. **(c)** Take `checkout_id`. Callers with only `job_id` use `list_sagas`. Cleanest semantics.
+3. (constraint, not a choice) — checkouts THEN sagas.
+4. **(b)** Belt-and-suspenders during Phase C; collapse to **(a)** at Phase F.
+
+🔎 2026-05-17 retro note: the original §9.5.C didn't surface these decisions and the recommended-default column didn't exist. AD1–AD4 from the Phase B retrospective added this whole step. Do not skip — picking poorly here means rewrites mid-Phase-C.
 
 **Step 1 — Create `checkout_store_pg.py` alongside the existing module** (≈ 4 hours)
 
@@ -3320,6 +3320,12 @@ DB_BACKEND=postgres:       re-exports checkout_store_pg.
 
 The dispatch happens ONCE at import time. Lifespan reads env once; the rest
 of the codebase imports from this module so callers don't branch.
+
+TEST CAVEAT: this pattern locks the backend at first-import time for the
+process lifetime. pytest scenarios that need to switch backends must use a
+fresh Python process per scenario (e.g., `pytest -p no:cacheprovider --forked`)
+or use `importlib.reload()` carefully. The simpler alternative is to add a
+runtime check inside each function (see commented `# Alternative` block).
 """
 import os
 
@@ -3327,7 +3333,20 @@ if os.environ.get("DB_BACKEND", "json").lower() == "postgres":
     from .checkout_store_pg import load, save, update, read_order_list  # noqa: F401
 else:
     from .checkout_store import load, save, update, read_order_list  # noqa: F401
+
+# Alternative pattern that preserves test ergonomics at a small runtime cost
+# (one env read per call). Use this if pytest scenarios switching backends
+# becomes painful in practice:
+#
+# async def load(*args, **kwargs):
+#     if os.environ.get("DB_BACKEND", "json").lower() == "postgres":
+#         from .checkout_store_pg import load as _impl
+#     else:
+#         from .checkout_store import load as _impl
+#     return await _impl(*args, **kwargs)
 ```
+
+🔎 2026-05-17 retro note: the import-time dispatch is the production choice (zero per-call overhead). The test-ergonomics caveat was undocumented in the original draft. AD3 from the Phase B retrospective.
 
 🔧 Update every caller to import from the dispatcher instead of the concrete module:
 
@@ -3374,7 +3393,12 @@ With Postgres: drop `_locks` entirely from `checkout_store_pg.py`. Use `pg_advis
 ```python
 async with pool.acquire() as conn:
     async with conn.transaction():
-        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", job_id)
+        # hashtextextended($1, 0) returns INT8; the older hashtext($1)
+        # returns INT4 with a non-trivial birthday-paradox collision rate
+        # at sqrt(2^32) ≈ 65k distinct job_ids. INT8 collision rate is
+        # vastly lower. Performance is identical; the seed argument 0 is
+        # the conventional choice for "no extra hash domain separation."
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", job_id)
         # Now this transaction is the only one mutating this job_id's saga.
         row = await conn.fetchrow("SELECT * FROM sagas WHERE job_id=$1 FOR UPDATE", job_id)
         ...  # merge partial, UPDATE, return merged dict
@@ -3382,19 +3406,27 @@ async with pool.acquire() as conn:
 
 ✅ Verify: stress-test locally with 100 concurrent `update()` calls for the same `job_id`. All should serialize cleanly; no `UniqueViolationError`, no lost updates.
 
+🔎 2026-05-17 retro note: original draft used `hashtext($1)` (INT4). AD4 from the Phase B retrospective.
+
 📦 **Commit checkpoint 2:** "Phase C step 3-4 — B23 enforced by partial unique index; pg_advisory_xact_lock replaces _locks for DB backend."
 
 **Step 5 — Test against the Neon `dev` branch end-to-end** (≈ 4 hours)
 
 🛑 **You need the Neon `dev` branch by this point.** If you haven't created it, do it now (`neon branch create dev --parent main`). Save its **pooler** DSN into `.env.local` (gitignored — confirm with `git status` after touching it). Phase C is the first phase that requires local Postgres iteration speed.
 
-💻 Local run with Postgres backend:
+💻 Local run with Postgres backend. Run from the **project root** (see Phase B
+Step 5 retro note for why `cd scripts; uvicorn Main:app` fails):
 
-```bash
+```powershell
 $env:DB_BACKEND = "postgres"
-$env:DATABASE_URL = "postgresql://...dev-pooler.../neondb?sslmode=require"
-uvicorn Main:app --reload
+$env:DATABASE_URL = "postgresql://...dev-pooler.../neondb?sslmode=require&channel_binding=require"
+uvicorn scripts.Main:app --reload
 ```
+
+(Setting `$env:DATABASE_URL` in the shell OVERRIDES the `.env.secrets` value
+for this session. If you forget that and wonder why a `.env.secrets` change
+isn't taking effect, run `Remove-Item Env:DATABASE_URL` to fall back to the
+file.)
 
 ✅ Smoke test the saga flow via Swagger UI at http://127.0.0.1:8000/docs:
 1. `POST /generate` with an image → wait for job complete.
@@ -3796,9 +3828,9 @@ If any of those flare: roll back to `DB_BACKEND=json`, file the issue, fix offli
 
 | Phase | Status | Owner | Notes |
 |---|---|---|---|
-| A — Provision & connect | ✅ Shipped 2026-05-16 | Grant | Neon `laigo` / PG 17.8 / us-east-1 / ARM64. Pooler DSN in `.env.secrets`. `scripts/db.py` + `Main.py` lifespan + smoke test. asyncpg 0.31 + alembic 1.18 installed locally via `--trusted-host` workaround. Neon `dev` branch deferred to Phase C. |
-| B — Schema + alembic | 🟦 Ready to start | Grant | All prerequisites met. Estimated 1 engineer-day. Playbook: §9.5.B. |
-| C — Checkout state to Postgres | ⏸ Blocked by B | Grant | Estimated 2 days. Requires Neon `dev` branch (not yet created). Playbook: §9.5.C. |
+| A — Provision & connect | ✅ Shipped 2026-05-16 | Grant | Neon `laigo` / PG 17.8 / us-east-1 / ARM64. Pooler DSN in `.env.secrets`. `scripts/db.py` + `Main.py` lifespan + smoke test. asyncpg 0.31 + alembic 1.18 installed locally via `--trusted-host` workaround. Neon `dev` branch deferred to Phase C. **2026-05-17 retro:** `psycopg2-binary` was missed (corrected in Phase B); `init_pool()` atomicity bug (corrected); DSN substring-match tightened (corrected). |
+| B — Schema + alembic | ✅ Shipped 2026-05-17 | Grant | `0001_initial_schema` applied to Neon `main`, `dev`, throwaway (now deleted). `verify_schema()` + `_EXPECTED_SCHEMA_VERSION` shipped and smoke-tested locally. `psycopg2-binary~=2.9` added. 6 defects surfaced during the run + corrected (see §9.5.A retro note + §9.5.B exit criteria). |
+| C — Checkout state to Postgres | 🟦 Ready to start | Grant | Estimated 2 days. Neon `dev` branch exists (created 2026-05-17) with schema. **§9.5.C clarified post-Phase-B review (2026-05-17)** — see AD1–AD5 notes inline. Playbook: §9.5.C. |
 | D — Mosaic job lifecycle to Postgres | ⏸ Blocked by C | Grant | Estimated 2 days. Playbook: §9.5.D. Optional `MAX_WORKERS>1` follow-up requires Render Standard tier. |
 | E — Resume-on-startup + reconciliation | ⏸ Blocked by D | Grant | Estimated 1 day. The actual point of the migration. L6 audit emit ships here. Playbook: §9.5.E. |
 | F — Cutover | ⏸ Blocked by E | Grant | ≈½ day for the flip + 1 week observation + 1 hour cleanup. Triggers Neon Free→Launch tier change. Playbook: §9.5.F. |
