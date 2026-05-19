@@ -46,6 +46,79 @@ Before any real `sk_live_` Stripe key is configured, ALL of the following must b
 - §3 roadmap items #3–#7 + #10 + #11 + #13 + #14 are shipped.
 - Go-live checklist §6 has been walked once in TEST mode.
 
+### Operator action plan (post-session handoff)
+
+The DB migration is paused here. To resume, the operator can do the following in any order. Each item lists what unblocks afterward.
+
+**A — Stripe TEST credentials (~10 min)** — unblocks E.4, live reconciler exercise, every roadmap test
+- Dashboard → developers → API keys → reveal the test `sk_test_...` secret key.
+- Append to `.env.secrets` (gitignored): `STRIPE_SECRET_KEY=sk_test_...`
+- Edit `scripts/checkout/payment/stripe_provider.py` line ~50: flip `STRIPE_ENABLED = False` → `STRIPE_ENABLED = True`.
+- Edit `.env`: set `CHECKOUT_ENABLED=true` (uncomment / add).
+- Restart uvicorn (`uvicorn scripts.Main:app --reload` from project root).
+- Verify: `curl http://127.0.0.1:8000/checkout/gate` returns `{"mode":"test","is_open":true,...}`.
+- Once green, ping for Phase E step 4 (end-to-end mid-saga restart test).
+
+**B — Local smoke (no Stripe needed, no Render needed)** — confirms what's shipped works
+- Run all four test suites from project root:
+  - `.venv\Scripts\python.exe -m scripts.test_jobs_store_json`
+  - `.venv\Scripts\python.exe -m scripts.test_jobs_store_dispatch`
+  - `.venv\Scripts\python.exe -m scripts.test_jobs_store_edge`
+  - `.venv\Scripts\python.exe -m scripts.test_phase_e_pg`  (needs `DB_BACKEND=postgres` in env)
+  - `.venv\Scripts\python.exe -m scripts.test_reconcile_pg`  (same)
+- Boot uvicorn with `$env:DB_BACKEND="postgres"` and verify the boot log contains `[resume] examined N in-flight sagas` AND `[reconcile] periodic task started (interval=300s)`.
+- Generate a mosaic with `POST /generate` and verify the row lands in Neon's `jobs` table.
+
+**C — Render configuration (~30 min)** — unblocks Phase F (cutover)
+- U3: In Render dashboard → laigo service → Settings → add pre-deploy command: `alembic upgrade head` (uses `ALEMBIC_DATABASE_URL`).
+- U4: In Render dashboard → laigo service → Environment → add `DATABASE_URL=<Neon main pooler DSN>` and `DATABASE_URL_DIRECT=<Neon main direct DSN, no '-pooler' in host>`. Leave `DB_BACKEND=json` for now.
+- U5: In Neon dashboard → laigo project → Billing → upgrade Free → Launch ($19/mo). Skip until ready to actually cut over — Free tier autosuspends after 5 min of idle and would cold-start customer polls.
+- Once U3+U4 done, ping me to start Phase F step 1 (deploy code with `DB_BACKEND=json` to validate alembic hook works against `main`).
+
+**D — Product question decisions** — these block §3 roadmap items
+- BrickOwl ordering strategy: Option A (Playwright order + LAIGO collects payment) or Option B (cart URL redirect + customer pays BrickOwl). Picks roadmap #5's implementation path.
+- Drift tolerance: ≤2% silent eat, OR always prompt customer for new price. Drives roadmap #12.
+- Hourly financial-exposure cap: $500? $5000? Drives roadmap #10.
+- Customer concurrency policy: can a customer have two open `/quote`s for the same job? Drives the active-quote partial unique index.
+- Refund policy on capture-failed-after-orders-placed: contact for alt payment, refund and eat cost, or both? Drives MANUAL_REVIEW runbook.
+
+**E — Commit & push** — no Phase A-E work has been committed yet (U6)
+- Current branch: `E2E`. `git status` shows ~10 modified files + 8 new files + 1 deletion.
+- Suggested commit order: docs first (`CLAUDE.md`, `docs/*`), then code (`scripts/checkout/*`, `scripts/*store_*.py`, `scripts/Main.py`, deleted `jobs_db.py`), then test files.
+- Tag `phase-e-step2` or similar after merging to `main` so the state is recoverable.
+
+**F — Pause until decisions are made** — no work to do on my end without (A), (C), or (D).
+
+### Open defects (none launch-blocking; see §4.1 for full table)
+
+| Severity | Open IDs |
+|---|---|
+| MEDIUM (LATENT) | B11 (cross-iteration brickowl_order_ids checkpoint — only when roadmap #5 ships), B23 in json mode, B28 (per-order cancel retry — when roadmap #5 ships), B36 (semaphore-per-call) |
+| LOW | B26, B27, B29, B30, B31, B35 |
+| COSMETIC | B48, B49 |
+| FUTURE-PROOFING | B51 (dither hardcoded), B52 (started_at == completed_at on fast jobs) |
+
+### Uncommitted work (as of 2026-05-19)
+
+10 modified + 8 new files + 1 deletion in working tree. Notable:
+
+- New: `scripts/checkout/{audit,payment_holds_store,reconcile,saga_resume}.py`
+- New: `scripts/jobs_store_{pg,json,dispatch}.py`, `scripts/smoke_jobs_pg.py`
+- New: `scripts/test_jobs_store_{json,dispatch,edge}.py`, `scripts/test_phase_e_pg.py`, `scripts/test_reconcile_pg.py`
+- Modified: `scripts/Main.py` (fully rewritten for dispatcher + Phase E wiring), `scripts/checkout/{saga,dependencies}.py`, `scripts/checkout/payment/{base,stripe_provider}.py`, `scripts/checkout/payment_holds_store.py`, `scripts/jobs_store_pg.py`
+- Deleted: `scripts/jobs_db.py` (Phase D step 2 S8)
+- Docs: `CLAUDE.md`, `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` (4214→640 lines), `docs/CHECKOUT_AUDIT.md`, `docs/ORDER_OPTIMIZER.md`
+
+All compile + all tests pass.
+
+### Where to read after `/clear`
+
+1. **This file (§0)** — current state, what's working, what's next.
+2. **`CLAUDE.md`** — module map + boot invariants + doctrine bullets.
+3. **§9.3 here** — Phase E step 4 playbook (the next live test).
+4. **§9.4 here** — Phase F (Render cutover) playbook.
+5. **§4** — open defects.
+
 ---
 
 ## 1. Why this exists
