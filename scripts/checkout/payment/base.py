@@ -211,3 +211,32 @@ class PaymentProvider(Protocol):
         """Void an uncaptured hold. Safe to call on already-cancelled holds
         (provider treats as no-op)."""
         ...
+
+    async def get_hold_status(self, hold_id: str) -> str:
+        """Return the provider's CURRENT view of a hold's lifecycle state.
+
+        Returns one of (normalized — providers MUST map their native values):
+          - "requires_capture": authorization is active, can still capture or cancel
+          - "succeeded":        captured (terminal)
+          - "canceled":         cancelled (terminal)
+          - "unknown":          provider returned a status we don't recognize
+                                (defensive — callers treat the same as a transient
+                                 error and retry on next tick)
+
+        Used by `reconcile_orphan_holds()` to detect divergence between our
+        recorded `payment_holds.last_known_status` and the provider's actual
+        state. Out-of-band operator action (capturing or cancelling from the
+        provider's dashboard) is observable only via this method.
+
+        Idempotency: read-only, no idempotency key required.
+
+        Raises:
+            PaymentRetryableError: transient (network blip, rate limit, 5xx).
+                Reconciler skips this row and retries on next tick. Does NOT
+                bump `last_reconciled_at` on the row.
+            PaymentPermanentError: terminal (hold_id not recognized; auth
+                misconfigured). Reconciler marks the row's last_known_status
+                'unknown' and stops re-querying it. Operator investigation
+                needed.
+        """
+        ...

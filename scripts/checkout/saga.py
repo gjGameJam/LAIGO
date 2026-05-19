@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 
 from .models import AllocationResult, ERROR_MESSAGES, SagaStatus, StockoutError
 from . import checkout_store_dispatch as checkout_store
+from . import payment_holds_store
 from .clients import lego_client, brickowl_client, bricklink_client
 from .gate import require_open, GateClosedError
 from .payment import registry as payment_registry
@@ -250,6 +251,17 @@ async def _cancel_hold_with_retry(
             if attempt > 0:
                 logger.info(
                     f"[saga] cancel succeeded for hold {hold_id} on attempt {attempt + 1}"
+                )
+            # Mirror the terminal Stripe state onto payment_holds (same
+            # rationale as the capture site — keep the reconciliation
+            # index in sync so the reconciler doesn't ask Stripe again).
+            try:
+                await payment_holds_store.mark_status(hold_id, "canceled")
+            except Exception as exc:
+                logger.error(
+                    f"[saga] payment_holds.mark_status(canceled) failed for "
+                    f"hold {hold_id}: {exc}. Reconciler will catch up.",
+                    exc_info=True,
                 )
             return True, None
 
@@ -676,6 +688,17 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
                 idempotency_key=f"cancel-{checkout_id}",
             )
             cancel_succeeded = True
+            # Mirror the cancel onto payment_holds. Best-effort — same
+            # rationale as _cancel_hold_with_retry's mark_status call.
+            try:
+                await payment_holds_store.mark_status(hold_id, "canceled")
+            except Exception as exc:
+                logger.error(
+                    f"[saga] [{checkout_id}] timeout-cancel: payment_holds."
+                    f"mark_status(canceled) failed for hold {hold_id}: {exc}. "
+                    "Reconciler will catch up.",
+                    exc_info=True,
+                )
         except PaymentProviderUnavailable as exc:
             cancel_error = (
                 f"No payment provider registered when releasing hold: {exc}"
@@ -899,6 +922,46 @@ async def _execute_checkout_saga_inner(
         logger.error(
             f"[saga] [{checkout_id}] Hold failed unexpectedly", exc_info=True
         )
+        return
+
+    # Record the hold in the reconciliation index BEFORE the sagas update.
+    # If `record_hold` fails (DB transient), we want the saga to abort here
+    # — better to refund a brand-new hold via the saga's exception path than
+    # to commit `saga_status='stripe_held'` without a reconciliation row.
+    # No-op when DB_BACKEND != postgres. ON CONFLICT DO NOTHING handles the
+    # rare resumed-saga case where create_hold's idempotency key returns
+    # the same hold.
+    try:
+        await payment_holds_store.record_hold(checkout_id, hold)
+    except Exception as exc:
+        # Roll back: cancel the brand-new hold (best-effort; the reconciler
+        # would catch a stranded hold eventually but we have the provider in
+        # hand right now). Then fail the saga so the customer sees a
+        # retryable error rather than silently stranding funds.
+        logger.error(
+            f"[saga] [{checkout_id}] payment_holds.record_hold failed after "
+            f"create_hold succeeded: {exc}. Attempting cancel.",
+            exc_info=True,
+        )
+        try:
+            await provider.cancel(
+                hold_id=hold.hold_id,
+                idempotency_key=f"cancel-{checkout_id}",
+            )
+        except Exception as cancel_exc:
+            logger.critical(
+                f"[saga] [{checkout_id}] cancel after record_hold failure "
+                f"ALSO failed: {cancel_exc}. Hold {hold.hold_id} is stranded "
+                "until reconciler picks it up — but reconciler won't see it "
+                "either (no payment_holds row). Operator must inspect Stripe "
+                "dashboard manually.",
+                exc_info=True,
+            )
+        await checkout_store.update(job_id, {
+            "saga_status": SagaStatus.FAILED,
+            "error": f"payment_holds INSERT failed: {exc}",
+            "customer_message": ERROR_MESSAGES["payment_transient"],
+        })
         return
 
     await checkout_store.update(job_id, {
@@ -1273,6 +1336,20 @@ async def _capture_with_retry(
             if attempt > 0:
                 logger.info(
                     f"[saga] [{checkout_id}] capture succeeded on attempt {attempt + 1}"
+                )
+            # Mirror the terminal Stripe state onto payment_holds so the
+            # reconciler won't try to cancel a captured hold. Best-effort:
+            # if this UPDATE fails, the reconciler would still see the row
+            # at 'requires_capture' and ask Stripe — which would correctly
+            # return 'succeeded' and update the row then. No double-capture
+            # risk (Stripe is idempotent + already captured).
+            try:
+                await payment_holds_store.mark_status(hold.hold_id, "succeeded")
+            except Exception as exc:
+                logger.error(
+                    f"[saga] [{checkout_id}] payment_holds.mark_status(succeeded) "
+                    f"failed: {exc}. Reconciler will catch up.",
+                    exc_info=True,
                 )
             return True
 

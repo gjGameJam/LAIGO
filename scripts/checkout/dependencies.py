@@ -44,14 +44,15 @@ Rules for using these dependencies on endpoints:
 """
 
 import logging
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 
+from . import audit
 from .gate import compute_decision, GateDecision
 
 logger = logging.getLogger("laigo")
 
 
-async def require_checkout_gate_open() -> GateDecision:
+async def require_checkout_gate_open(request: Request) -> GateDecision:
     """FastAPI dependency: Layer 3 of the checkout gate.
 
     Computes the gate state on every request via gate.compute_decision()
@@ -122,11 +123,45 @@ async def require_checkout_gate_open() -> GateDecision:
     if decision.is_open:
         return decision
 
-    # WARNING level: visible without changing log levels, but not so loud it
-    # drowns a noisy production log. Reasons are included so an operator can
-    # diagnose without leaving the log stream. The event-name format
-    # ("checkout.gate.l3_rejected") matches the convention used elsewhere
-    # in gate.py for greppability.
+    # L6 audit event (Phase E step 3, shipped 2026-05-19).
+    # `audit.emit` is async, never raises (logs CRITICAL on failure), and
+    # no-ops when DB_BACKEND != postgres. Per §2.2 vocabulary, this is the
+    # `gate.confirm_rejected` event.
+    #
+    # actor.ip is best-effort: behind a proxy/CDN the immediate client.host
+    # is the load balancer, not the real customer. Render forwards the
+    # real IP in X-Forwarded-For but we don't have a uniform middleware
+    # yet to harvest it — passing the raw client host is correct for now
+    # and degrades to the LB IP in proxied deploys. When a real request-id
+    # / forwarded-for middleware lands, swap this for the parsed value.
+    actor_ip = request.client.host if request.client else None
+    actor_user_agent = request.headers.get("user-agent")
+    # Harvest job_id from the URL path for per-job audit correlation. The
+    # `audit_events_job_ts_idx` index supports the operator query "show me
+    # every rejected /confirm for this customer's job." path_params is
+    # populated by FastAPI's router; the dependency runs after path matching.
+    # path_params.get returns None if the route doesn't have a {job_id}
+    # parameter (defensive — today /confirm is the only call site, but the
+    # dependency may be applied to future routes without job_id).
+    job_id = request.path_params.get("job_id")
+    await audit.emit(
+        "gate.confirm_rejected",
+        subject={"job_id": job_id} if job_id else None,
+        actor={
+            "type": "customer",
+            "ip": actor_ip,
+            "user_agent": actor_user_agent,
+        },
+        data={
+            "mode": decision.mode.value,
+            "reasons": list(decision.reasons),
+        },
+    )
+
+    # Keep the WARNING line alongside the audit emit per §2.6 cross-check
+    # window — operators can verify that every audit event has a matching
+    # log line and vice versa. The line is scheduled for removal one month
+    # after L6 ships if no completeness gap is detected.
     logger.warning(
         "checkout.gate.l3_rejected mode=%s reasons=%s",
         decision.mode.value,

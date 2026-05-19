@@ -74,7 +74,11 @@ GET /jobs/{id}/checkout/{co_id}/status
 | `optimizer.py` | Two-pass greedy allocator — pure function, no I/O |
 | `saga.py` | Saga orchestrator; routes orders by seller_id prefix |
 | `cache.py` | In-process TTL cache; sweep task started from `Main.py lifespan` |
-| `checkout_store.py` | Disk-backed checkout state + `read_order_list()` |
+| `checkout_store.py` | Disk-backed (JSON) checkout state. Used when `DB_BACKEND=json`. |
+| `checkout_store_pg.py` + `checkout_store_dispatch.py` | Postgres backend + runtime dispatcher (Phase C, 2026-05-18). Same `load/save/update` API. Used when `DB_BACKEND=postgres`. |
+| `payment_holds_store.py` | `payment_holds` reconciliation index. Wired at saga create_hold (INSERT) + capture/cancel (UPDATE). Phase E partial — `reconcile_orphan_holds()` still pending. |
+| `saga_resume.py` | Boot-time recovery: routes every non-terminal saga to a terminal state at lifespan startup. Phase E step 1. |
+| `audit.py` | L6 structured audit log — writes events to `audit_events` table. First call site (`gate.confirm_rejected`) wired; rest tracked in PRE_RELEASE_PAYMENT_CHECKLIST.md §2.6. |
 | `payment/base.py` | Provider Protocol + `PaymentHold` value type + retryable/permanent/unavailable exception hierarchy. Dependency-free (no SDK imports). |
 | `payment/registry.py` | Single-active provider registry: `register()`, `get_active()`, `is_configured()`, `active_name()`, `active_mode()`. Populated once per process at lifespan startup. |
 | `payment/stripe_provider.py` | `StripeProvider` implementing the Protocol. Houses the `STRIPE_ENABLED` operator flag. Translates Stripe error classes into Retryable/Permanent. **Not the safety boundary** — see `gate.py`. |
@@ -475,29 +479,26 @@ If retries exhausted: compensate and mark Saga `failed`.
 
 ## 9. Operator Crash Recovery
 
-Read `outputs/{job_id}/checkout_state.json` to find the last checkpoint, then follow the procedure for that state.
+**Phase E step 1 (2026-05-19) automated most of this.** On lifespan boot in postgres mode, `scripts/checkout/saga_resume.py:resume_in_flight_sagas()` inspects every non-terminal saga and routes it to a safe terminal state:
 
-**`initiated`:** No action needed.
+- `initiated` → FAILED with reason "Saga abandoned by process restart before payment hold"
+- `stripe_held` → `provider.cancel(hold_id)` + FAILED on success, MANUAL_REVIEW on cancel failure or missing hold_id or no provider
+- `orders_placed` / `fallback_ordered` → MANUAL_REVIEW with verbose `manual_review_reason` runbook
 
-**`stripe_held`:** Cancel the PaymentIntent:
-```
-Stripe Dashboard → Payments → find payment_hold_id → Cancel
-```
-Or via CLI: `stripe payment_intents cancel <pi_...>`
+Each routing decision emits a corresponding L6 audit event (`saga.failed`, `saga.manual_review`, `payment.cancelled`).
 
-**`orders_placed`:**
-1. For each ID in `brickowl_order_ids`: cancel via BrickOwl seller portal
-2. For `lego_order_id` (if set): log into LAIGO's LEGO.com account → Orders → cancel if not yet shipped
-3. Cancel Stripe hold (`payment_hold_id`)
+**For JSON-mode deployments** (or when reading state by hand), checkpoint lives at `outputs/{job_id}/checkout_state.json`. In postgres mode the same state is in the `sagas` table; query `SELECT * FROM sagas WHERE job_id = '<id>'`.
 
-**`manual_review` (NEW terminal state — read `manual_review_reason` first):** The Saga deliberately stopped because something needs operator judgement before continuing. Two common causes:
+**`manual_review` (terminal):** the saga deliberately stopped because something needs operator judgement. Read `manual_review_reason` first — DO NOT cancel orders without it. Two common causes:
 
-- **Capture exhausted retries after orders were placed.** The hold (`payment_hold_id`) may have actually been captured (Stripe's idempotency cache returned a network error to us but accepted the capture server-side). Check the Stripe dashboard first.
-  - If captured: mark the saga `payment_captured` manually by editing `checkout_state.json`.
+- **Capture exhausted retries after orders were placed.** The hold may have actually been captured (Stripe's idempotency cache returned a network error but accepted the capture server-side). Check the Stripe dashboard first.
+  - If captured: mark the saga `payment_captured` manually (`UPDATE sagas SET saga_status='payment_captured' WHERE checkout_id='...'`).
   - If still authorized: retry capture from the dashboard, OR cancel the hold and refund the placed orders.
 - **Allocation drift exceeded the 5% buffer.** Final total > authorized. Capture the authorized amount, bill the customer for the difference via an alternate channel, OR refund the placed orders and cancel the hold.
 
-Do NOT cancel orders without reading `manual_review_reason` — orders are already with sellers and the customer's intent is unknown without human judgement.
+**`stripe_held` MANUAL_REVIEW from resume failure.** Either the provider wasn't registered at boot (gate closed) or `provider.cancel` raised. Cancel the hold via Stripe Dashboard manually; then `UPDATE sagas SET saga_status='failed' WHERE checkout_id='...'`.
+
+**Important caveat:** `provider.cancel` can succeed at Stripe but raise on the Python side (network timeout reading the response). In that case the saga is routed to MANUAL_REVIEW even though the hold is actually canceled. Check Stripe before any other action. Phase E step 2's `reconcile_orphan_holds()` (deferred — see PRE_RELEASE_PAYMENT_CHECKLIST.md §9.3) will fix this once shipped.
 
 ---
 
@@ -612,7 +613,7 @@ register(StripeProvider())   # treated as a fresh process
 - `LAIGO_ALLOW_REGISTRY_REPLACE` MUST NOT be set in production. The /checkout/gate body does NOT surface this state; operators rely on log scraping for `payment.registry.replaced` lines.
 - `_reset_for_tests()` is the canonical way to reset state between test scenarios; despite the name, it is safe to call from production shutdown paths.
 
-**Latent caveat:** `Main.py` lifespan does not currently catch `RuntimeError` from `register()`. If FastAPI lifespan ever runs twice in the same Python process (some test frameworks; future hot-reload tooling), the second `register()` raises and crashes lifespan startup. Production today is unaffected because `uvicorn` (with or without `--reload`) spawns fresh child processes for each lifespan. See `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §8 H6` for the planned mitigation (one-line `_reset_for_tests()` call in lifespan shutdown).
+**Note:** `Main.py` lifespan shutdown calls `payment_registry._reset_for_tests()` (added 2026-05-16) so the second lifespan run in the same Python process — TestClient used twice, future hot-reload tooling — does not crash on the B17 replacement guard. Production with `uvicorn`-spawned-per-lifespan child processes is unaffected either way.
 
 ### Webhook (optional)
 
@@ -756,7 +757,7 @@ Operational issues only — defects in the saga / payment layer are tracked in `
 
 9. **B23 — concurrent `/confirm` with different `checkout_id` for the same `job_id` clobbers in-flight state.** If a customer opens a second tab, makes a fresh `/quote`, and confirms before the first saga finishes, the second `/confirm` overwrites the row. Today's `_locks[job_id]` serialization (B1) makes this atomic but not safe — the two sagas race their state writes. See PRE_RELEASE §4 B23 for the recommended fix (Option B — reject if the existing saga is non-terminal).
 
-10. **Error-field information leak (B12 — paused).** `GET /status` surfaces `state.get("error")` verbatim, which includes Stripe internal text, exception class names, PaymentIntent IDs, and operator-facing gate reasons. Customer-visible. See PRE_RELEASE §8 H1 — top of the resume queue.
+10. ~~Error-field information leak (B12).~~ **RESOLVED 2026-05-16.** `/status` now returns the customer-facing `customer_message` (from the `ERROR_MESSAGES` translation table in `models.py`); the raw `error` field stays operator-internal. Every saga write that sets `error` MUST also set `customer_message`.
 
 ---
 
@@ -779,9 +780,9 @@ Listed in priority order:
 | 9 | Enable Stripe: set `STRIPE_ENABLED=True` in `payment/stripe_provider.py` + `STRIPE_SECRET_KEY=sk_test_...` in `.env.secrets` + `CHECKOUT_ENABLED=true` in `.env` + verify `GET /checkout/gate` returns `mode: "test"` | End-to-end Stripe test with `pm_card_visa` (see PRE_RELEASE_PAYMENT_CHECKLIST.md §6 for the full go-live runbook) |
 | 10 | Send customer confirmation email after saga completes | Email service (e.g. SendGrid / SES). Should fire on `saga_status == payment_captured` AND on `saga_status == manual_review` (different templates). |
 | 11 | Add `checkout_store._locks` cleanup on job TTL expiry | Main.py cleanup thread integration. Subsumed by roadmap #2 (Postgres state) when that ships. |
-| 12 | Resume B12 (customer-facing error translation) | None — paused mid-Phase-3, top of `PRE_RELEASE_PAYMENT_CHECKLIST.md §8 H1` resume queue. |
-| 13 | L6 audit log subsystem | Schema + storage decisions made; see `PRE_RELEASE_PAYMENT_CHECKLIST.md §2`. |
-| 14 | Postgres-backed state + resume-on-restart | Roadmap #2 — unblocks B11 (destructive checkpoint), B13/B15 hardening, durable in-flight saga recovery. |
+| 12 | ~~B12 customer-facing error translation~~ | ✅ Shipped 2026-05-16. |
+| 13 | L6 audit log — wire remaining call sites | Schema + first call site shipped 2026-05-19. Checklist in `PRE_RELEASE_PAYMENT_CHECKLIST.md §2.6`. |
+| 14 | ~~Postgres-backed state + resume-on-restart~~ | ✅ Phases A–E.1 shipped 2026-05-16 → 2026-05-19. Remaining: E.2 (`reconcile_orphan_holds`) + F (Render cutover). See `PRE_RELEASE_PAYMENT_CHECKLIST.md §9`. |
 
 ---
 

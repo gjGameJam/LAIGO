@@ -319,6 +319,68 @@ class StripeProvider:
             raise
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Status read (used by reconcile_orphan_holds)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Stripe PaymentIntent statuses, mapped to our normalized 4-value set.
+    # Reference: https://stripe.com/docs/payments/intents#intent-statuses
+    # Any PI status not in this map yields "unknown" and the reconciler logs
+    # a warning. Adding a new mapping is a code-only change.
+    _STRIPE_STATUS_MAP = {
+        # Active authorization — the auth-and-capture flow we use puts holds
+        # here after create_hold returns successfully.
+        "requires_capture":          "requires_capture",
+        # Terminal — captured.
+        "succeeded":                 "succeeded",
+        # Terminal — cancelled. Stripe uses the American spelling.
+        "canceled":                  "canceled",
+        # Pre-capture states that should never persist long enough to be
+        # reconciled, but we map them defensively in case they do.
+        "processing":                "requires_capture",
+        # Anything below means our auth-and-capture flow broke — these
+        # statuses indicate the hold never reached requires_capture, which
+        # shouldn't happen for a row we recorded. Map to "unknown" so the
+        # reconciler logs + stops re-querying.
+        "requires_payment_method":   "unknown",
+        "requires_confirmation":     "unknown",
+        "requires_action":           "unknown",
+    }
+
+    async def get_hold_status(self, hold_id: str) -> str:
+        """Return Stripe's current view of `hold_id`'s lifecycle state.
+
+        Maps `PaymentIntent.status` to our normalized 4-value set. See
+        `_STRIPE_STATUS_MAP` for the conversion table.
+
+        Read-only — no idempotency key needed; Stripe's `retrieve` is a GET.
+        Network/5xx/rate-limit → `PaymentRetryableError`. "No such payment
+        intent" + auth misconfig + other terminal Stripe errors →
+        `PaymentPermanentError`. See `_raise_classified` for the full rules.
+        """
+        try:
+            intent = await asyncio.to_thread(
+                self._stripe.PaymentIntent.retrieve,
+                hold_id,
+            )
+        except Exception as exc:
+            self._raise_classified(exc, op="get_hold_status")
+            raise  # _raise_classified raises on every branch; this is unreachable
+
+        # Stripe's response is a dict-like object; `.get("status")` is the
+        # documented field and is always present on a successfully retrieved
+        # PaymentIntent.
+        raw_status = intent.get("status")
+        mapped = self._STRIPE_STATUS_MAP.get(raw_status, "unknown")
+        if mapped == "unknown":
+            logger.warning(
+                "payment.stripe.get_hold_status.unmapped hold_id=%s "
+                "stripe_status=%r — treating as 'unknown'. If this fires "
+                "regularly, extend _STRIPE_STATUS_MAP in stripe_provider.py.",
+                hold_id, raw_status,
+            )
+        return mapped
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Error classification helpers
     # ─────────────────────────────────────────────────────────────────────────
 

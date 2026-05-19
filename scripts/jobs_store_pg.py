@@ -2,8 +2,9 @@
 Postgres backend for the mosaic job lifecycle (Phase D step 2).
 
 This module owns ALL persistent state about jobs (the `jobs` table). It is
-the successor to `scripts/jobs_db.py` (Phase D-foundation shadow writes) and
-folds in those write helpers as full-fledged lifecycle methods.
+the successor to `scripts/jobs_db.py` (Phase D-foundation shadow writes;
+removed in Phase D step 2 S8) and folds in those write helpers as
+full-fledged lifecycle methods.
 
 Boundary:
 - Persistent state (status, progress_pct, timestamps, error_message,
@@ -29,6 +30,7 @@ Public API (mirrors `scripts/jobs_store_json.py` exactly):
 - list_queued()          — SELECT all queued rows, ordered by queued_at
 - list_running()         — SELECT all running rows (for active-count + watchdog)
 - count_active()         — len(list_running()) but cheaper (single SELECT COUNT)
+- count_queued()         — len(list_queued()) but cheaper (single SELECT COUNT)
 - dequeue_next()         — atomic SELECT FOR UPDATE SKIP LOCKED + UPDATE→running
                            (replaces queue.Queue + scheduler thread coupling)
 - mark_running(job_id)   — explicit UPDATE for paths that don't use dequeue_next
@@ -568,6 +570,23 @@ async def count_active() -> int:
     )
 
 
+async def count_queued() -> int:
+    """Return the number of queued (not-yet-running) jobs.
+
+    Replaces `len(app.state.queue_order)` and the implicit
+    `app.state.job_queue.qsize()` check. The route handler (`/generate`)
+    checks this against `MAX_QUEUE_SIZE` before inserting; a small
+    TOCTOU race window (two requests both passing the check and both
+    inserting) is tolerable for a 20-item queue. Eliminating the race
+    entirely would require atomic count-and-insert inside a transaction,
+    which adds round-trips and complexity for negligible benefit.
+    """
+    pool = get_pool()
+    return await pool.fetchval(
+        "SELECT COUNT(*) FROM jobs WHERE status = 'queued'"
+    )
+
+
 # ─── Lifecycle: atomic dequeue (FOR UPDATE SKIP LOCKED) ──────────────────────
 
 
@@ -658,3 +677,22 @@ def write_progress_from_thread(job_id: str, pct: float) -> None:
 
 def delete_from_thread(job_id: str) -> None:
     _submit_from_thread(_swallow(delete(job_id), "delete", job_id))
+
+
+# ─── Test helpers ────────────────────────────────────────────────────────────
+
+
+def _reset_for_tests() -> None:
+    """Symmetric placeholder matching `jobs_store_json._reset_for_tests()`.
+
+    No process-local state to reset here — the PG backend's state is the
+    `jobs` table itself and the shared asyncpg pool. Tests that need a
+    clean table call `await pool.execute("TRUNCATE jobs CASCADE")` (or
+    rely on per-test Neon branch fixtures). Tests that need to reset the
+    pool call `await db._reset_for_tests()`.
+
+    Exposed only so the dispatcher contract is fully symmetric — callers
+    using `from .jobs_store_dispatch import _reset_for_tests` don't need
+    to know which backend is active.
+    """
+    pass

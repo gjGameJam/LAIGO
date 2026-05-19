@@ -16,7 +16,6 @@ import os
 import shutil
 import time
 import threading
-import queue
 import json
 import traceback
 import logging
@@ -29,6 +28,7 @@ from .checkout.debug_router import debug_router
 from .checkout.gate_router import checkout_gate_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
+from . import jobs_store_dispatch as jobs_store
 import gc
 
 # -----------------------------
@@ -65,6 +65,13 @@ MAX_QUEUE_SIZE = 20
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
+
+# How long the scheduler sleeps when no work is available, in seconds. The
+# scheduler loop polls `jobs_store.dequeue_next()` rather than blocking on a
+# `queue.Queue` (S6 — replaced the legacy queue in Phase D step 2). 0.5s
+# matches the previous queue.get(timeout=0.5) behavior so dispatch latency is
+# unchanged from the customer's perspective.
+SCHEDULER_IDLE_POLL_SECONDS = 0.5
 
 # Fail loudly on startup if directories can't be created or written to
 try:
@@ -109,7 +116,7 @@ async def lifespan(app: FastAPI):
     # DB_BACKEND=postgres, the call refuses to boot on missing/malformed
     # DATABASE_URL or wrong endpoint (direct vs pooler). Pool must exist
     # BEFORE payment registration, gate computation, or any router can serve
-    # — checkout_store and (eventually) job lifecycle acquire from it.
+    # — checkout_store and the jobs lifecycle (Phase D step 2) acquire from it.
     # See docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.2.4.
     # ─────────────────────────────────────────────────────────────────────────
     from .db import (
@@ -119,7 +126,6 @@ async def lifespan(app: FastAPI):
         verify_schema,
         verify_alembic_head_matches_expected,
     )
-    from . import jobs_db
 
     # B43 — fail fast on code drift between scripts/db.py:_EXPECTED_SCHEMA_VERSION
     # and the head of scripts/migrations/versions/. Pure local check; no DB
@@ -142,12 +148,13 @@ async def lifespan(app: FastAPI):
     if is_postgres_backend():
         log.info("DB schema verified (alembic revision matches _EXPECTED_SCHEMA_VERSION)")
 
-    # Phase D-foundation — capture the FastAPI event loop so the scheduler /
-    # cleanup / executor-callback threads can fire-and-forget shadow writes
-    # to the jobs table. Must happen BEFORE the threads start. The shadow
-    # writes themselves are no-ops when DB_BACKEND=json.
-    # See scripts/jobs_db.py module docstring.
-    jobs_db.set_event_loop(asyncio.get_running_loop())
+    # Capture the FastAPI event loop so the scheduler / cleanup / executor-
+    # callback threads can submit coroutines to the loop. The dispatcher fans
+    # the loop ref out to both backends (PG + JSON) so flipping DB_BACKEND
+    # mid-process during tests keeps the wrappers working.
+    loop = asyncio.get_running_loop()
+    jobs_store.set_event_loop(loop)
+    app.state.event_loop = loop
 
     # ─────────────────────────────────────────────────────────────────────────
     # PAYMENT PROVIDER REGISTRATION (Layer 5).
@@ -250,6 +257,34 @@ async def lifespan(app: FastAPI):
         )
         raise RuntimeError("Live Stripe key outside Render is forbidden")
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # SAGA RESUME-ON-STARTUP (Phase E step 1).
+    #
+    # The behavior the entire DB migration exists for. Inspect every saga
+    # that was in a non-terminal state when the process died, and route each
+    # to a safe terminal state (FAILED or MANUAL_REVIEW). Audit FMEA #3
+    # ("Saga crashes mid-flight, no resumption", RPN 450) is closed by this
+    # single call.
+    #
+    # Order: AFTER `init_pool()` (above), `verify_schema()`, and payment
+    # provider registration (so `stripe_held` recovery can find the
+    # provider); BEFORE the executor + scheduler + cleanup threads start
+    # (so resume completes before any new work begins).
+    #
+    # No-op when DB_BACKEND != postgres. The JSON-mode runtime has no
+    # sagas table to recover from.
+    #
+    # Per-saga recovery failures are swallowed inside `resume_in_flight_sagas`
+    # (logged CRITICAL) so a single stuck row cannot block boot. A connection-
+    # level failure on the top-level fetch DOES propagate — if Neon goes
+    # unreachable between `init_pool`'s SELECT 1 and resume's fetch, the
+    # lifespan fails and uvicorn refuses to boot. That's intentional: the
+    # whole app needs DB; partial-up is worse than fail-loud.
+    # ─────────────────────────────────────────────────────────────────────────
+    if is_postgres_backend():
+        from .checkout.saga_resume import resume_in_flight_sagas
+        await resume_in_flight_sagas()
+
     try:
         # max_tasks_per_child=1: worker exits and is respawned after every job,
         # releasing all memory (numpy, skimage, PIL, cv2, mediapipe, palette globals)
@@ -259,16 +294,46 @@ async def lifespan(app: FastAPI):
             max_workers=MAX_WORKERS,
             max_tasks_per_child=1
         )
-        app.state.jobs = {}
-        app.state.progress = {}  # job_id -> Path to progress file
-        app.state.jobs_lock = threading.Lock()
+
+        # Runtime-only side tables (Phase D step 2 — persistent state moved
+        # to jobs_store dispatcher; only un-serializable / transient refs
+        # remain on app.state).
+        #
+        # progress  : job_id → Path of the worker's .progress file. The file
+        #             stays the source of truth for the worker subprocess
+        #             (which has no DB connection); the scheduler tick mirrors
+        #             into the store on every iteration (S5).
+        # futures   : job_id → concurrent.futures.Future returned by
+        #             executor.submit. Cannot be persisted; also the sentinel
+        #             that arbitrates the done-callback vs timeout-watchdog
+        #             race (whoever pops first owns the cleanup).
+        # deadlines : job_id → wallclock float when JOB_TIMEOUT_SECONDS expires.
+        #             Computed at dispatch and consulted by the watchdog. Not
+        #             persisted — a server restart restarts the deadline
+        #             (Phase E resume-on-restart will surface long-running
+        #             pre-restart jobs explicitly).
+        # intake    : job_id → full settings dict captured at /generate. Used
+        #             by the timeout watchdog to write `settings` into
+        #             `manifest_failed.json` for operator forensics. The store
+        #             only persists the typed columns (mosaic_type, width_blocks,
+        #             background_pct, dither); `to_frame` is not in the schema,
+        #             so intake preserves it for the manifest-write path.
+        app.state.progress = {}
         app.state.progress_lock = threading.Lock()
-        app.state.queue_order = []  # job ids in queued order, for queue UI
-        app.state.queue_lock = threading.Lock()
-        app.state.job_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+        app.state.futures: dict[str, object] = {}
+        app.state.deadlines: dict[str, float] = {}
+        app.state.intake: dict[str, dict] = {}
+
+        # Scheduler synchronization — same primitives, retained verbatim.
+        # active_jobs is the in-memory MAX_WORKERS gate; we deliberately do
+        # not delegate this to jobs_store.count_active() because the
+        # increment/decrement must be transactional with the cv.wait() loop,
+        # and an async round-trip per scheduler tick would needlessly bound
+        # dispatch latency on a hot path.
         app.state.scheduler_shutdown = threading.Event()
         app.state.scheduler_cv = threading.Condition()
         app.state.active_jobs = 0
+
         log.info(f"ProcessPoolExecutor started with {MAX_WORKERS} worker(s), max_tasks_per_child=1")
     except Exception as e:
         log.critical(f"Failed to initialise executor: {e}", exc_info=True)
@@ -293,6 +358,22 @@ async def lifespan(app: FastAPI):
 
     start_cache_sweeper()
     log.info("Cache sweeper started")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ORPHAN-HOLD RECONCILER (Phase E step 2, 2026-05-19).
+    #
+    # Periodic task that detects divergence between our `payment_holds.
+    # last_known_status` and the provider's view (Stripe). Catches out-of-band
+    # operator actions (capture/cancel from the Stripe dashboard) and stuck
+    # sagas that resume-on-startup missed.
+    #
+    # No-op when DB_BACKEND != postgres OR no PaymentProvider is registered
+    # (gate closed). The task is held by a module-level strong reference in
+    # `scripts/checkout/reconcile.py` per the C1/B24 GC-resilience pattern.
+    # ─────────────────────────────────────────────────────────────────────────
+    from .checkout.reconcile import start_reconcile_task
+    start_reconcile_task()
+    log.info("Reconcile periodic task started (or skipped per DB_BACKEND)")
 
     log.info("LAIGO API ready")
     yield
@@ -325,13 +406,23 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.debug("registry reset on shutdown skipped (already cleared)")
 
-    # Phase D-foundation — drop the event-loop reference so any worker thread
-    # still finishing late doesn't try to submit to a dead loop. Idempotent.
+    # Drop the event-loop reference so any worker thread still finishing late
+    # doesn't try to submit to a dead loop. Idempotent. Fans out to both
+    # backends in the dispatcher.
     try:
-        from . import jobs_db
-        jobs_db.clear_event_loop()
+        jobs_store.clear_event_loop()
     except Exception:
-        log.debug("jobs_db event-loop clear skipped")
+        log.debug("jobs_store event-loop clear skipped")
+
+    # Stop the reconcile periodic task BEFORE close_pool — the task uses the
+    # asyncpg pool; if we close the pool first, its in-flight queries would
+    # raise on closed-pool errors mid-shutdown. 5-second cancel timeout
+    # protects shutdown from a wedged tick.
+    try:
+        from .checkout.reconcile import stop_reconcile_task
+        await stop_reconcile_task(timeout=5.0)
+    except Exception:
+        log.debug("reconcile task stop skipped (never started or already done)")
 
     # DB pool LAST — every other subsystem may still want to write a final
     # audit row, flush a state checkpoint, etc. close_pool() is idempotent
@@ -385,34 +476,78 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # -----------------------------
 # SHARED HELPERS
 # -----------------------------
-def _job_snapshot(job: dict | None) -> dict | None:
-    if not job:
+def _dt_to_epoch(dt) -> float | None:
+    """Convert a tz-aware datetime (asyncpg / jobs_store_json native) to epoch
+    seconds for the legacy /jobs/{id} response shape. Returns None unchanged."""
+    if dt is None:
         return None
-    return {k: v for k, v in job.items() if k not in ("future", "progress_file")}
+    if isinstance(dt, (int, float)):
+        return float(dt)
+    return dt.timestamp()
 
 
-def _queue_position(app: FastAPI, job_id: str) -> tuple[int | None, int]:
-    with app.state.queue_lock:
-        try:
-            idx = app.state.queue_order.index(job_id)
-            return idx + 1, len(app.state.queue_order)
-        except ValueError:
-            return None, len(app.state.queue_order)
+def _store_row_to_response(row: dict, settings: dict | None) -> dict:
+    """Translate a jobs_store dict (16 canonical columns) into the legacy
+    /jobs/{id} response shape the frontend has historically consumed.
+
+    Rules:
+    - `timed_out` is normalized to `failed` so the frontend's "your job
+      didn't complete" branch handles both. The internal DB column keeps
+      the distinct value for operator triage.
+    - Timestamps converted from datetime to epoch float.
+    - `settings` is the full intake dict (preserves `to_frame`, which is
+      NOT a column in the jobs table). Reconstructed from typed columns
+      when the runtime intake mapping has been cleared (e.g., after a
+      terminal transition + intake pop).
+    """
+    raw_status = row["status"]
+    response_status = "failed" if raw_status == "timed_out" else raw_status
+
+    if settings is None:
+        settings = {
+            "mosaic_block_width": row.get("width_blocks"),
+            "mosaic_type": row.get("mosaic_type"),
+            "background_color_percent": row.get("background_pct"),
+            # `to_frame` is not persisted — fall back to the API default.
+            "to_frame": True,
+        }
+
+    response: dict = {
+        "status": response_status,
+        "progress": int(row.get("progress_pct") or 0),
+        "created_at": _dt_to_epoch(row.get("queued_at")),
+        "queued_at": _dt_to_epoch(row.get("queued_at")),
+        "settings": settings,
+    }
+    started_at = _dt_to_epoch(row.get("started_at"))
+    if started_at is not None:
+        response["started_at"] = started_at
+    completed_at = _dt_to_epoch(row.get("completed_at"))
+    if completed_at is not None:
+        response["finished_at"] = completed_at
+    if row.get("error_message"):
+        response["error"] = row["error_message"]
+    return response
 
 
-def _remove_from_queue_order(app: FastAPI, job_id: str) -> None:
-    with app.state.queue_lock:
-        try:
-            app.state.queue_order.remove(job_id)
-        except ValueError:
-            pass
+async def _queue_position_async(job_id: str) -> tuple[int | None, int]:
+    """Find the 1-based position of `job_id` in the queued list and the
+    total queue length. Returns (None, length) if the job isn't queued.
+
+    Backed by `list_queued()` (ordered by queued_at) — O(N) for N≤20.
+    """
+    queued_rows = await jobs_store.list_queued()
+    for idx, row in enumerate(queued_rows):
+        if row["job_id"] == job_id:
+            return idx + 1, len(queued_rows)
+    return None, len(queued_rows)
 
 
 def _write_error_manifest(job_root: Path, job_id: str, settings: dict,
                            error: str, tb: str) -> None:
     """Write failure details to disk so get_job can serve them after the job
-    is evicted from app.state.jobs. Accepts pre-captured traceback string so
-    this can safely be called outside an except block."""
+    is evicted from the store. Accepts pre-captured traceback string so this
+    can safely be called outside an except block."""
     try:
         error_info = {
             "status": "failed",
@@ -432,6 +567,19 @@ def _write_error_manifest(job_root: Path, job_id: str, settings: dict,
             f"[ERROR] Could not write error manifest for job {job_id}: {write_err}",
             file=sys.stderr, flush=True
         )
+
+
+def _run_coro_blocking(coro, loop: asyncio.AbstractEventLoop, timeout: float = 30.0):
+    """Submit a coroutine to the FastAPI event loop from a non-async thread
+    and BLOCK until it returns (or times out).
+
+    Distinct from `jobs_store.*_from_thread` wrappers (fire-and-forget). Use
+    this when the caller needs the return value — `dequeue_next()` in the
+    scheduler, `cleanup_expired()` in the cleanup loop. The timeout caps the
+    wait so a wedged event loop doesn't hang the worker thread forever.
+    """
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=timeout)
 
 
 # -----------------------------
@@ -595,23 +743,50 @@ def run_job(job_id: str,
 # -----------------------------
 # SCHEDULER HELPERS
 # -----------------------------
-def _mark_submission_failed(app: FastAPI, item: dict, error: str, tb: str) -> None:
-    """Handles failures before the worker process starts.
+def _drop_runtime_state(app: FastAPI, job_id: str, *, drop_intake: bool = False) -> None:
+    """Pop runtime-only side-table entries for a job. Idempotent.
 
-    This cleans up the uploaded image, progress file, and any scratch output,
-    then marks the job as failed in memory and writes an error manifest.
+    Called from terminal paths (done-callback, watchdog, submission-failure)
+    AND from cleanup at TTL eviction. The store row is owned by the
+    dispatcher; this only clears un-serializable / transient refs.
 
-    B53 fix: also fires a `mark_failed_from_thread` shadow write so the
-    corresponding Postgres `jobs` row transitions from 'queued' to 'failed'.
-    Without this, pre-dispatch failures (executor.submit error, shutdown
-    race, scheduler-state race) leave the DB row stuck at 'queued' forever
-    while the in-memory state correctly says 'failed'.
+    `drop_intake` is False for terminal transitions because the `/jobs/{id}`
+    contract surfaces `settings` until TTL eviction (preserves `to_frame`,
+    which is not a column in the jobs table, and float precision on
+    background_pct that would be lost on reconstruction from the SMALLINT
+    column). cleanup_loop passes True after the row is gone.
     """
-    job_id = item["job_id"]
-    image_path = Path(item["image_path"])
-    progress_path = Path(item["progress_path"])
-    settings = item["settings"]
+    app.state.futures.pop(job_id, None)
+    app.state.deadlines.pop(job_id, None)
+    if drop_intake:
+        app.state.intake.pop(job_id, None)
+    with app.state.progress_lock:
+        progress_file = app.state.progress.pop(job_id, None)
+    if progress_file:
+        try:
+            Path(progress_file).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _mark_submission_failed(app: FastAPI, job_id: str, error: str, tb: str) -> None:
+    """Handles failures AFTER `dequeue_next()` has flipped the row to
+    'running' but BEFORE the worker future actually exists.
+
+    Two callers today: (a) scheduler sees shutdown after claiming a row,
+    (b) `executor.submit` raises. In both cases the row is at 'running'
+    in the store; we must roll it forward to 'failed' so the row doesn't
+    linger and so /jobs/{id} surfaces the failure. Worker artifacts (input
+    file, partial workspace) are best-effort cleaned.
+
+    Settings come from `app.state.intake[job_id]`, which was populated at
+    /generate and survives past the dispatch step.
+    """
+    settings = app.state.intake.get(job_id, {})
     job_root = OUTPUT_DIR / job_id
+
+    image_path = INPUT_DIR / f"{job_id}.upload"
+    progress_path = INPUT_DIR / f"{job_id}.progress"
 
     shutil.rmtree(job_root / "workspace", ignore_errors=True)
     shutil.rmtree(job_root, ignore_errors=True)
@@ -628,89 +803,30 @@ def _mark_submission_failed(app: FastAPI, item: dict, error: str, tb: str) -> No
 
     _write_error_manifest(job_root, job_id, settings, error, tb)
 
-    with app.state.progress_lock:
-        app.state.progress.pop(job_id, None)
+    _drop_runtime_state(app, job_id)
 
-    _remove_from_queue_order(app, job_id)
-
-    with app.state.jobs_lock:
-        job = app.state.jobs.get(job_id)
-        if job is not None:
-            job.update({
-                "status": "failed",
-                "progress": 0,
-                "error": error,
-                "traceback": tb,
-                "finished_at": time.time(),
-            })
-            job.pop("future", None)
-
-    # B53 fix — mirror the in-memory 'failed' state to the DB. Fire-and-forget;
-    # if the DB write fails, jobs_db logs CRITICAL and the row stays at
-    # 'queued', but the in-memory state is correct and /jobs/{id} still
-    # serves the correct status.
-    from . import jobs_db
-    jobs_db.mark_failed_from_thread(job_id, error)
+    # Persistent terminal write. Fire-and-forget from this thread — the
+    # `*_from_thread` wrapper logs CRITICAL on failure but never raises here.
+    jobs_store.mark_failed_from_thread(job_id, error)
 
     log.error(f"Job {job_id} failed before execution: {error}")
 
 
-def _check_timed_out_jobs(app: FastAPI, slog) -> None:
-    """Called from the scheduler loop to forcibly fail jobs that exceed JOB_TIMEOUT_SECONDS.
+def _process_terminal(app: FastAPI, job_id: str, future) -> None:
+    """Persist the terminal outcome of a worker future. Caller must have
+    already claimed ownership via an atomic `app.state.futures.pop()`.
 
-    The watchdog pops 'future' from the job dict as a sentinel so _job_done_callback
-    can detect the job was already finalized and skip its own decrement.
+    Two callers: `_job_done_callback` (normal path) and `_check_timed_out_jobs`
+    when it observes a future that completed concurrently. Both must end up
+    at the same store state, run `_drop_runtime_state`, and decrement
+    `active_jobs` exactly once.
+
+    Worker subprocess crashes (`future.result()` raises rather than returns
+    a failure dict) get a synthetic manifest_failed.json here — the worker
+    never got to write one itself, so without this the failure would
+    disappear after TTL eviction.
     """
-    now = time.time()
-    timed_out = []
-    with app.state.jobs_lock:
-        for job_id, job in list(app.state.jobs.items()):
-            if job.get("status") == "running":
-                deadline = job.get("deadline")
-                future = job.get("future")
-                if deadline and now > deadline and future is not None and not future.done():
-                    timed_out.append((job_id, future, job.get("settings", {})))
-
-    for job_id, future, settings in timed_out:
-        slog.error(f"Job {job_id} exceeded timeout of {JOB_TIMEOUT_SECONDS}s — forcing failure")
-        tb_str = f"Job exceeded timeout of {JOB_TIMEOUT_SECONDS}s"
-        _write_error_manifest(OUTPUT_DIR / job_id, job_id, settings, "Job timed out", tb_str)
-
-        with app.state.jobs_lock:
-            job = app.state.jobs.get(job_id)
-            if job is not None and job.get("status") == "running":
-                job.update({
-                    "status": "failed",
-                    "progress": 0,
-                    "error": f"Job timed out after {JOB_TIMEOUT_SECONDS}s",
-                    "traceback": tb_str,
-                    "finished_at": now,
-                })
-                job.pop("future", None)   # sentinel: _job_done_callback skips if "future" absent
-                job.pop("deadline", None)
-
-        with app.state.progress_lock:
-            app.state.progress.pop(job_id, None)
-
-        with app.state.scheduler_cv:
-            app.state.active_jobs = max(0, app.state.active_jobs - 1)
-            app.state.scheduler_cv.notify_all()
-
-        # Phase D-foundation shadow write — distinct DB status='timed_out'
-        # so operators can triage stuck jobs separately from clean failures.
-        # In-memory uses 'failed' status (legacy contract); DB uses 'timed_out'.
-        from . import jobs_db
-        jobs_db.mark_timed_out_from_thread(
-            job_id, f"Job timed out after {JOB_TIMEOUT_SECONDS}s"
-        )
-
-
-def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
-    """Finalizes a completed worker future in the main process.
-
-    This is the canonical place where running -> complete/failed is finalized.
-    The get_job route also has a safety-net resolution path.
-    """
+    worker_wrote_manifest = True
     try:
         result = future.result()
         if not isinstance(result, dict):
@@ -721,6 +837,7 @@ def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
                 "traceback": "",
                 "finished_at": time.time(),
             }
+            worker_wrote_manifest = False  # malformed return — manifest absent
     except Exception as e:
         tb = traceback.format_exc()
         result = {
@@ -730,46 +847,143 @@ def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
             "traceback": tb,
             "finished_at": time.time(),
         }
+        worker_wrote_manifest = False  # subprocess crashed before fail() could fire
 
-    # If _check_timed_out_jobs already finalized this job (it pops "future" as a sentinel),
-    # skip both the state update and the active_jobs decrement to avoid double-counting.
-    already_finalized = False
-    with app.state.jobs_lock:
-        job = app.state.jobs.get(job_id)
-        if job is not None:
-            if job.get("status") in ("complete", "failed") and "future" not in job:
-                already_finalized = True
-            else:
-                job.update(result)
-                job["finished_at"] = result.get("finished_at", time.time())
-                job.pop("future", None)
+    status = result.get("status")
+    if status == "complete":
+        jobs_store.mark_complete_from_thread(job_id)
+    else:
+        if not worker_wrote_manifest:
+            # Subprocess crash or malformed return — synthesize the manifest
+            # so /jobs/{id} can still serve forensics after the store row
+            # gets TTL-evicted.
+            settings = app.state.intake.get(job_id, {})
+            _write_error_manifest(
+                OUTPUT_DIR / job_id, job_id, settings,
+                result["error"], result["traceback"],
+            )
+        error_msg = result.get("error") or "Worker failed without error message"
+        jobs_store.mark_failed_from_thread(job_id, error_msg)
 
-    with app.state.progress_lock:
-        app.state.progress.pop(job_id, None)
+    _drop_runtime_state(app, job_id)
 
-    if not already_finalized:
+    with app.state.scheduler_cv:
+        app.state.active_jobs = max(0, app.state.active_jobs - 1)
+        app.state.scheduler_cv.notify_all()
+
+
+def _check_timed_out_jobs(app: FastAPI, slog) -> None:
+    """Force-fail any running job whose deadline has passed.
+
+    `app.state.deadlines` is the runtime-only watchdog ledger populated at
+    dispatch time. `app.state.futures.pop(job_id)` is the arbitration
+    sentinel: whoever pops the future first (timeout vs done-callback)
+    owns the cleanup. The other side sees `None` and returns.
+
+    If the pop wins the race but the future is actually already done (worker
+    finished right at the deadline boundary), we OWN the cleanup — we cannot
+    reinsert and defer to the done-callback because the callback fires only
+    once and, having seen our pop return None for it, will short-circuit.
+    Instead we route through `_process_terminal`, which is the same logic
+    the done-callback would have run.
+    """
+    now = time.time()
+    # Snapshot the deadlines map — the done-callback (running in the
+    # executor's management thread) can pop entries via _drop_runtime_state
+    # at any moment, and iterating a `dict.items()` view while another
+    # thread mutates the dict raises `RuntimeError: dictionary changed
+    # size during iteration`. `list(...)` materializes the items into a
+    # fresh list of tuples in one atomic-w.r.t.-GIL step.
+    candidates = [
+        (jid, dl) for jid, dl in list(app.state.deadlines.items()) if now > dl
+    ]
+
+    for job_id, _deadline in candidates:
+        future = app.state.futures.pop(job_id, None)
+        if future is None:
+            # done-callback already finalized this job.
+            continue
+        if future.done():
+            # Worker finished naturally; we beat the done-callback to the
+            # claim. Process completion ourselves — see docstring for why
+            # reinserting would leak the future.
+            _process_terminal(app, job_id, future)
+            continue
+
+        slog.error(f"Job {job_id} exceeded timeout of {JOB_TIMEOUT_SECONDS}s — forcing failure")
+        tb_str = f"Job exceeded timeout of {JOB_TIMEOUT_SECONDS}s"
+        settings = app.state.intake.get(job_id, {})
+        _write_error_manifest(OUTPUT_DIR / job_id, job_id, settings, "Job timed out", tb_str)
+
+        # Distinct DB status='timed_out' so operators triage stuck jobs
+        # separately from clean failures. /jobs/{id} normalizes back to
+        # 'failed' for the frontend.
+        jobs_store.mark_timed_out_from_thread(
+            job_id, f"Job timed out after {JOB_TIMEOUT_SECONDS}s"
+        )
+
+        _drop_runtime_state(app, job_id)
+
         with app.state.scheduler_cv:
             app.state.active_jobs = max(0, app.state.active_jobs - 1)
             app.state.scheduler_cv.notify_all()
 
-        # Phase D-foundation shadow write — mirror terminal status to DB.
-        # Fire-and-forget. Skipped when the timeout watchdog already
-        # finalized (already_finalized=True): mark_timed_out_from_thread
-        # already wrote 'timed_out', which is the correct terminal state.
-        from . import jobs_db
-        status = result.get("status")
-        if status == "complete":
-            jobs_db.mark_complete_from_thread(job_id)
-        elif status == "failed":
-            error_msg = result.get("error") or "Worker failed without error message"
-            jobs_db.mark_failed_from_thread(job_id, error_msg)
+
+def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
+    """Finalize a completed worker future in the main process.
+
+    This is the canonical place where running -> complete/failed is finalized.
+    `app.state.futures.pop` is the arbitration sentinel against the timeout
+    watchdog — if it returns None, the watchdog already finalized this job.
+    """
+    if app.state.futures.pop(job_id, None) is None:
+        # Timeout watchdog already finalized this job and wrote the terminal
+        # state. Do not double-decrement active_jobs.
+        return
+    _process_terminal(app, job_id, future)
+
+
+def _mirror_progress_files(app: FastAPI) -> None:
+    """S5 — read each running job's .progress file and mirror to the store.
+
+    Called from the scheduler tick. The worker subprocess owns the file (no
+    DB connection per §9.3.11.10); the main process is the only writer of
+    `jobs.progress_pct`. We skip the store write when nothing changed to
+    avoid noise.
+
+    Lives next to the dispatch loop because the scheduler thread already
+    has the event-loop ref it needs for `*_from_thread` submissions.
+    """
+    # Snapshot the futures map — iteration vs concurrent mutation by
+    # done-callback / watchdog otherwise.
+    for job_id in list(app.state.futures.keys()):
+        with app.state.progress_lock:
+            progress_file = app.state.progress.get(job_id)
+        if not progress_file or not os.path.exists(progress_file):
+            continue
+        try:
+            pct = int(float(Path(progress_file).read_text().strip()))
+        except Exception:
+            continue
+        # write_progress is guarded by status='running' in both backends, so
+        # a write that races a terminal transition silently no-ops.
+        jobs_store.write_progress_from_thread(job_id, pct)
 
 
 def scheduler_loop(app: FastAPI):
-    """Dispatches queued jobs into the process pool, bounded by MAX_WORKERS.
+    """Dispatch queued jobs into the process pool, bounded by MAX_WORKERS.
 
-    The queue is explicit and separate from the executor so the executor does
-    not become an unbounded hidden queue.
+    Phase D step 2 S6 — replaced `queue.Queue.get(timeout=0.5)` with
+    `jobs_store.dequeue_next()` (a single transaction in PG mode using
+    `SELECT FOR UPDATE SKIP LOCKED`; a single-lock scan-and-flip in JSON
+    mode). The dispatcher is the only source of "what's next" — no
+    secondary in-memory queue can drift from the store.
+
+    Each tick:
+      1. Run the timeout watchdog (`_check_timed_out_jobs`).
+      2. Mirror running jobs' .progress files into the store (S5).
+      3. Wait if we're at MAX_WORKERS; otherwise try to claim one queued
+         row. If no work is available, sleep briefly and loop.
     """
     slog = logging.getLogger("laigo.scheduler")
 
@@ -778,52 +992,95 @@ def scheduler_loop(app: FastAPI):
             break
 
         _check_timed_out_jobs(app, slog)
+        _mirror_progress_files(app)
 
+        # Wait briefly if we're at MAX_WORKERS. CRITICAL: use `if`, not `while`.
+        # The legacy code used a `while` here, which trapped the scheduler in
+        # an inner cv.wait loop until active_jobs dropped below MAX_WORKERS —
+        # meaning the timeout watchdog (called at the TOP of the outer loop)
+        # never fired while a long-running worker was in flight. A runaway
+        # worker that never finished would never trip its deadline. Using
+        # `if` lets every cv timeout (every SCHEDULER_IDLE_POLL_SECONDS) re-
+        # tick the outer loop, re-running both `_check_timed_out_jobs` and
+        # `_mirror_progress_files`. The cost is a tiny amount of extra
+        # bookkeeping per tick; the win is a watchdog that actually watches.
         with app.state.scheduler_cv:
-            while not app.state.scheduler_shutdown.is_set() and app.state.active_jobs >= MAX_WORKERS:
-                app.state.scheduler_cv.wait(timeout=0.5)
+            if not app.state.scheduler_shutdown.is_set() and app.state.active_jobs >= MAX_WORKERS:
+                app.state.scheduler_cv.wait(timeout=SCHEDULER_IDLE_POLL_SECONDS)
+            at_capacity = app.state.active_jobs >= MAX_WORKERS
 
         if app.state.scheduler_shutdown.is_set():
             break
 
-        try:
-            item = app.state.job_queue.get(timeout=0.5)
-        except queue.Empty:
+        if at_capacity:
+            # Still at MAX_WORKERS — skip the dequeue attempt this tick. The
+            # next iteration's `_check_timed_out_jobs` may free up a slot,
+            # and a real done-callback decrement will notify the cv and wake
+            # us up early.
             continue
 
-        job_id = item["job_id"]
-        _remove_from_queue_order(app, job_id)
+        try:
+            claimed = _run_coro_blocking(
+                jobs_store.dequeue_next(), app.state.event_loop, timeout=10.0
+            )
+        except Exception as e:
+            # Transient DB hiccup or run-coro timeout. Log, sleep, retry —
+            # not fatal; the next tick will try again.
+            slog.error(f"dequeue_next failed: {type(e).__name__}: {e}", exc_info=True)
+            with app.state.scheduler_cv:
+                if not app.state.scheduler_shutdown.is_set():
+                    app.state.scheduler_cv.wait(timeout=SCHEDULER_IDLE_POLL_SECONDS)
+            continue
+
+        if claimed is None:
+            # Queue empty — wait briefly for new work. The cv is notified by
+            # /generate so a fresh insert wakes us promptly.
+            with app.state.scheduler_cv:
+                if not app.state.scheduler_shutdown.is_set():
+                    app.state.scheduler_cv.wait(timeout=SCHEDULER_IDLE_POLL_SECONDS)
+            continue
+
+        job_id = claimed["job_id"]
+
+        # Reconstruct the executor input from runtime side tables + canonical
+        # input paths. dequeue_next() returned a row already at 'running'; if
+        # any of these lookups fail, we must roll the row forward to 'failed'.
+        settings = app.state.intake.get(job_id)
+        if settings is None:
+            slog.error(f"Job {job_id} has no intake settings — rolling forward to failed")
+            _mark_submission_failed(
+                app,
+                job_id,
+                "Job state lost between /generate and dispatch",
+                "intake side table missing settings dict",
+            )
+            continue
+
+        image_path = INPUT_DIR / f"{job_id}.upload"
+        progress_path = INPUT_DIR / f"{job_id}.progress"
 
         if app.state.scheduler_shutdown.is_set():
             _mark_submission_failed(
                 app,
-                item,
+                job_id,
                 "Server is shutting down",
-                "Scheduler stopped before job dispatch"
-            )
-            continue
-
-        with app.state.jobs_lock:
-            job = app.state.jobs.get(job_id)
-
-        if job is None:
-            _mark_submission_failed(
-                app,
-                item,
-                "Job record missing before dispatch",
-                "Job state was absent when scheduler tried to dispatch"
+                "Scheduler stopped after claiming job; before dispatch",
             )
             continue
 
         with app.state.scheduler_cv:
+            # Re-check the MAX_WORKERS gate; a concurrent dispatch may have
+            # bumped active_jobs since the outer wait. With MAX_WORKERS=1 the
+            # outer loop's wait is sufficient, but the recheck future-proofs
+            # for the optional MAX_WORKERS>1 follow-up.
             while not app.state.scheduler_shutdown.is_set() and app.state.active_jobs >= MAX_WORKERS:
-                app.state.scheduler_cv.wait(timeout=0.5)
+                app.state.scheduler_cv.wait(timeout=SCHEDULER_IDLE_POLL_SECONDS)
             if app.state.scheduler_shutdown.is_set():
                 _mark_submission_failed(
                     app,
-                    item,
+                    job_id,
                     "Server is shutting down",
-                    "Scheduler stopped before job dispatch"
+                    "Scheduler stopped before executor.submit",
                 )
                 continue
             app.state.active_jobs += 1
@@ -832,11 +1089,11 @@ def scheduler_loop(app: FastAPI):
             future = app.state.executor.submit(
                 run_job,
                 job_id,
-                item["image_path"],
-                item["settings"],
+                str(image_path),
+                settings,
                 str(OUTPUT_DIR),
                 STUDS_PER_BLOCK,
-                item["progress_path"],
+                str(progress_path),
             )
         except Exception as e:
             tb = traceback.format_exc()
@@ -844,21 +1101,13 @@ def scheduler_loop(app: FastAPI):
             with app.state.scheduler_cv:
                 app.state.active_jobs = max(0, app.state.active_jobs - 1)
                 app.state.scheduler_cv.notify_all()
-            _mark_submission_failed(app, item, f"Failed to dispatch job: {e}", tb)
+            _mark_submission_failed(app, job_id, f"Failed to dispatch job: {e}", tb)
             continue
 
-        with app.state.jobs_lock:
-            job = app.state.jobs.get(job_id)
-            if job is not None:
-                job["status"] = "running"
-                job["started_at"] = time.time()
-                job["future"] = future
-                job["deadline"] = time.time() + JOB_TIMEOUT_SECONDS
-
-        # Phase D-foundation shadow write — mirror status='running' to DB.
-        # Fire-and-forget; in-memory dispatch already happened.
-        from . import jobs_db
-        jobs_db.mark_running_from_thread(job_id)
+        # Runtime side tables: future for the done-callback / watchdog
+        # arbitration, deadline for the watchdog.
+        app.state.futures[job_id] = future
+        app.state.deadlines[job_id] = time.time() + JOB_TIMEOUT_SECONDS
 
         future.add_done_callback(lambda fut, jid=job_id: _job_done_callback(app, jid, fut))
         with app.state.scheduler_cv:
@@ -881,29 +1130,31 @@ async def root():
 
 @app.get("/queue")
 async def queue_status():
-    with app.state.jobs_lock:
-        jobs = list(app.state.jobs.values())
-        counts = {
-            "queued": sum(1 for j in jobs if j.get("status") == "queued"),
-            "running": sum(1 for j in jobs if j.get("status") == "running"),
-            "complete": sum(1 for j in jobs if j.get("status") == "complete"),
-            "failed": sum(1 for j in jobs if j.get("status") == "failed"),
-        }
+    """Operator/debug surface — current queue + worker headroom.
+
+    `complete` and `failed` counts are not reported here because the store
+    deletes terminal rows after JOB_TTL_SECONDS; long-running counts would
+    be misleading. Frontend status polling reads /jobs/{id} for per-job
+    state, not /queue.
+    """
+    queued_count = await jobs_store.count_queued()
+    running_count = await jobs_store.count_active()
+    queued_rows = await jobs_store.list_queued()
+    queued_job_ids = [r["job_id"] for r in queued_rows]
 
     with app.state.scheduler_cv:
         active_jobs = app.state.active_jobs
 
-    with app.state.queue_lock:
-        queued_job_ids = list(app.state.queue_order)
-
     return {
-        "queued_jobs": len(queued_job_ids),
+        "queued_jobs": queued_count,
         "queued_job_ids": queued_job_ids,
         "max_queue_size": MAX_QUEUE_SIZE,
         "active_jobs": active_jobs,
         "max_workers": MAX_WORKERS,
-        "known_jobs": len(jobs),
-        "counts": counts,
+        "counts": {
+            "queued": queued_count,
+            "running": running_count,
+        },
     }
 
 
@@ -962,6 +1213,14 @@ async def generate(
     if app.state.scheduler_shutdown.is_set():
         raise HTTPException(status_code=503, detail="Server is shutting down")
 
+    # Queue-full check BEFORE upload — saves the bytes-on-disk cost when we'd
+    # reject anyway. Small TOCTOU race window (two concurrent /generate both
+    # passing the check at queue_size=19, ending at 21) is tolerable for a
+    # 20-item operator queue; the dispatcher's queue-size docstring documents
+    # the choice in detail.
+    if await jobs_store.count_queued() >= MAX_QUEUE_SIZE:
+        raise HTTPException(status_code=429, detail="Queue full. Try again once space opens.")
+
     job_id = str(uuid.uuid4())
     log.info(
         f"Job {job_id} received | filename={file.filename} "
@@ -1018,74 +1277,46 @@ async def generate(
         input_file.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="Failed to initialise job")
 
+    # Side tables FIRST, then the persistent insert. Reversing this order
+    # opens a race: between `insert_queued` returning and `intake[jid]` being
+    # set, the scheduler thread can call `dequeue_next()`, claim the row,
+    # look up `intake.get(jid) → None`, and roll the job forward to 'failed'
+    # via the "no intake settings" defensive branch. With the side tables
+    # populated first, the scheduler can never see a 'queued' row without
+    # also seeing its intake/progress. The defensive branch remains useful
+    # only for post-restart recovery (queued row in DB, intake empty because
+    # the process restarted) — exactly when we DO want a fail-forward.
+    app.state.intake[job_id] = settings
     with app.state.progress_lock:
         app.state.progress[job_id] = progress_file
 
-    # Create the job record before enqueueing so the scheduler always has state.
-    with app.state.jobs_lock:
-        app.state.jobs[job_id] = {
-            "status": "queued",
-            "progress": 0,
-            "created_at": time.time(),
-            "queued_at": time.time(),
-            "settings": settings,
-            "progress_file": str(progress_file),
-        }
-
-    # B53 fix — Phase D-foundation shadow write happens BEFORE queue.put_nowait
-    # so the jobs row exists in Postgres before the scheduler thread can pick up
-    # the queue item and fire `mark_running_from_thread`. If the row weren't
-    # there yet, `mark_running`'s UPDATE WHERE status='queued' would match zero
-    # rows (silent no-op), and `mark_failed_from_thread` from a fast worker
-    # failure could race with the in-flight INSERT — leaving the DB row stuck
-    # at 'queued' forever. Awaiting before enqueue eliminates the race
-    # entirely. Cost: a fast Neon round-trip (~50-150ms) on the /generate hot
-    # path; acceptable given the alternative is operator-visible drift.
-    # No-op when DB_BACKEND=json. Best-effort internally.
-    from . import jobs_db
-    await jobs_db.insert_queued(
-        job_id=job_id,
-        mosaic_type=mosaic_type,
-        width_blocks=mosaic_block_width,
-        background_pct=background_color_percent,
-        ttl_seconds=JOB_TTL_SECONDS,
-    )
-
-    queue_item = {
-        "job_id": job_id,
-        "image_path": str(input_file),
-        "progress_path": str(progress_file),
-        "settings": settings,
-    }
-
-    with app.state.queue_lock:
-        app.state.queue_order.append(job_id)
-
     try:
-        app.state.job_queue.put_nowait(queue_item)
-    except queue.Full:
-        log.warning(f"Queue full — rejecting job {job_id}")
-        input_file.unlink(missing_ok=True)
-        progress_file.unlink(missing_ok=True)
-        _remove_from_queue_order(app, job_id)
-        with app.state.progress_lock:
-            app.state.progress.pop(job_id, None)
-        with app.state.jobs_lock:
-            app.state.jobs.pop(job_id, None)
-        # Mark the orphan jobs row as failed so it doesn't linger at 'queued'.
-        jobs_db.mark_failed_from_thread(job_id, "Queue full at intake time")
-        raise HTTPException(status_code=429, detail="Queue full. Try again once space opens.") #if over max queue size and new job is requested
+        await jobs_store.insert_queued(
+            job_id=job_id,
+            mosaic_type=mosaic_type,
+            width_blocks=mosaic_block_width,
+            background_pct=background_color_percent,
+            ttl_seconds=JOB_TTL_SECONDS,
+            upload_filename=file.filename,
+        )
     except Exception as e:
-        log.error(f"Job {job_id} failed to queue: {e}", exc_info=True)
-        input_file.unlink(missing_ok=True)
-        progress_file.unlink(missing_ok=True)
-        _remove_from_queue_order(app, job_id)
+        # Roll back the side tables so a failed insert doesn't leak entries
+        # for a job that never made it to the store. The scheduler can't see
+        # the job (no row), but a future /jobs/{id} lookup would otherwise
+        # find stale intake + return a synthetic response.
+        app.state.intake.pop(job_id, None)
         with app.state.progress_lock:
             app.state.progress.pop(job_id, None)
-        with app.state.jobs_lock:
-            app.state.jobs.pop(job_id, None)
-        jobs_db.mark_failed_from_thread(job_id, f"Failed to enqueue: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to queue job: {e}")
+        log.error(f"Job {job_id} failed to persist: {e}", exc_info=True)
+        input_file.unlink(missing_ok=True)
+        progress_file.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to register job: {e}")
+
+    # Wake the scheduler so dispatch latency stays sub-tick when the worker
+    # is idle. Without this the scheduler would poll on its own
+    # SCHEDULER_IDLE_POLL_SECONDS timeout (still correct, just slower).
+    with app.state.scheduler_cv:
+        app.state.scheduler_cv.notify_all()
 
     log.info(f"Job {job_id} queued successfully")
     return {"job_id": job_id, "status": "queued"}
@@ -1093,13 +1324,13 @@ async def generate(
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
-    with app.state.jobs_lock:
-        job = app.state.jobs.get(job_id)
-        future = job.get("future") if job else None
-        status = job.get("status") if job else None
-        snapshot = _job_snapshot(job)
+    row = await jobs_store.get_job(job_id)
 
-    if snapshot is None:
+    if row is None:
+        # Cleanup may have removed the row but left manifest_failed.json on
+        # disk briefly (worker writes it inside the output dir, which cleanup
+        # rmtrees together with the row delete — so this fallback is rare in
+        # the new design). Preserved for parity with the legacy contract.
         error_manifest = OUTPUT_DIR / job_id / "manifest_failed.json"
         if error_manifest.exists():
             log.info(f"Job {job_id} served from error manifest on disk")
@@ -1110,75 +1341,34 @@ async def get_job(job_id: str):
             except Exception as e:
                 log.error(f"Job {job_id} failed to read error manifest: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail="Failed to read error manifest")
-
-        log.warning(f"Job {job_id} not found in memory or on disk")
+        log.warning(f"Job {job_id} not found in store or on disk")
         raise HTTPException(status_code=404, detail="Job not found")
 
-    progress_val = snapshot.get("progress", 0)
-    with app.state.progress_lock:
-        progress_file = app.state.progress.get(job_id)
+    settings = app.state.intake.get(job_id)
+    response = _store_row_to_response(row, settings)
 
-    # Read progress from file while queued/running.
-    if status in ("queued", "running") and progress_file and os.path.exists(progress_file):
-        try:
-            progress_val = float(Path(progress_file).read_text().strip())
-            with app.state.jobs_lock:
-                live_job = app.state.jobs.get(job_id)
-                if live_job is not None:
-                    live_job["progress"] = progress_val
-        except Exception:
-            progress_val = snapshot.get("progress", 0)
-
-    # Safety-net finalization if the worker future is done but callback has not
-    # yet updated the job state.
-    if status == "running" and future is not None and future.done():
-        try:
-            result = future.result()
-            if not isinstance(result, dict):
-                result = {
-                    "status": "failed",
-                    "progress": 0,
-                    "error": f"Worker returned unexpected result type: {type(result).__name__}",
-                    "traceback": "",
-                    "finished_at": time.time(),
-                }
-        except Exception as e:
-            log.error(f"Job {job_id} future raised unexpectedly: {e}", exc_info=True)
-            result = {
-                "status": "failed",
-                "progress": 0,
-                "error": f"Worker raised unexpectedly: {e}",
-                "traceback": traceback.format_exc(),
-                "finished_at": time.time(),
-            }
-
-        with app.state.jobs_lock:
-            live_job = app.state.jobs.get(job_id)
-            if live_job is not None:
-                live_job.update(result)
-                live_job["finished_at"] = result.get("finished_at", time.time())
-                live_job.pop("future", None)
-                snapshot = _job_snapshot(live_job)
-
+    # While queued/running, mirror the latest .progress file value through to
+    # the response so the frontend's polled progress is sub-tick fresh. The
+    # store's progress_pct is updated by the scheduler tick (S5), which lags
+    # the file by up to SCHEDULER_IDLE_POLL_SECONDS — fine for operator views
+    # but visible as "stuck at 42%" to a fast-polling customer.
+    raw_status = row["status"]
+    if raw_status in ("queued", "running"):
         with app.state.progress_lock:
-            app.state.progress.pop(job_id, None)
+            progress_file = app.state.progress.get(job_id)
+        if progress_file and os.path.exists(progress_file):
+            try:
+                response["progress"] = int(float(Path(progress_file).read_text().strip()))
+            except Exception:
+                pass
 
-        progress_val = 100 if result.get("status") == "complete" else 0
+    if raw_status == "complete":
+        response["progress"] = 100
+    elif raw_status in ("failed", "timed_out"):
+        response["progress"] = 0
 
-        if result.get("status") == "complete":
-            log.info(f"Job {job_id} resolved as complete")
-        else:
-            log.warning(f"Job {job_id} resolved as failed | error={result.get('error')}")
-
-    queue_position, queue_length = (None, 0)
-    if status == "queued":
-        queue_position, queue_length = _queue_position(app, job_id)
-
-    response = {
-        **snapshot,
-        "progress": 100 if snapshot.get("status") == "complete" else 0 if snapshot.get("status") == "failed" else progress_val,
-    }
-    if status == "queued":
+    if raw_status == "queued":
+        queue_position, queue_length = await _queue_position_async(job_id)
         response["queue_position"] = queue_position
         response["queue_length"] = queue_length
 
@@ -1205,50 +1395,36 @@ async def download(job_id: str):
 # CLEANUP THREAD
 # -----------------------------
 def cleanup_loop(app: FastAPI):
+    """Periodically reap expired terminal jobs.
+
+    Phase D step 2 S7 — delegates the "find expired terminals" scan to
+    `jobs_store.cleanup_expired()`, which returns the list of deleted
+    job_ids. We then rmtree each output directory and drop any leftover
+    runtime side-table entries (defensive: terminal transitions already
+    clean these, but a server restart that interrupted a terminal path
+    could leave stragglers).
+    """
     clog = logging.getLogger("laigo.cleanup")
     while True:
         try:
-            now = time.time()
-            with app.state.jobs_lock:
-                jobs_snapshot = list(app.state.jobs.items())
-
-            for job_id, job in jobs_snapshot:
-                if job.get("status") in ("complete", "failed"):
-                    age = now - job.get("finished_at", now)
-                    if age > JOB_TTL_SECONDS:
-                        clog.info(f"TTL expired for job {job_id} (age={int(age)}s) — cleaning up")
-                        try:
-                            shutil.rmtree(OUTPUT_DIR / job_id, ignore_errors=True)
-                        except Exception as e:
-                            clog.error(
-                                f"Failed to remove output dir for job {job_id}: {e}",
-                                exc_info=True
-                            )
-
-                        with app.state.jobs_lock:
-                            current = app.state.jobs.get(job_id)
-                            if current and current.get("status") in ("complete", "failed"):
-                                current.pop("future", None)
-                                app.state.jobs.pop(job_id, None)
-
-                        with app.state.progress_lock:
-                            progress_file = app.state.progress.pop(job_id, None)
-                        if progress_file:
-                            try:
-                                Path(progress_file).unlink(missing_ok=True)
-                            except Exception:
-                                pass
-
-                        _remove_from_queue_order(app, job_id)
-
-                        # Phase D-foundation shadow write — DELETE the jobs row.
-                        # Cascades to checkouts/audit_events via FK; blocked by
-                        # the sagas FK if a saga still references this job.
-                        # See jobs_db.delete_expired docstring for FK behavior.
-                        from . import jobs_db
-                        jobs_db.delete_expired_from_thread(job_id)
-
-                        clog.info(f"Job {job_id} cleaned up")
+            deleted_ids = _run_coro_blocking(
+                jobs_store.cleanup_expired(),
+                app.state.event_loop,
+                timeout=30.0,
+            )
+            for jid in deleted_ids:
+                try:
+                    shutil.rmtree(OUTPUT_DIR / jid, ignore_errors=True)
+                except Exception as e:
+                    clog.error(
+                        f"Failed to remove output dir for job {jid}: {e}",
+                        exc_info=True
+                    )
+                # Final eviction — drop the intake side table here. Terminal
+                # transitions intentionally leave intake in place so
+                # /jobs/{id} keeps surfacing `settings` until TTL.
+                _drop_runtime_state(app, jid, drop_intake=True)
+                clog.info(f"Job {jid} cleaned up")
         except Exception:
             clog.error("Unexpected error in cleanup loop", exc_info=True)
 
