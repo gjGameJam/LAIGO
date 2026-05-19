@@ -86,7 +86,13 @@
       "Bash(grep -v \"//\")",
       "Bash(export RECONCILE_INTERVAL_SECONDS=60)",
       "Bash(unset DB_BACKEND RECONCILE_INTERVAL_SECONDS)",
-      "Bash(export DB_BACKEND=json)"
+      "Bash(export DB_BACKEND=json)",
+      "Bash(xargs wc -l)",
+      "Bash(git commit *)",
+      "Bash(awk -F= '/^[A-Z]/ {print $1}' .env.secrets)",
+      "Bash(awk -F= '/^[A-Z]/ {print $1}' .env.local)",
+      "Bash(awk -F= '/^DATABASE_URL/ {print NR\": \"$1\"=\"\\(length\\($2\\)>10 ? substr\\($2,1,10\\)\"...<\"length\\($2\\)\" chars>\" : \"<short or empty>\"\\)}' .env.secrets)",
+      "Bash(awk *)"
     ]
   },
   "enabledPlugins": {}
