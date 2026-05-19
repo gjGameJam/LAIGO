@@ -21,7 +21,7 @@ This file consolidates material that previously lived in `docs/CHECKOUT_AUDIT.md
 | L6 audit log subsystem | ❌ Not built | This document, §2 |
 | Capture retry + MANUAL_REVIEW | ✅ Shipped | `scripts/checkout/saga.py` |
 | 5% hold buffer + drift fail-closed | ✅ Shipped | `scripts/checkout/saga.py` |
-| Postgres-backed state + resume-on-restart | 🟡 Phases A + B shipped (A: 2026-05-16, B: 2026-05-17). Phases C–F pending; per-phase status in §9.6.1. Host = **Neon** (PG 17.8 / us-east-1; locked 2026-05-16; §9.3.11.1). 6 tables; 6.5 engineer-days planned. **Per-phase operational playbooks: §9.5. Live progress dashboard: §9.6.** | §3 roadmap item 2 / §9 |
+| Postgres-backed state + resume-on-restart | 🟡 Phases A + B + D-foundation + C shipped (A: 2026-05-16, B: 2026-05-17, D-fnd + C: 2026-05-18). Phase D step 2 + E + F pending; per-phase status in §9.6.1. Host = **Neon** (PG 17.8 / us-east-1; locked 2026-05-16; §9.3.11.1). 6 tables; 6.5 engineer-days planned (≈3 spent). **Per-phase operational playbooks: §9.5. Live progress dashboard: §9.6.** | §3 roadmap item 2 / §9 |
 | Pre-commit revalidation | ❌ Not built | §3 roadmap item 3 |
 | MarketplaceAdapter Protocol | ❌ Not built | §3 roadmap item 4 |
 | BrickOwl cancellation (Playwright) | ❌ Not built | §3 roadmap item 5 |
@@ -769,14 +769,50 @@ if not checkout_id:
 | B38 | `debug_optimize` `lego_available` initialized but never populated | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass; dead variable removed) |
 | B39 | Main.py L1 boot block used lenient `sk_live_` startswith (vs canonical `key_mode`) | LOW | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass) |
 | B40 | Router initial save missing `customer_message: None` key (B12 contract violation) | DOC | No | ✅ Shipped 2026-05-16 (pre-DB-migration audit pass) |
+| B41 | `jobs` lifecycle UPDATEs raced; `started_at` stayed NULL on fast jobs | MEDIUM | No | ✅ Shipped 2026-05-18 (Phase D-foundation post-smoke-test fix: `_exec_under_lock` advisory lock + COALESCE) |
+| B42 | Two sources of truth for jobs lifecycle (`app.state.jobs` vs `jobs` table) | MEDIUM (LATENT) | No | Open — subsumed by Phase D step 2 |
+| B43 | `_EXPECTED_SCHEMA_VERSION` has no automated check vs alembic head | LOW | No | ✅ Shipped 2026-05-18 (`verify_alembic_head_matches_expected()` at lifespan startup, unconditional) |
+| B44 | Shadow writes have no reconciliation path on transient DB failure | MEDIUM (LATENT) | No | Open — subsumed by Phase E (`resume_in_flight_jobs` mirror of saga resume) |
+| B45 | `checkout_store_pg.save()` INSERT-then-UPDATE is schema-evolution-fragile | LOW | No | ✅ Shipped 2026-05-18 (all-columns-explicit INSERTs in `_insert_checkouts` + `_insert_sagas`; trailing UPDATE removed; pattern reused by Phase D step 2) |
+| B46 | `_build_update_clause` silently drops unknown state keys (typo trap) | LOW | No | ✅ Shipped 2026-05-18 (`_warn_unknown_keys` helper called from save/update) |
+| B47 | B23 race re-opens silently if `DB_BACKEND` flipped back to json with CHECKOUT_ENABLED=true | MEDIUM (LATENT) | No | ✅ Shipped 2026-05-18 (L1 boot block invariant (c)) |
+| B48 | `pgcrypto` extension loaded but unused (no UUID columns) | COSMETIC | No | Open — drop in 0002 OR commit to UUIDs for a future table |
+| B49 | `schema_meta` table created but never used | COSMETIC | No | Open — document use OR drop in 0002 |
+| B50 | `smoke_test_db.py` doesn't exercise alembic (gap that hid Phase A's missing psycopg2-binary) | LOW | No | ✅ Shipped 2026-05-18 (psycopg2 import check + alembic_version row check) |
+| B51 | `jobs_db.insert_queued` hardcodes `dither = TRUE` | LOW (FUTURE-PROOFING) | No | Open — fires when /generate exposes a `dither` form param |
+| B52 | B41-residual: race-induced `started_at == completed_at` on fast jobs | LOW | No | Open — accepted imprecision; documented |
+| B53 | Failed jobs left at `status='queued'` in DB (insert/UPDATE race + missing shadow write in `_mark_submission_failed`) | HIGH | No (pre-launch) | ✅ Shipped 2026-05-18 (insert ordering + 3 shadow write sites) |
+| B54 | `/generate` accepts any `mosaic_block_width` — MAX_MOSAIC_BLOCK_WIDTH=40 documented but unenforced; oversize requests hang at <1% for 30 min until the timeout watchdog fires | HIGH | No (operational) | ✅ Shipped 2026-05-18 (API-layer validation + ranges for type, bg_pct too) |
 
 **Launch-blocking remaining: 0** — B3, B4, B5 all shipped. Phase 1 complete.
 **Pre-DB-migration bundle (2026-05-16): SHIPPED** — B6, B7, B8, B9, B10, B12, B15, B16. Newly-surfaced: B27, B28, B29, B30, B31.
 **Pre-DB-migration final sweep (2026-05-16): SHIPPED** — B24, B25.
 **Pre-DB-migration audit pass (2026-05-16): SHIPPED** — B32, B33, B34, B37, B38, B39, B40. Newly-surfaced from audit: B35, B36 (both DB-coupled, deferred).
+**Phase B retrospective (2026-05-17): SHIPPED** — env.py pooler guard, init_pool atomicity, DSN host parsing via urlsplit, removed inner BEGIN/COMMIT from 0001 SQL. Doc updates to §9.5.A, §9.5.B, §9.5.C, §9.6.1 + CLAUDE.md.
+**Phase D-foundation + Phase C (2026-05-18): SHIPPED** — JSONB type codec, jobs shadow writes (5 sites), checkout_store_pg + dispatcher + ActiveCheckoutExistsError + B23-via-422 wiring. Plus B41 race fix.
+**Post-smoke-test fixes (2026-05-18): SHIPPED** — B53 (insert/UPDATE race + pre-dispatch shadow writes), B54 (/generate input validation).
+**Hardening batch (2026-05-18): SHIPPED** — B43 (alembic-head boot assertion), B46 (unknown-keys WARN), B47 (L1 json+CHECKOUT_ENABLED boot block), B50 (smoke test exercises alembic + psycopg2).
 **Phase-3-shipped:** B13, B14, B17.
-**Open (DB-coupled, deferred to §9):** B11, B23, B26, B35, B36.
-**Open (independent of DB, gated on other work):** B27, B28, B29, B30, B31.
+
+## Open defects — prioritized
+
+**Priority 1 — Operational footguns (LATENT but real):**
+- (empty — B47 shipped 2026-05-18)
+
+**Priority 2 — Defense in depth (prevents future regressions):**
+- (empty — B43, B46, B50 all shipped 2026-05-18)
+
+**Priority 3 — Subsumed by deferred phases (no action until those phases):**
+- **B42** + **B44** — Two sources of truth for jobs + no reconciliation. → Phase D step 2 + Phase E.
+- **B11**, **B23** (json mode), **B26**, **B35**, **B36** — Saga-side state-file issues. → Phase F deletes the JSON paths.
+
+**Priority 4 — Cleanup / cosmetic (do when convenient):**
+- **B27** — Schema evolution discipline for new currencies (Stripe-side).
+- **B48**, **B49** — `pgcrypto` + `schema_meta` unused (drop in 0002 OR document use).
+- **B51** — `dither` hardcoded TRUE (fires when /generate exposes a dither param).
+- **B52** — `started_at == completed_at` on fast races (accepted imprecision).
+- **B28**, **B29** — LATENT (fire when roadmap items #5 / DOM-detection ship).
+- **B30**, **B31** — DOC / LOW.
 
 ### B19 — Order placed but state write fails post-call — **MEDIUM** — ✅ SHIPPED 2026-05-16 (Phase 2.2)
 
@@ -1290,6 +1326,250 @@ Functionally fine — Pydantic's `Optional[str] = None` default handled missing 
 **Verified:** AST + grep — `"customer_message": None` present in router.py.
 
 **Operator implication:** the CLAUDE.md audit grep (`grep -n '"error":' scripts/checkout/`) now finds matched `"customer_message":` lines at every site, including the router's initial save. The B12 contract is fully enforced.
+
+---
+
+### DB-migration defects (surfaced during Phase A–D-foundation + Phase C work, 2026-05-17 – 2026-05-18)
+
+These are tracked separately from the L0–L6 defect series above (B1–B40) because they're scoped to the Phase 9 DB-migration work. New defects (B41+) are added at the bottom; consult §9.6.3 for the cross-reference of which defects each migration phase resolves.
+
+### B41 — `jobs` lifecycle UPDATEs raced without serialization — **MEDIUM** — ✅ SHIPPED 2026-05-18
+
+**Surfaced by:** manual `/generate` smoke test against Neon `dev` branch. User reported `started_at` always NULL on completed `jobs` rows even though the Swagger UI showed jobs transitioning through `running` state correctly.
+
+**File:line:** `scripts/jobs_db.py` mark_running / mark_complete / mark_failed / mark_timed_out.
+
+**Root cause:** the four lifecycle UPDATE functions ran as concurrent transactions because asyncpg's pool (`min_size=2`) gave each one a separate connection. For fast jobs (small mosaics finishing in seconds), the executor's done-callback fired before `mark_running`'s first await flushed — `mark_complete`'s UPDATE acquired the row lock first, set `status='complete'`, and `mark_running`'s subsequent UPDATE matched zero rows (the `AND status='queued'` filter excluded the now-`complete` row). Result: `started_at` stayed NULL forever.
+
+**What shipped (2026-05-18):**
+
+- `_exec_under_lock(job_id, sql, *args)` helper in `jobs_db.py` wraps each UPDATE in `pool.acquire() + conn.transaction() + pg_advisory_xact_lock(hashtextextended($1, 0))`. Serializes lifecycle writes per job_id at the DB level.
+- `mark_complete`, `mark_failed`, `mark_timed_out` SQL updated to `started_at = COALESCE(started_at, NOW())` so the terminal write backfills `started_at` even when `mark_running` matched 0 rows (still possible if mark_complete wins the lock race).
+- `mark_running` filter `AND status = 'queued'` retained — prevents `mark_running` from downgrading a terminal status if it acquires the lock after `mark_complete`.
+
+**Residual cost (tracked as B52):** when `mark_complete` wins the lock and backfills `started_at` to `NOW()`, the resulting row has `started_at == completed_at`. Operator dashboards computing job duration will show 0s for these jobs. Acceptable trade-off vs more complex coordination.
+
+**Operator implication:** completed jobs in the `jobs` table now always have non-NULL `started_at`. Median-duration metrics will under-report for fast jobs that lost the race; treat per-row `completed_at - started_at` as a lower bound.
+
+---
+
+### B42 — Two sources of truth for jobs lifecycle (app.state.jobs vs jobs table) — **MEDIUM (LATENT)** — Open, deferred to Phase D step 2
+
+**File:line:** `scripts/Main.py` (in-memory dicts) and `scripts/jobs_db.py` (DB shadow writes).
+
+**Symptom:** Phase D-foundation populates the `jobs` table via fire-and-forget shadow writes, but `app.state.jobs` remains the source of truth for runtime reads (`GET /jobs/{id}`, `GET /queue`). If a shadow write fails silently (Neon transient outage, asyncpg pool exhaustion), the DB row drifts from the in-memory state. Today this is invisible to API consumers because reads go to memory; it becomes a real correctness gap if a future endpoint reads from DB.
+
+**Mitigation today:** all shadow writes log CRITICAL on failure. Operators can grep for `[jobs_db]` errors and reconcile manually.
+
+**Real fix:** Phase D step 2 collapses the two sources to one (DB becomes authoritative; `app.state.jobs` removed). Estimated 2 days. Until then: **do NOT expose any new endpoint that reads job state from DB**; the in-memory dict is the contract.
+
+---
+
+### B43 — `_EXPECTED_SCHEMA_VERSION` has no automated check vs alembic head — **LOW** — ✅ SHIPPED 2026-05-18
+
+**File:line:** `scripts/db.py:verify_alembic_head_matches_expected()`; called from `scripts/Main.py` lifespan startup BEFORE `init_pool`.
+
+**Original symptom:** the `_EXPECTED_SCHEMA_VERSION` constant was bumped manually each time a new alembic migration was added. A developer who forgot to bump it shipped code that booted fine in dev (where they ran `alembic upgrade head` AND happened to have the right constant locally) but failed at production deploy with a misleading "Schema version mismatch" error.
+
+**What shipped:**
+
+- `verify_alembic_head_matches_expected()` runs UNCONDITIONALLY at lifespan startup (independent of `DB_BACKEND`). Reads `scripts/migrations/versions/` via `alembic.script.ScriptDirectory` (anchored to `__file__`, not cwd, so `uvicorn scripts.Main:app` works regardless of launch directory). Compares `get_current_head()` to `_EXPECTED_SCHEMA_VERSION`; raises `RuntimeError` with both values and a clear remediation on drift.
+- Multi-head case handled defensively (alembic raises `CommandError` on `get_current_head()` with branched migrations; the wrapper surfaces this with a "if you now have multi-head, update the constant to a tuple" hint).
+- Boot order: this check runs BEFORE `init_pool` so a code-drift bug fails before any DB connection is even attempted. Cheap (~30ms) since it's just reading a few small Python files on disk.
+
+**Verified:** unit test (happy path = head matches constant; drift path = monkey-patched `_EXPECTED_SCHEMA_VERSION = "9999"` raises with both values in the error message).
+
+**Operator implication:** when adding a `0002_<slug>.py` migration, every uvicorn / pytest / smoke-test run will now refuse to boot until `_EXPECTED_SCHEMA_VERSION` is bumped. Caught at PR-author time, not deploy time.
+
+---
+
+### B44 — Shadow writes have no reconciliation path — **MEDIUM (LATENT)** — Open, subsumed by Phase E
+
+**File:line:** `scripts/jobs_db.py` (all `mark_*` and `delete_expired` functions).
+
+**Symptom:** every shadow write is fire-and-forget. On Neon outage (compute auto-suspended, network blip, etc.), the write fails, the in-memory lifecycle event already succeeded, and the DB row is now out of sync with no automatic recovery.
+
+**Real fix:** Phase E's `resume_in_flight_sagas` pattern applied to jobs — at lifespan startup, query for `jobs` rows in `'running'` state older than 1 hour (impossible at scale, indicates a missed shadow write) and reconcile to `'timed_out'`. Same pattern for `'queued'` jobs older than expected.
+
+**Workaround today:** CRITICAL logs surface failures; operators reconcile manually via SQL.
+
+---
+
+### B45 — `checkout_store_pg.save()` INSERT-then-UPDATE is schema-evolution-fragile — **LOW** — ✅ SHIPPED 2026-05-18
+
+**File:line:** `scripts/checkout/checkout_store_pg.py:save()` + new `_insert_checkouts` / `_insert_sagas` helpers.
+
+**Original symptom:** `save()` did two INSERTs (`checkouts`, then `sagas`) using only NOT-NULL columns, then a trailing UPDATE applied optional fields via `_build_update_clause`. If a future migration added a NOT-NULL column without a `DEFAULT` clause, the INSERT failed at runtime even though `alembic upgrade head` completed cleanly. The trailing UPDATE pattern also meant column-list drift between schema and code was invisible until production traffic hit a row with no value for the new column.
+
+**What shipped:**
+
+- `_insert_checkouts(conn, job_id, state)` lists every column from `checkouts` (9 columns: `checkout_id`, `job_id`, `shipping_country`, `shipping_zip`, `customer_email`, `allocation`, `unsourceable_items`, `created_at`, `expires_at`) explicitly in the INSERT VALUES list. Missing state keys use Python-side defaults (`""`, `{}`, `[]`).
+- `_insert_sagas(conn, job_id, state)` lists every column from `sagas` (16 columns) explicitly. Same pattern. Maintains the B23 partial-unique-index handling (catches `UniqueViolationError` and raises `ActiveCheckoutExistsError`).
+- The trailing `UPDATE sagas SET ... WHERE checkout_id=...` is REMOVED entirely. `save()` is now exactly two INSERTs in one transaction.
+- `_build_update_clause` is still used by `update()` (legitimately partial); only `save()` no longer needs it.
+- `created_at`, `expires_at`, `initiated_at`, `last_transition_at` use `NOW()` / `NOW() + make_interval(secs => 600)` in the SQL itself rather than Python-computed values — keeps the DB clock authoritative (avoids app-vs-Neon clock skew).
+
+**Verified:**
+
+- AST parse OK.
+- Column-coverage check: regex-parsed §9.2.1 SQL + parsed both INSERT statements; confirmed 9/9 columns for checkouts and 16/16 for sagas appear in their respective INSERT VALUES lists. No missing or extra columns.
+
+**Operator implication / discipline going forward:** documented in CLAUDE.md "Schema evolution discipline." When adding a column to `checkouts` or `sagas`:
+1. **If NOT NULL with a DB-side DEFAULT** — INSERTs still work (default applies). Update `_CHECKOUT_COLS`/`_SAGA_COLS` if you want the column read/write via `update()`. Adding to the INSERT VALUES list is optional but recommended for explicitness.
+2. **If NOT NULL without a DEFAULT** — REQUIRED to update `_insert_checkouts` or `_insert_sagas` AND `_CHECKOUT_COLS`/`_SAGA_COLS` in the same PR. The migration without these code changes would crash production at the first /confirm.
+3. **If nullable** — no required change, but add to the column map for `update()` to write it.
+
+**Pattern reuse:** Phase D step 2 will introduce similar lifecycle writes for the `jobs` table. The same all-columns-explicit INSERT pattern applies there — see `_insert_checkouts`/`_insert_sagas` for the template.
+
+---
+
+### B46 — `_build_update_clause` silently drops unknown keys — **LOW** — ✅ SHIPPED 2026-05-18
+
+**File:line:** `scripts/checkout/checkout_store_pg.py:_warn_unknown_keys()`; called at the top of `save()` and `update()`.
+
+**Original symptom:** if a caller passed `state["chekout_id"]` (typo), `_build_update_clause` dropped it silently — matching the JSON backend's "save any dict" semantics but masking programmer errors. The DB stayed consistent (typo'd key never reached SQL) but the intended update never happened; caller saw their UPDATE as "successful" but the row was unchanged.
+
+**What shipped:**
+
+- `_ALL_KNOWN_STATE_KEYS = frozenset(_CHECKOUT_COLS) | frozenset(_SAGA_COLS)` — the canonical set of legitimate state keys.
+- `_warn_unknown_keys(partial, where)` — diffs `partial.keys()` against `_ALL_KNOWN_STATE_KEYS` and logs `WARN` with the list of unmapped keys plus the full known-keys list for the developer's reference. ASCII-only message (cp1252 Windows console can't render the set-union symbol).
+- Called once at the top of `save()` and `update()`. Doesn't change the data layer's behavior — the unmapped keys are still silently dropped by `_build_update_clause` — but surfaces the drift to operator logs.
+
+**Verified:** unit tests cover (a) all-known keys → no WARN, (b) typo → WARN with the key in the message, (c) mixed known + unknown → WARN names only unmapped, (d) empty partial → no WARN.
+
+**Operator implication:** typos in checkout state writes are now visible. Grep operator logs for `[checkout_store_pg.update] N state key(s) silently dropped` to find drift.
+
+---
+
+### B47 — B23 race still open for `DB_BACKEND=json` — **MEDIUM (LATENT)** — ✅ SHIPPED 2026-05-18
+
+**File:line:** `scripts/Main.py` lifespan (new invariant (c) in the L1 boot block, right after the CHECKOUT_ENABLED+gate-DISABLED check).
+
+**Original symptom:** the partial unique index `sagas_one_active_per_job_idx` enforces B23 (one active saga per job_id) at the DB level — but only in Postgres mode. JSON mode still has the original B23 defect (router check only catches SAME checkout_id, not different checkout_id for same job_id). If `DB_BACKEND` was set to `json` while `CHECKOUT_ENABLED=true` in production, the B23 race re-opened silently.
+
+**What shipped:**
+
+- New invariant (c) added to the L1 boot block docstring: "If CHECKOUT_ENABLED=true, DB_BACKEND MUST be 'postgres'."
+- Check: `if is_truthy(os.environ.get("CHECKOUT_ENABLED")) and not is_postgres_backend(): log.critical(...); raise RuntimeError(...)`.
+- Error message explains the B23 connection explicitly so an operator triaging the boot failure understands which migration to complete (Phase F cutover) vs the alternative (unset CHECKOUT_ENABLED until cutover).
+- Runs every boot in the lifespan, just like invariant (a). `is_postgres_backend()` re-reads env so this catches a flag-flip-back, not just initial mis-config.
+
+**Verified:** unit test against 9 env combinations (CHECKOUT_ENABLED in `{None, true, false, 1, yes, TRUE}` × DB_BACKEND in `{None, json, JSON, postgres}`). All truthy CHECKOUT_ENABLED + non-postgres combos correctly raise; all other combos pass.
+
+**Operator implication:** flipping `DB_BACKEND=json` in production with `CHECKOUT_ENABLED=true` now refuses to boot with a CRITICAL log line. The L1 block is the only place this is enforced — there's no application-level fallback. **Phase F cutover playbook MUST set DB_BACKEND=postgres BEFORE flipping CHECKOUT_ENABLED.**
+
+---
+
+### B48 — `pgcrypto` extension loaded but unused — **LOW (COSMETIC)** — Open, cleanup
+
+**File:line:** `scripts/migrations/sql/0001_initial_schema.up.sql:CREATE EXTENSION IF NOT EXISTS pgcrypto`.
+
+**Symptom:** the extension is loaded by 0001 with a comment "for generated IDs", but all primary keys are TEXT and no column uses `gen_random_uuid()`. Pure cosmetic — but the schema implies a design intent that doesn't exist in the code.
+
+**Real fix:** either drop the extension via 0002 migration, or commit to using `gen_random_uuid()` for a future table's PK. The latter is more forward-looking (the `audit_events.id` could move from BIGSERIAL to UUID for instance).
+
+---
+
+### B49 — `schema_meta` table created but never used — **LOW (COSMETIC)** — Open, cleanup
+
+**File:line:** `scripts/migrations/sql/0001_initial_schema.up.sql:CREATE TABLE schema_meta`.
+
+**Symptom:** §9.2.1 created `schema_meta` for "application-level invariants" but no code reads or writes it. Cosmetic but contributes to schema noise.
+
+**Real fix:** either document a specific intended use (e.g., "oldest unprocessed record cursor for backfill jobs") and assign a future user, or drop in 0002. Lean toward keep+document since dropping a table that's never going to be used twice is more work than just leaving it.
+
+---
+
+### B50 — `smoke_test_db.py` doesn't exercise alembic — **LOW** — ✅ SHIPPED 2026-05-18
+
+**File:line:** `scripts/smoke_test_db.py`.
+
+**Original symptom:** the Phase A smoke test only exercised asyncpg directly. It didn't catch the missing `psycopg2-binary` dependency that alembic needs (Phase A oversight; corrected in Phase B). If we added another DB-touching tool later with its own driver dependency, the smoke test still wouldn't catch it.
+
+**What shipped:**
+
+- Pre-DB check: `import psycopg2` at the top of `main()`. If it fails, print a clear "install via `pip install --trusted-host ... psycopg2-binary~=2.9`" remediation and exit 1. Catches the original Phase A gap.
+- Post-version check: query `SELECT version_num FROM alembic_version` and compare to `scripts.db._EXPECTED_SCHEMA_VERSION`. Three explicit failure modes with separate error messages:
+  - `UndefinedTableError` → "schema migrations were never applied to this Neon branch" + the exact PowerShell to run alembic.
+  - Empty row → "migration likely failed mid-apply".
+  - Mismatch → "DB at X, code wants Y" + remediation.
+- Runs as part of the existing `python -m scripts.smoke_test_db` flow — no new entry point.
+
+**Verified:** real end-to-end run against Neon `dev` branch returned `OK: alembic_version = '0001' matches scripts/db.py:_EXPECTED_SCHEMA_VERSION` and `Phase A smoke test PASSED`.
+
+**Operator implication:** the smoke test is now the canonical "is my DB setup complete?" check. Run after provisioning a new Neon branch, after a code update, or anytime you're not sure if alembic is in sync.
+
+---
+
+### B51 — Phase D-foundation `dither` hardcoded TRUE in jobs INSERT — **LOW (FUTURE-PROOFING)** — Open
+
+**File:line:** `scripts/jobs_db.py:insert_queued` (the INSERT VALUES list).
+
+**Symptom:** the `jobs.dither` column is set to TRUE unconditionally because the `/generate` API has no `dither` form parameter (Floyd-Steinberg is the only color-mapping path today). If a future API param exposes a dither toggle, the insert_queued signature needs to gain a `dither` kwarg and the call site in `/generate` needs to pass it through.
+
+**Workaround today:** none needed; the schema reflects the current code's behavior.
+
+---
+
+### B54 — `/generate` accepts any `mosaic_block_width` (validation cap unenforced) — **HIGH** — ✅ SHIPPED 2026-05-18
+
+**Surfaced by:** manual smoke test against Neon `dev` after the B53 fix. User submitted `/generate` with `mosaic_block_width=888` (well above the documented `MAX_MOSAIC_BLOCK_WIDTH=40` cap). The job entered `running` state correctly in both memory and Postgres (B41 + B53 fixes worked), but progress crawled at <1% indefinitely — the worker was doing legitimate but absurd-scale work on a 14208-stud-wide canvas (888 blocks × 16 studs/block), allocating gigabytes of LAB-color memory and grinding through Floyd-Steinberg dithering until the 30-minute timeout watchdog finally killed it.
+
+**File:line:** `scripts/Main.py:/generate` (validation added); `scripts/picToMosiac.py:32-33` (constants existed but weren't enforced).
+
+**Root cause:** `picToMosiac.py` defined `MAX_BLOCK_WIDTH = int(os.getenv("MAX_MOSAIC_BLOCK_WIDTH", 40))` and `MIN_BLOCK_WIDTH = 1`, and CLAUDE.md documented `MAX_MOSAIC_BLOCK_WIDTH` as the cap, but **no code path ever consulted either constant**. The FastAPI `Form(...)` type-coerced to `int` but applied no range check. `pic_to_mosaic` accepted any value and processed it. Result: any width was de facto allowed; only the 30-min timeout watchdog could stop a pathological request.
+
+**What shipped:**
+
+- Import `MAX_BLOCK_WIDTH` and `MIN_BLOCK_WIDTH` from `picToMosiac.py` into `Main.py`.
+- New API-layer validation block in `/generate` BEFORE the shutdown check, BEFORE file IO, BEFORE the in-memory + DB row creation. Returns `422` with a field-specific error message for each violation:
+  - `mosaic_block_width` not in `[MIN_BLOCK_WIDTH, MAX_BLOCK_WIDTH]`.
+  - `mosaic_type` not a valid `MosaicType` enum value (`"2d"` or `"3d"`).
+  - `background_color_percent` not in `[0, 100]`.
+- Each error message names the field and the violating value so the frontend / customer can act without parsing the error string.
+- Order matters: validation runs FIRST so a bad request returns `422` (actionable) rather than `503` (retry-later) even when the server is shutting down.
+
+**Verified:** TestClient unit tests against 10 invalid-input cases (width=888, 0, -1, 41, 99999; mosaic_type=4d, garbage; bg=150, -1, 100.01) — all return 422 with the correct field in the error message. Boundary cases width=1 and width=40 pass validation (verified separately).
+
+**Operator implication:** absurd-size requests now fail at the HTTP layer in milliseconds instead of consuming a worker subprocess for ~30 minutes. Reduces operator triage burden and Neon write churn (no more orphan `'running'` rows from massive jobs). The cap can be raised by setting `MAX_MOSAIC_BLOCK_WIDTH=N` in `.env` if you ever need bigger mosaics; `picToMosiac.py` reads the env at import time, so a restart is required.
+
+**Residual gap:** the worker (`pic_to_mosaic` itself) still has no bound check — defense-in-depth would add an `assert MIN_BLOCK_WIDTH <= block_width <= MAX_BLOCK_WIDTH` at the top of `pic_to_mosaic`. Only relevant if a caller bypasses the API (e.g., direct invocation of the CLI `python picToMosiac.py 888 ...`). Not currently exploitable through any HTTP path; deferred as cleanup.
+
+---
+
+### B53 — Failed jobs left at `status='queued'` in the DB — **HIGH** — ✅ SHIPPED 2026-05-18
+
+**Surfaced by:** manual `/generate` smoke test against Neon `dev`. User submitted a job with `mosaic_block_width=888` (above the `MAX_MOSAIC_BLOCK_WIDTH=40` cap), the in-memory app.state.jobs correctly transitioned to `'failed'` (visible in Swagger), but the Postgres `jobs` row stayed at `status='queued'` indefinitely.
+
+**File:line:** `scripts/Main.py:/generate` (insert ordering) and `_mark_submission_failed` (missing shadow write).
+
+**Root cause:** two compounding defects.
+
+1. **Insert/UPDATE race on the /generate hot path.** `insert_queued` was awaited AFTER `queue.put_nowait`. Between those two lines the scheduler thread could pick up the queue item and fire `mark_running_from_thread`. The resulting UPDATE ran against Neon BEFORE `insert_queued`'s INSERT had committed — `WHERE job_id=$1 AND status='queued'` matched 0 rows (the row didn't exist yet) and silently no-op'd. If the worker then failed fast (invalid settings → millisecond failure inside the subprocess), `mark_failed_from_thread` could fire while `insert_queued` was still in flight, also matching 0 rows. Final state: row stuck at `'queued'` with NULL `started_at`.
+
+2. **`_mark_submission_failed` had no shadow write.** Pre-dispatch failures (queue.Full at intake, scheduler shutdown race, executor.submit error) updated `app.state.jobs` to `'failed'` but never touched the DB. The DB row stayed at `'queued'` while in-memory state moved on.
+
+**What shipped (2026-05-18):**
+
+- **Fix 1 — re-ordered /generate:** `await jobs_db.insert_queued(...)` now happens BEFORE `queue.put_nowait`. The Postgres row is committed before the scheduler thread can possibly see the queue item. Cost: ~50–150ms of Neon round-trip on the hot path; acceptable given the alternative is operator-visible state drift.
+- **Fix 2 — `_mark_submission_failed` now fires `mark_failed_from_thread`:** every pre-dispatch failure path now mirrors `'failed'` to the DB.
+- **Fix 3 — `/generate` queue-full and queue-error paths** also fire `mark_failed_from_thread` on the way out, since the row was already inserted at that point.
+
+**Operator implication:** new jobs that fail (including invalid-settings, queue-full, executor-submit errors) reach a terminal status in the DB. Existing 'queued' rows from before this fix are orphans — clean up manually via `DELETE FROM jobs WHERE status='queued' AND queued_at < '2026-05-18T22:00:00Z'` (or whenever you deploy the fix).
+
+**Residual gap:** if `mark_failed_from_thread` itself errors against Neon (transient outage), the row stays at `'queued'` and the in-memory state diverges. Subsumed by B44 (reconciliation pass, deferred to Phase E).
+
+---
+
+### B52 — Race-induced `started_at == completed_at` on fast jobs — **LOW** — Open, residual after B41
+
+**File:line:** `scripts/jobs_db.py:mark_complete()` (the `COALESCE(started_at, NOW())` clause).
+
+**Symptom:** when `mark_complete` wins the advisory-lock race against `mark_running`, it backfills `started_at` to `NOW()` — the same moment as `completed_at`. The resulting row has `started_at == completed_at`, suggesting the job took 0 seconds. Operator dashboards showing median job duration will under-report for fast jobs.
+
+**Real fix:** none cheap. Options: (a) `started_at = COALESCE(started_at, completed_at - INTERVAL '1 second')` — slightly less wrong but still a guess; (b) capture in-process `queued_at`/`completed_at` deltas and write them; (c) accept the floor and document it in the operator runbook.
+
+**Workaround today:** `(c)` — document as a known imprecision. The lower-bound duration is honest.
 
 ---
 
@@ -3830,9 +4110,10 @@ If any of those flare: roll back to `DB_BACKEND=json`, file the issue, fix offli
 |---|---|---|---|
 | A — Provision & connect | ✅ Shipped 2026-05-16 | Grant | Neon `laigo` / PG 17.8 / us-east-1 / ARM64. Pooler DSN in `.env.secrets`. `scripts/db.py` + `Main.py` lifespan + smoke test. asyncpg 0.31 + alembic 1.18 installed locally via `--trusted-host` workaround. Neon `dev` branch deferred to Phase C. **2026-05-17 retro:** `psycopg2-binary` was missed (corrected in Phase B); `init_pool()` atomicity bug (corrected); DSN substring-match tightened (corrected). |
 | B — Schema + alembic | ✅ Shipped 2026-05-17 | Grant | `0001_initial_schema` applied to Neon `main`, `dev`, throwaway (now deleted). `verify_schema()` + `_EXPECTED_SCHEMA_VERSION` shipped and smoke-tested locally. `psycopg2-binary~=2.9` added. 6 defects surfaced during the run + corrected (see §9.5.A retro note + §9.5.B exit criteria). |
-| C — Checkout state to Postgres | 🟦 Ready to start | Grant | Estimated 2 days. Neon `dev` branch exists (created 2026-05-17) with schema. **§9.5.C clarified post-Phase-B review (2026-05-17)** — see AD1–AD5 notes inline. Playbook: §9.5.C. |
-| D — Mosaic job lifecycle to Postgres | ⏸ Blocked by C | Grant | Estimated 2 days. Playbook: §9.5.D. Optional `MAX_WORKERS>1` follow-up requires Render Standard tier. |
-| E — Resume-on-startup + reconciliation | ⏸ Blocked by D | Grant | Estimated 1 day. The actual point of the migration. L6 audit emit ships here. Playbook: §9.5.E. |
+| D-foundation — Jobs-table shadow writes | ✅ Shipped 2026-05-18 | Grant | NOT the full §9.5.D playbook. `scripts/jobs_db.py` with 5 best-effort writes (insert_queued, mark_running/complete/failed/timed_out, delete_expired) populates the `jobs` table at lifecycle points so Phase C's FK constraints resolve. `app.state.jobs` remains the source of truth for runtime reads. JSONB type codec registered on the pool. B41 race-fix shipped same-day after manual smoke surfaced it. |
+| C — Checkout state to Postgres | ✅ Shipped 2026-05-18 | Grant | `checkout_store_pg.py` (load/save/update via raw asyncpg + advisory locks), runtime dispatcher, `ActiveCheckoutExistsError` raised on B23 violation → router 422 with `code="ACTIVE_CHECKOUT_EXISTS"`. saga.py + router.py + debug_router.py switched to dispatcher imports. End-to-end smoke against Neon `dev` requires the gate to be open (Stripe test key, etc.); code path unit-verified. |
+| D step 2 — Replace `app.state.jobs` with DB queries | 🟦 Ready to start | Grant | The full §9.5.D refactor. Replaces in-memory dicts/locks with DB queries + advisory locks. Resolves B42 + B44. Estimated 2 days. Playbook: §9.5.D. Optional `MAX_WORKERS>1` follow-up requires Render Standard tier. |
+| E — Resume-on-startup + reconciliation | ⏸ Blocked by D step 2 | Grant | Estimated 1 day. The actual point of the migration. L6 audit emit ships here. Playbook: §9.5.E. |
 | F — Cutover | ⏸ Blocked by E | Grant | ≈½ day for the flip + 1 week observation + 1 hour cleanup. Triggers Neon Free→Launch tier change. Playbook: §9.5.F. |
 
 #### 9.6.2 Open user actions (operator decisions / external work)

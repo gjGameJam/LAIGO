@@ -27,7 +27,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .models import SellerListing, SellerAllocationResponse
-from . import checkout_store
+from . import checkout_store_dispatch as checkout_store
 from .clients import brickowl_client, lego_client, bricklink_client
 from .clients.brickowl_client import raw_id_lookup, raw_availability, get_boid_for_element
 from .clients.lego_client import check_element_available, check_elements_available

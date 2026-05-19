@@ -8,6 +8,13 @@ and the status-polling endpoint.
 The order_list.json is read directly from the job's workspace. The multi-file
 split (order_list_1.json etc.) existed only for LEGO.com's 999-unit upload cap
 and is irrelevant to the optimizer, which always reads the single canonical file.
+
+DISPATCHER NOTE (Phase C): Callers should import from
+`checkout_store_dispatch` rather than directly from this module, so the
+DB_BACKEND env switch routes between the JSON path (this file) and the
+Postgres path (`checkout_store_pg.py`). The exception type
+`ActiveCheckoutExistsError` is defined here so both backends can raise it
+without creating a circular import.
 """
 
 import json
@@ -17,6 +24,30 @@ from pathlib import Path
 from typing import Optional
 
 _locks: dict[str, asyncio.Lock] = {}
+
+
+class ActiveCheckoutExistsError(Exception):
+    """A non-terminal saga already exists for this job_id (B23 enforcement).
+
+    Raised by the Postgres backend's `save()` when the partial unique index
+    `sagas_one_active_per_job_idx` fires on INSERT. The router catches this
+    and returns 422 with `code="ACTIVE_CHECKOUT_EXISTS"`.
+
+    The JSON backend doesn't raise this — B23 is an open defect for the
+    JSON-only mode (the application-level check in router.py:217 covers
+    the SAME-checkout_id case but not the DIFFERENT-checkout_id case).
+    Postgres mode closes that gap structurally via the partial unique index.
+
+    The `job_id` attribute is populated so callers can include it in
+    response bodies / logs without re-deriving it.
+    """
+
+    def __init__(self, job_id: str, message: Optional[str] = None) -> None:
+        self.job_id = job_id
+        super().__init__(
+            message
+            or f"An active (non-terminal) checkout already exists for job_id={job_id!r}"
+        )
 
 
 def _output_dir() -> Path:

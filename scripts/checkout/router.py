@@ -39,7 +39,8 @@ from .models import (
     CheckoutStatusResponse, AllocationResult,
     SagaStatus,
 )
-from . import checkout_store, saga as saga_module
+from . import checkout_store_dispatch as checkout_store, saga as saga_module
+from .checkout_store_dispatch import ActiveCheckoutExistsError
 from .clients import lego_client, brickowl_client, bricklink_client
 from .optimizer import optimize, merge_listings, apply_free_shipping_thresholds
 from .cache import cache_get, cache_set
@@ -233,38 +234,59 @@ async def confirm_checkout(
     allocation = AllocationResult(**cached["allocation"])
     max_retries = int(os.environ.get("OPTIMIZER_MAX_STOCKOUT_RETRIES", "2"))
 
-    await checkout_store.save(job_id, {
-        "checkout_id": body.checkout_id,
-        "shipping_country": cached["shipping_country"],
-        "shipping_zip": cached["shipping_zip"],
-        "customer_email": cached["customer_email"],
-        # B32: use SagaStatus.INITIATED here (not the literal "pending") so a
-        # /status poll arriving between this save and the saga's first
-        # checkpoint passes CheckoutStatusResponse Pydantic validation. The
-        # saga overwrites to INITIATED anyway in its first update, so this is
-        # behaviorally a no-op except that the brief window now serializes
-        # cleanly instead of 500-ing on a missing enum value.
-        "saga_status": SagaStatus.INITIATED.value,
-        "brickowl_order_ids": [],
-        "lego_order_id": None,
-        # Provider-agnostic naming (L5). The Saga overwrites these once the
-        # hold is created. Initial nulls let /status return the response
-        # model cleanly if a status poll arrives before Step 1 of the Saga
-        # has run.
-        "payment_hold_id": None,
-        "payment_authorized_cents": None,
-        "payment_provider": None,
-        "payment_mode": None,
-        "total_charged_cents": None,
-        "error": None,
-        # B40: paired with `error` per the B12 contract (CLAUDE.md). Even though
-        # the initial save has no error, the field must be present so the
-        # audit-grep invariant ("every error-writing site has a customer_message")
-        # holds when this file is grepped.
-        "customer_message": None,
-        "manual_review_reason": None,
-        "completed_at": None,
-    })
+    try:
+        await checkout_store.save(job_id, {
+            "checkout_id": body.checkout_id,
+            "shipping_country": cached["shipping_country"],
+            "shipping_zip": cached["shipping_zip"],
+            "customer_email": cached["customer_email"],
+            # Phase C: allocation persisted to checkouts.allocation (JSONB).
+            # The JSON backend stores it in the state file alongside everything
+            # else; both backends preserve the quote-time allocation snapshot
+            # for post-saga analysis and customer-facing receipt generation.
+            "allocation": cached["allocation"],
+            # B32: use SagaStatus.INITIATED here (not the literal "pending") so a
+            # /status poll arriving between this save and the saga's first
+            # checkpoint passes CheckoutStatusResponse Pydantic validation. The
+            # saga overwrites to INITIATED anyway in its first update, so this is
+            # behaviorally a no-op except that the brief window now serializes
+            # cleanly instead of 500-ing on a missing enum value.
+            "saga_status": SagaStatus.INITIATED.value,
+            "brickowl_order_ids": [],
+            "lego_order_id": None,
+            # Provider-agnostic naming (L5). The Saga overwrites these once the
+            # hold is created. Initial nulls let /status return the response
+            # model cleanly if a status poll arrives before Step 1 of the Saga
+            # has run.
+            "payment_hold_id": None,
+            "payment_authorized_cents": None,
+            "payment_provider": None,
+            "payment_mode": None,
+            "total_charged_cents": None,
+            "error": None,
+            # B40: paired with `error` per the B12 contract (CLAUDE.md). Even though
+            # the initial save has no error, the field must be present so the
+            # audit-grep invariant ("every error-writing site has a customer_message")
+            # holds when this file is grepped.
+            "customer_message": None,
+            "manual_review_reason": None,
+            "completed_at": None,
+        })
+    except ActiveCheckoutExistsError as exc:
+        # B23 — Postgres backend's partial unique index
+        # `sagas_one_active_per_job_idx` fired. A non-terminal saga already
+        # exists for this job_id under a DIFFERENT checkout_id (the SAME
+        # checkout_id case was caught above by the B14 load() check at
+        # line 217). Translate to 422 with a stable code for the frontend.
+        # JSON backend doesn't raise this (B23 is an open defect there).
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "An active checkout already exists for this job_id",
+                "code": "ACTIVE_CHECKOUT_EXISTS",
+                "job_id": exc.job_id,
+            },
+        )
 
     # Strong reference + done callback so asyncio doesn't GC the task before
     # it completes. See _running_sagas docstring above.

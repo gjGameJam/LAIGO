@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .models import AllocationResult, ERROR_MESSAGES, SagaStatus, StockoutError
-from . import checkout_store
+from . import checkout_store_dispatch as checkout_store
 from .clients import lego_client, brickowl_client, bricklink_client
 from .gate import require_open, GateClosedError
 from .payment import registry as payment_registry

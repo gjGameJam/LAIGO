@@ -54,7 +54,9 @@
       "Bash('C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe' -c ' *)",
       "Bash(C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe *)",
       "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m pip install \"psycopg2-binary~=2.9\")",
-      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org \"psycopg2-binary~=2.9\")"
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org \"psycopg2-binary~=2.9\")",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\('scripts/test_jsonb_codec.py', encoding='utf-8'\\).read\\(\\)\\); print\\('test_jsonb_codec.py: OK'\\)\")",
+      "Bash(\"C:/Users/Grant Benson/OneDrive/Desktop/LAIGO/.venv/Scripts/python.exe\" -m scripts.smoke_test_db)"
     ]
   },
   "enabledPlugins": {}

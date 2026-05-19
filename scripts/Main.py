@@ -1,8 +1,9 @@
-# run with: uvicorn main:app --host 0.0.0.0 --port 8000
+# run with: uvicorn scripts.Main:app --reload    (from project root)
 
 import multiprocessing as mp
 mp.set_start_method("spawn", force=True)
 
+import asyncio
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
@@ -21,7 +22,7 @@ import traceback
 import logging
 import sys
 from PIL import Image
-from .picToMosiac import pic_to_mosaic, MosaicType
+from .picToMosiac import pic_to_mosaic, MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH
 from .Util import load_project_env
 from .checkout.router import checkout_router
 from .checkout.debug_router import debug_router
@@ -111,7 +112,23 @@ async def lifespan(app: FastAPI):
     # — checkout_store and (eventually) job lifecycle acquire from it.
     # See docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.2.4.
     # ─────────────────────────────────────────────────────────────────────────
-    from .db import init_pool, close_pool, is_postgres_backend, verify_schema
+    from .db import (
+        init_pool,
+        close_pool,
+        is_postgres_backend,
+        verify_schema,
+        verify_alembic_head_matches_expected,
+    )
+    from . import jobs_db
+
+    # B43 — fail fast on code drift between scripts/db.py:_EXPECTED_SCHEMA_VERSION
+    # and the head of scripts/migrations/versions/. Pure local check; no DB
+    # connection required. Runs UNCONDITIONALLY (even on the JSON path) since
+    # it's a code-time invariant. Catches the "added/removed a migration but
+    # forgot to bump the constant" bug at boot — including local dev where
+    # verify_schema() is a no-op because DB_BACKEND=json.
+    verify_alembic_head_matches_expected()
+
     await init_pool()
     if is_postgres_backend():
         log.info("DB pool initialized (Neon Postgres backend active)")
@@ -124,6 +141,13 @@ async def lifespan(app: FastAPI):
     await verify_schema()
     if is_postgres_backend():
         log.info("DB schema verified (alembic revision matches _EXPECTED_SCHEMA_VERSION)")
+
+    # Phase D-foundation — capture the FastAPI event loop so the scheduler /
+    # cleanup / executor-callback threads can fire-and-forget shadow writes
+    # to the jobs table. Must happen BEFORE the threads start. The shadow
+    # writes themselves are no-ops when DB_BACKEND=json.
+    # See scripts/jobs_db.py module docstring.
+    jobs_db.set_event_loop(asyncio.get_running_loop())
 
     # ─────────────────────────────────────────────────────────────────────────
     # PAYMENT PROVIDER REGISTRATION (Layer 5).
@@ -153,7 +177,7 @@ async def lifespan(app: FastAPI):
     # CHECKOUT GATE — Layer 1: refuse to boot if checkout is misconfigured.
     # See scripts/checkout/gate.py for the full defense-in-depth design.
     #
-    # This block enforces two safety invariants at startup:
+    # This block enforces three safety invariants at startup:
     #   (a) If CHECKOUT_ENABLED=true, the gate MUST compute TEST or LIVE.
     #       If env says "enabled" but reality says DISABLED (missing key,
     #       wrong prefix, no marketplace creds, provider registration
@@ -167,6 +191,14 @@ async def lifespan(app: FastAPI):
     #       already DISABLED. The explicit check here is defense-in-depth
     #       — if registration somehow succeeded with a live key outside
     #       Render via a future code path, this still refuses boot.)
+    #   (c) If CHECKOUT_ENABLED=true, DB_BACKEND MUST be 'postgres'.
+    #       The JSON backend has an open B23 defect (concurrent /confirm
+    #       with different checkout_ids for the same job_id clobbers
+    #       saga state). Postgres mode closes the gap structurally via the
+    #       sagas_one_active_per_job_idx partial unique index. Flipping
+    #       DB_BACKEND back to json with CHECKOUT_ENABLED=true would
+    #       silently re-open the race in production. (B47 fix; tracked in
+    #       PRE_RELEASE §4.)
     # ─────────────────────────────────────────────────────────────────────────
     gate_decision = compute_decision()
     log.info(f"Checkout gate: mode={gate_decision.mode.value} "
@@ -182,6 +214,23 @@ async def lifespan(app: FastAPI):
             "Refusing to boot — fix the configuration or unset CHECKOUT_ENABLED."
         )
         raise RuntimeError("Checkout gate misconfigured — see CRITICAL log line above")
+
+    # B47 — invariant (c): CHECKOUT_ENABLED requires DB_BACKEND=postgres.
+    # is_postgres_backend re-reads env so this matches the actual runtime
+    # backend selection rather than a cached snapshot. Order matters:
+    # check after (a) so the operator sees gate diagnostics first, but
+    # before the L1 LIVE-key check (b) so this fires regardless of key mode.
+    if is_truthy(os.environ.get("CHECKOUT_ENABLED")) and not is_postgres_backend():
+        log.critical(
+            "CHECKOUT_ENABLED=true but DB_BACKEND != 'postgres' "
+            f"(actual: {os.environ.get('DB_BACKEND', 'json')!r}). "
+            "The JSON checkout backend has an open B23 defect (concurrent "
+            "/confirm with different checkout_ids for the same job_id clobbers "
+            "saga state). Postgres mode closes this via the partial unique "
+            "index. Refusing to boot — either set DB_BACKEND=postgres OR "
+            "unset CHECKOUT_ENABLED until cutover."
+        )
+        raise RuntimeError("B47: DB_BACKEND must be 'postgres' when CHECKOUT_ENABLED=true")
 
     stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
     # B39: use the canonical key_mode helper so this defense-in-depth check
@@ -275,6 +324,14 @@ async def lifespan(app: FastAPI):
         payment_registry._reset_for_tests()
     except Exception:
         log.debug("registry reset on shutdown skipped (already cleared)")
+
+    # Phase D-foundation — drop the event-loop reference so any worker thread
+    # still finishing late doesn't try to submit to a dead loop. Idempotent.
+    try:
+        from . import jobs_db
+        jobs_db.clear_event_loop()
+    except Exception:
+        log.debug("jobs_db event-loop clear skipped")
 
     # DB pool LAST — every other subsystem may still want to write a final
     # audit row, flush a state checkpoint, etc. close_pool() is idempotent
@@ -543,6 +600,12 @@ def _mark_submission_failed(app: FastAPI, item: dict, error: str, tb: str) -> No
 
     This cleans up the uploaded image, progress file, and any scratch output,
     then marks the job as failed in memory and writes an error manifest.
+
+    B53 fix: also fires a `mark_failed_from_thread` shadow write so the
+    corresponding Postgres `jobs` row transitions from 'queued' to 'failed'.
+    Without this, pre-dispatch failures (executor.submit error, shutdown
+    race, scheduler-state race) leave the DB row stuck at 'queued' forever
+    while the in-memory state correctly says 'failed'.
     """
     job_id = item["job_id"]
     image_path = Path(item["image_path"])
@@ -581,6 +644,13 @@ def _mark_submission_failed(app: FastAPI, item: dict, error: str, tb: str) -> No
                 "finished_at": time.time(),
             })
             job.pop("future", None)
+
+    # B53 fix — mirror the in-memory 'failed' state to the DB. Fire-and-forget;
+    # if the DB write fails, jobs_db logs CRITICAL and the row stays at
+    # 'queued', but the in-memory state is correct and /jobs/{id} still
+    # serves the correct status.
+    from . import jobs_db
+    jobs_db.mark_failed_from_thread(job_id, error)
 
     log.error(f"Job {job_id} failed before execution: {error}")
 
@@ -625,6 +695,14 @@ def _check_timed_out_jobs(app: FastAPI, slog) -> None:
         with app.state.scheduler_cv:
             app.state.active_jobs = max(0, app.state.active_jobs - 1)
             app.state.scheduler_cv.notify_all()
+
+        # Phase D-foundation shadow write — distinct DB status='timed_out'
+        # so operators can triage stuck jobs separately from clean failures.
+        # In-memory uses 'failed' status (legacy contract); DB uses 'timed_out'.
+        from . import jobs_db
+        jobs_db.mark_timed_out_from_thread(
+            job_id, f"Job timed out after {JOB_TIMEOUT_SECONDS}s"
+        )
 
 
 def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
@@ -673,6 +751,18 @@ def _job_done_callback(app: FastAPI, job_id: str, future) -> None:
         with app.state.scheduler_cv:
             app.state.active_jobs = max(0, app.state.active_jobs - 1)
             app.state.scheduler_cv.notify_all()
+
+        # Phase D-foundation shadow write — mirror terminal status to DB.
+        # Fire-and-forget. Skipped when the timeout watchdog already
+        # finalized (already_finalized=True): mark_timed_out_from_thread
+        # already wrote 'timed_out', which is the correct terminal state.
+        from . import jobs_db
+        status = result.get("status")
+        if status == "complete":
+            jobs_db.mark_complete_from_thread(job_id)
+        elif status == "failed":
+            error_msg = result.get("error") or "Worker failed without error message"
+            jobs_db.mark_failed_from_thread(job_id, error_msg)
 
 
 def scheduler_loop(app: FastAPI):
@@ -765,6 +855,11 @@ def scheduler_loop(app: FastAPI):
                 job["future"] = future
                 job["deadline"] = time.time() + JOB_TIMEOUT_SECONDS
 
+        # Phase D-foundation shadow write — mirror status='running' to DB.
+        # Fire-and-forget; in-memory dispatch already happened.
+        from . import jobs_db
+        jobs_db.mark_running_from_thread(job_id)
+
         future.add_done_callback(lambda fut, jid=job_id: _job_done_callback(app, jid, fut))
         with app.state.scheduler_cv:
             active_jobs = app.state.active_jobs
@@ -820,6 +915,50 @@ async def generate(
     background_color_percent: float = Form(100),
     to_frame: bool = Form(True),
 ):
+    # B54 — validate inputs BEFORE anything else (including the shutdown check)
+    # so callers with bad input get "fix your request" (422) rather than "retry
+    # later" (503) for a request that would never succeed regardless of server
+    # state. Previously any width was accepted; widths above MAX_BLOCK_WIDTH
+    # allocated huge memory in the worker and made progress at <1% before the
+    # 30-min timeout watchdog eventually killed them. We had the constants
+    # (MIN_BLOCK_WIDTH=1, MAX_BLOCK_WIDTH from env, default 40) but never
+    # enforced them. Doing it at the API layer saves a worker subprocess spawn
+    # + the in-memory + DB round-trip for an obviously-invalid request.
+    if not (MIN_BLOCK_WIDTH <= mosaic_block_width <= MAX_BLOCK_WIDTH):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"mosaic_block_width must be between {MIN_BLOCK_WIDTH} and "
+                f"{MAX_BLOCK_WIDTH} (inclusive); got {mosaic_block_width}. "
+                f"Each block is {STUDS_PER_BLOCK}x{STUDS_PER_BLOCK} studs."
+            ),
+        )
+
+    # MosaicType is a str-enum ("2d"/"3d"); reject anything else with a clear
+    # error rather than letting the worker fail mid-flight on a ValueError.
+    try:
+        MosaicType(mosaic_type)
+    except ValueError:
+        valid = ", ".join(repr(m.value) for m in MosaicType)
+        raise HTTPException(
+            status_code=422,
+            detail=f"mosaic_type must be one of {valid}; got {mosaic_type!r}.",
+        )
+
+    # background_color_percent is a percentage (0-100); the worker's
+    # simplify_background_lego treats it as a fraction. Negative or >100 values
+    # produce nonsense color counts.
+    if not (0.0 <= background_color_percent <= 100.0):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"background_color_percent must be between 0 and 100 (inclusive); "
+                f"got {background_color_percent}."
+            ),
+        )
+
+    # Shutdown check runs AFTER input validation so callers with bad input get
+    # the actionable 422 rather than a 503 they'd retry forever.
     if app.state.scheduler_shutdown.is_set():
         raise HTTPException(status_code=503, detail="Server is shutting down")
 
@@ -893,6 +1032,25 @@ async def generate(
             "progress_file": str(progress_file),
         }
 
+    # B53 fix — Phase D-foundation shadow write happens BEFORE queue.put_nowait
+    # so the jobs row exists in Postgres before the scheduler thread can pick up
+    # the queue item and fire `mark_running_from_thread`. If the row weren't
+    # there yet, `mark_running`'s UPDATE WHERE status='queued' would match zero
+    # rows (silent no-op), and `mark_failed_from_thread` from a fast worker
+    # failure could race with the in-flight INSERT — leaving the DB row stuck
+    # at 'queued' forever. Awaiting before enqueue eliminates the race
+    # entirely. Cost: a fast Neon round-trip (~50-150ms) on the /generate hot
+    # path; acceptable given the alternative is operator-visible drift.
+    # No-op when DB_BACKEND=json. Best-effort internally.
+    from . import jobs_db
+    await jobs_db.insert_queued(
+        job_id=job_id,
+        mosaic_type=mosaic_type,
+        width_blocks=mosaic_block_width,
+        background_pct=background_color_percent,
+        ttl_seconds=JOB_TTL_SECONDS,
+    )
+
     queue_item = {
         "job_id": job_id,
         "image_path": str(input_file),
@@ -914,6 +1072,8 @@ async def generate(
             app.state.progress.pop(job_id, None)
         with app.state.jobs_lock:
             app.state.jobs.pop(job_id, None)
+        # Mark the orphan jobs row as failed so it doesn't linger at 'queued'.
+        jobs_db.mark_failed_from_thread(job_id, "Queue full at intake time")
         raise HTTPException(status_code=429, detail="Queue full. Try again once space opens.") #if over max queue size and new job is requested
     except Exception as e:
         log.error(f"Job {job_id} failed to queue: {e}", exc_info=True)
@@ -924,6 +1084,7 @@ async def generate(
             app.state.progress.pop(job_id, None)
         with app.state.jobs_lock:
             app.state.jobs.pop(job_id, None)
+        jobs_db.mark_failed_from_thread(job_id, f"Failed to enqueue: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to queue job: {e}")
 
     log.info(f"Job {job_id} queued successfully")
@@ -1079,6 +1240,14 @@ def cleanup_loop(app: FastAPI):
                                 pass
 
                         _remove_from_queue_order(app, job_id)
+
+                        # Phase D-foundation shadow write — DELETE the jobs row.
+                        # Cascades to checkouts/audit_events via FK; blocked by
+                        # the sagas FK if a saga still references this job.
+                        # See jobs_db.delete_expired docstring for FK behavior.
+                        from . import jobs_db
+                        jobs_db.delete_expired_from_thread(job_id)
+
                         clog.info(f"Job {job_id} cleaned up")
         except Exception:
             clog.error("Unexpected error in cleanup loop", exc_info=True)

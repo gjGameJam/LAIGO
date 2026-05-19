@@ -21,12 +21,40 @@ Phase F switches to DB-backed state. See §9.3.11.11.
 """
 
 import asyncio
+import json
 import os
 import ssl
 from typing import Optional
 from urllib.parse import urlsplit
 
 import asyncpg
+
+
+async def _register_jsonb_codec(conn: asyncpg.Connection) -> None:
+    """Per-connection init callback for asyncpg.create_pool(init=...).
+
+    Registers a typecodec so JSONB columns transparently encode/decode as Python
+    dict/list — callers can pass `[{...}]` or `{"key": ...}` directly to
+    asyncpg without `json.dumps()`, and SELECT results come back as Python
+    objects, not strings.
+
+    Without this codec, asyncpg with `statement_cache_size=0` (required for
+    Neon's transaction-mode pooler) returns JSONB as `str` and requires
+    callers to `json.loads()` manually, polluting every query site.
+
+    `format='text'` (NOT 'binary') is correct for transaction-mode pooler:
+    PgBouncer in transaction mode doesn't reliably support the binary JSONB
+    protocol that asyncpg uses by default — text format is universally safe.
+    See https://www.postgresql.org/docs/current/datatype-json.html and
+    https://magicstack.github.io/asyncpg/current/usage.html#example-automatic-type-conversion.
+    """
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+        format="text",
+    )
 
 _pool: Optional[asyncpg.Pool] = None
 _pool_lock = asyncio.Lock()
@@ -109,6 +137,10 @@ async def init_pool() -> None:
             statement_cache_size=0,
             command_timeout=10.0,
             ssl=ssl_ctx,
+            # Per-connection init: register the JSONB codec so callers can
+            # pass/receive Python dict/list for JSONB columns transparently.
+            # See _register_jsonb_codec docstring above.
+            init=_register_jsonb_codec,
         )
         try:
             async with new_pool.acquire() as conn:
@@ -179,6 +211,59 @@ async def verify_schema() -> None:
             f"Schema version mismatch: DB at {current!r}, app expects "
             f"{_EXPECTED_SCHEMA_VERSION!r}. Run `alembic upgrade head` against "
             f"the Neon DIRECT endpoint BEFORE redeploying app code."
+        )
+
+
+def verify_alembic_head_matches_expected() -> None:
+    """Refuse boot if `_EXPECTED_SCHEMA_VERSION` drifts from alembic's head.
+
+    Code-time invariant: runs UNCONDITIONALLY (regardless of DB_BACKEND).
+    Catches the "developer added a 000N migration but forgot to bump the
+    constant" (or vice versa) bug at boot — even in JSON-mode dev where
+    `verify_schema()` is a no-op.
+
+    No DB connection required; reads scripts/migrations/versions/ from
+    disk via alembic.script.ScriptDirectory. ~30ms.
+
+    Resolution is anchored to this file's location (not the working
+    directory), so `uvicorn scripts.Main:app` works regardless of where
+    it was launched from.
+
+    See PRE_RELEASE §4 B43.
+    """
+    # Late import — alembic is in requirements.txt but we don't need it
+    # at module load. Keeps `from .db import ...` cheap for callers that
+    # don't trigger verification.
+    from pathlib import Path
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    script_location = str(Path(__file__).resolve().parent / "migrations")
+    cfg = Config()
+    cfg.set_main_option("script_location", script_location)
+
+    try:
+        head = ScriptDirectory.from_config(cfg).get_current_head()
+    except Exception as exc:
+        # ScriptDirectory raises CommandError on multi-head (branched
+        # migrations). If we ever support branched migrations,
+        # _EXPECTED_SCHEMA_VERSION becomes a tuple and this check needs
+        # to use get_heads(); until then, surface the multi-head case
+        # loudly so it can't ship silently.
+        raise RuntimeError(
+            f"verify_alembic_head_matches_expected: failed to read alembic "
+            f"versions at {script_location}: {type(exc).__name__}: {exc}. "
+            f"If alembic now has multiple heads (branched migrations), "
+            f"_EXPECTED_SCHEMA_VERSION needs to be updated to a tuple."
+        ) from exc
+
+    if head != _EXPECTED_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Code drift: scripts/db.py:_EXPECTED_SCHEMA_VERSION = "
+            f"{_EXPECTED_SCHEMA_VERSION!r}, but the alembic versions/ head is "
+            f"{head!r}. Either bump _EXPECTED_SCHEMA_VERSION to {head!r}, OR "
+            f"remove the orphan migration file under "
+            f"scripts/migrations/versions/."
         )
 
 
