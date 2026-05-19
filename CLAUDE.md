@@ -102,7 +102,8 @@ All runtime knobs live in `.env` (committed — no secrets):
 | `MAX_UPLOAD_SIZE_MB` | 250 | 250 | Max upload file size |
 | `DEBUG` | False | True | Enables debug-level logging |
 | `FRONTEND_ORIGIN` | — | set but **unused** | CORS origins are hardcoded in `Main.py`, not read from env |
-| `DB_BACKEND` | `json` | `json` | `json` keeps legacy in-memory/file path; `postgres` activates Neon-backed `checkout_store` + job lifecycle (Phase F flip). Local dev stays on `json` until you point at a Neon dev branch. |
+| `DB_BACKEND` | `json` | `postgres` | `json` keeps legacy in-memory/file path; `postgres` activates Neon-backed `checkout_store` + job lifecycle (Phase F flip). `.env` switched to `postgres` 2026-05-19 (Action A) so local dev exercises the production code path against the Neon main branch. |
+| `CHECKOUT_ENABLED` | — | `true` | Master gate (L0). When false/unset, the gate is closed regardless of every other condition. Required `true` for `/confirm` to function. B47 boot invariant: must NOT be `true` while `DB_BACKEND=json` (Main.py refuses to boot). Set `true` 2026-05-19. |
 | `DATABASE_URL` | — | (none in committed .env; belongs in `.env.secrets`) | Neon **pooler** DSN (host must contain `-pooler`). Read only when `DB_BACKEND=postgres`. Direct endpoint is reserved for `alembic upgrade head` + psql debugging. |
 
 ## Architecture

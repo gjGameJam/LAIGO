@@ -86,7 +86,7 @@ logger = logging.getLogger("laigo")
 # flag without env hides the misconfiguration behind a different reason
 # string and slows diagnosis.
 # ─────────────────────────────────────────────────────────────────────────────
-STRIPE_ENABLED: bool = False
+STRIPE_ENABLED: bool = True
 
 
 _ENV_STRIPE_KEY: Final = "STRIPE_SECRET_KEY"
