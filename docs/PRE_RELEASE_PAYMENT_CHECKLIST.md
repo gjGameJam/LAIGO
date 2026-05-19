@@ -18,7 +18,7 @@
 | L3 `/confirm` 503 dependency | ✅ | `scripts/checkout/dependencies.py` |
 | L4 Saga pre-flight | ✅ | `scripts/checkout/saga.py` |
 | L5 PaymentProvider Protocol + registry + StripeProvider | ✅ | `scripts/checkout/payment/` |
-| L6 audit log (`audit_events` table) | 🟡 module shipped + first call site wired (`gate.confirm_rejected`); remaining sites in §2.6 | `scripts/checkout/audit.py` |
+| L6 audit log (`audit_events` table) | ✅ module + saga_resume + saga.py call sites all wired (§2.6 complete 2026-05-19) | `scripts/checkout/audit.py`, `scripts/checkout/saga.py`, `scripts/checkout/saga_resume.py` |
 | Saga capture retry + MANUAL_REVIEW state | ✅ | `scripts/checkout/saga.py` |
 | 5% hold buffer + drift fail-closed | ✅ | `scripts/checkout/saga.py` |
 | Postgres-backed state | ✅ Phases A + B + C + D (incl. step 2) complete | `scripts/db.py`, `scripts/checkout/checkout_store_pg.py`, `scripts/jobs_store_pg.py` |
@@ -34,7 +34,7 @@
 | 1 | Stripe TEST credentials wired + `STRIPE_ENABLED=True` | Operator action |
 | 2 | ~~Phase E step 2 — `reconcile_orphan_holds()` periodic task~~ | ✅ Shipped 2026-05-19 (code only; live exercise needs (1)) |
 | 3 | Phase E step 4 — end-to-end mid-saga restart test | Needs (1) |
-| 4 | Wire remaining L6 audit call sites (§2.6 checklist) | None — incremental |
+| 4 | ~~Wire remaining L6 audit call sites (§2.6 checklist)~~ | ✅ Shipped 2026-05-19 — 26 emits in saga.py |
 | 5 | Phase F — DB_BACKEND=postgres cutover on Render | Needs (1)+(2)+(3); U3/U4/U5 (§9.5 ops actions) |
 | 6 | Roadmap items §3 #3–#14 (pre-commit revalidation, MarketplaceAdapter, BrickOwl cancel, rate limit, test suite, etc.) | None |
 
@@ -212,12 +212,14 @@ async def emit(
 |---|---|
 | `dependencies.py::require_checkout_gate_open` → `gate.confirm_rejected` | ✅ |
 | `saga_resume.py::_recover_*` → `saga.failed`, `saga.manual_review`, `payment.cancelled` | ✅ |
-| `saga.py::execute_checkout_saga` (gate-closed) → `gate.saga_rejected` | ❌ |
-| `saga.py` state transitions → `saga.*` per transition | ❌ |
-| `saga.py` MANUAL_REVIEW writes → `saga.manual_review` | ❌ |
-| `saga.py` `provider.create_hold` success → `payment.hold_created` | ❌ |
-| `saga.py` `provider.capture` success → `payment.captured` | ❌ |
-| `saga.py` `provider.cancel` (in-saga) success → `payment.cancelled` | ❌ |
+| `saga.py::execute_checkout_saga` (gate-closed) → `gate.saga_rejected` | ✅ |
+| `saga.py` state transitions → `saga.*` per transition | ✅ |
+| `saga.py` MANUAL_REVIEW writes → `saga.manual_review` | ✅ |
+| `saga.py` `provider.create_hold` success → `payment.hold_created` | ✅ |
+| `saga.py` `provider.capture` success → `payment.captured` | ✅ |
+| `saga.py` `provider.cancel` (in-saga) success → `payment.cancelled` | ✅ |
+
+All 6 saga.py call sites wired 2026-05-19. Saga emits 26 audit rows total: 1 gate, 1 started, 1 stripe_held, 1 orders_placed, 1 captured, 1 compensated, 7 manual_review, 8 failed, 1 hold_created, 1 captured (payment.*), 3 cancelled.
 
 Keep existing `logger.warning/info` lines for one month after each call-site migration so audit completeness can be cross-checked, then remove.
 

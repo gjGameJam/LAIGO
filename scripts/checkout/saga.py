@@ -54,10 +54,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .models import AllocationResult, ERROR_MESSAGES, SagaStatus, StockoutError
+from . import audit
 from . import checkout_store_dispatch as checkout_store
 from . import payment_holds_store
 from .clients import lego_client, brickowl_client, bricklink_client
-from .gate import require_open, GateClosedError
+from .gate import require_open, compute_decision, GateClosedError
 from .payment import registry as payment_registry
 from .payment.base import (
     PaymentHold,
@@ -252,6 +253,14 @@ async def _cancel_hold_with_retry(
                 logger.info(
                     f"[saga] cancel succeeded for hold {hold_id} on attempt {attempt + 1}"
                 )
+            # L6: payment.cancelled — provider-level success. Subject carries
+            # only checkout_id (job_id is not in scope here; the caller's
+            # state-write contains the join key via checkouts.job_id FK).
+            await audit.emit(
+                "payment.cancelled",
+                subject={"checkout_id": checkout_id},
+                data={"hold_id": hold_id, "reason": "compensation"},
+            )
             # Mirror the terminal Stripe state onto payment_holds (same
             # rationale as the capture site — keep the reconciliation
             # index in sync so the reconciler doesn't ask Stripe again).
@@ -569,6 +578,44 @@ async def _compensate(
             f"({terminal_status}): {exc}. State file may be corrupt; "
             "manual inspection required."
         )
+        return
+
+    # L6 audit emit AFTER the state write so an unwritable terminal doesn't
+    # produce a misleading audit row. checkout_id is best-effort from state
+    # (None if state-load failed earlier in the call).
+    audit_checkout_id = state.get("checkout_id")
+    audit_hold_id = state.get("payment_hold_id")
+    if terminal_status == SagaStatus.MANUAL_REVIEW:
+        await audit.emit(
+            "saga.manual_review",
+            subject={"job_id": job_id, "checkout_id": audit_checkout_id},
+            data={
+                "reason": "compensation_partial_failure",
+                "hold_id": audit_hold_id,
+                "authorized_cents": state.get("payment_authorized_cents"),
+                "last_error": original_error,
+                "brickowl_cancelled": list(outcome.brickowl_succeeded),
+                "brickowl_failed": [oid for oid, _ in outcome.brickowl_failed],
+                "lego_uncancellable": outcome.lego_uncancellable,
+                "stripe_outcome": (
+                    "succeeded" if outcome.stripe_succeeded
+                    else outcome.stripe_skip_reason or "failed"
+                ),
+            },
+        )
+    else:
+        await audit.emit(
+            "saga.compensated",
+            subject={"job_id": job_id, "checkout_id": audit_checkout_id},
+            data={
+                "cancelled_orders": {
+                    "brickowl": list(outcome.brickowl_succeeded),
+                    "lego": [],
+                },
+                "manual_required": False,
+                "trigger": original_error,
+            },
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -624,6 +671,15 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
                 "error": f"Timeout + state load failure: {exc}",
                 "customer_message": ERROR_MESSAGES["manual_review"],
             })
+            await audit.emit(
+                "saga.manual_review",
+                subject={"job_id": job_id, "checkout_id": checkout_id},
+                data={
+                    "reason": "timeout_state_load_failed",
+                    "timeout_seconds": _SAGA_TIMEOUT_SECONDS,
+                    "last_error": str(exc),
+                },
+            )
         except Exception as write_exc:
             # Inner write ALSO failed (state file permission, DB unreachable).
             # Nothing more we can do — /status will return whatever the last
@@ -675,6 +731,18 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
             "error": "Saga deadline exceeded with orders placed",
             "customer_message": ERROR_MESSAGES["manual_review"],
         })
+        await audit.emit(
+            "saga.manual_review",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={
+                "reason": "timeout_orders_placed",
+                "timeout_seconds": _SAGA_TIMEOUT_SECONDS,
+                "last_status": last_status,
+                "hold_id": hold_id,
+                "brickowl_order_count": len(brickowl_orders),
+                "lego_order_id": lego_order,
+            },
+        )
         return
 
     # ── Branch 2: hold exists, no orders → best-effort cancel hold ───────────
@@ -715,6 +783,20 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
                 ),
                 "customer_message": ERROR_MESSAGES["timeout"],
             })
+            await audit.emit(
+                "payment.cancelled",
+                subject={"job_id": job_id, "checkout_id": checkout_id},
+                data={"hold_id": hold_id, "reason": "timeout.no_orders"},
+            )
+            await audit.emit(
+                "saga.failed",
+                subject={"job_id": job_id, "checkout_id": checkout_id},
+                data={
+                    "reason": "timeout_pre_orders_hold_released",
+                    "timeout_seconds": _SAGA_TIMEOUT_SECONDS,
+                    "hold_id": hold_id,
+                },
+            )
         else:
             # We have a hold and could not release it. Operator must cancel
             # in the Stripe dashboard to free the customer's authorization.
@@ -729,6 +811,16 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
                 "error": f"Timeout cleanup cancel failed: {cancel_error}",
                 "customer_message": ERROR_MESSAGES["manual_review"],
             })
+            await audit.emit(
+                "saga.manual_review",
+                subject={"job_id": job_id, "checkout_id": checkout_id},
+                data={
+                    "reason": "timeout_cancel_failed",
+                    "timeout_seconds": _SAGA_TIMEOUT_SECONDS,
+                    "hold_id": hold_id,
+                    "last_error": cancel_error,
+                },
+            )
         return
 
     # ── Branch 3: no hold, no orders → clean FAILED ──────────────────────────
@@ -740,6 +832,14 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
         ),
         "customer_message": ERROR_MESSAGES["timeout"],
     })
+    await audit.emit(
+        "saga.failed",
+        subject={"job_id": job_id, "checkout_id": checkout_id},
+        data={
+            "reason": "timeout_no_hold",
+            "timeout_seconds": _SAGA_TIMEOUT_SECONDS,
+        },
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -824,6 +924,24 @@ async def _execute_checkout_saga_inner(
             "error": f"Gate closed at Saga start: {exc}",
             "customer_message": ERROR_MESSAGES["gate_closed"],
         })
+        # L6: gate.saga_rejected — operator-visible signal that L4 fired.
+        # Re-read the decision so reasons[] reflects state at rejection time
+        # (env may have changed since /confirm enqueued this task).
+        decision_at_reject = compute_decision()
+        await audit.emit(
+            "gate.saga_rejected",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={
+                "mode": decision_at_reject.mode.value,
+                "reasons": list(decision_at_reject.reasons),
+                "invocation_source": "saga",
+            },
+        )
+        await audit.emit(
+            "saga.failed",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={"reason": "gate_closed_at_start", "error_message": str(exc)},
+        )
         logger.critical(
             f"[saga] [{checkout_id}] GATE CLOSED — refusing to run. {exc}"
         )
@@ -843,6 +961,14 @@ async def _execute_checkout_saga_inner(
             "error": f"Payment provider unavailable despite open gate: {exc}",
             "customer_message": ERROR_MESSAGES["gate_closed"],
         })
+        await audit.emit(
+            "saga.failed",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={
+                "reason": "provider_unavailable_after_gate_open",
+                "error_message": str(exc),
+            },
+        )
         logger.critical(
             f"[saga] [{checkout_id}] PROVIDER UNAVAILABLE — refusing to run. {exc}"
         )
@@ -864,6 +990,11 @@ async def _execute_checkout_saga_inner(
         "manual_review_reason": None,
         "completed_at": None,
     })
+    await audit.emit(
+        "saga.started",
+        subject={"job_id": job_id, "checkout_id": checkout_id},
+        data={"mode": provider.mode(), "payment_provider": provider.name},
+    )
 
     # ── Step 1: Payment hold (with 5% buffer) ─────────────────────────────────
     # The hold is for 1.05× the quoted customer total. Capture later is for
@@ -892,6 +1023,11 @@ async def _execute_checkout_saga_inner(
             "error": f"Payment hold failed (permanent): {exc}",
             "customer_message": ERROR_MESSAGES["payment_permanent"],
         })
+        await audit.emit(
+            "saga.failed",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={"reason": "hold_permanent", "error_message": str(exc)},
+        )
         logger.warning(
             f"[saga] [{checkout_id}] Hold failed permanently: {exc}"
         )
@@ -906,6 +1042,11 @@ async def _execute_checkout_saga_inner(
             "error": f"Payment hold failed (transient — please retry): {exc}",
             "customer_message": ERROR_MESSAGES["payment_transient"],
         })
+        await audit.emit(
+            "saga.failed",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={"reason": "hold_transient", "error_message": str(exc)},
+        )
         logger.warning(
             f"[saga] [{checkout_id}] Hold transiently failed: {exc}"
         )
@@ -919,10 +1060,32 @@ async def _execute_checkout_saga_inner(
             "error": f"Payment hold failed unexpectedly: {exc}",
             "customer_message": ERROR_MESSAGES["payment_transient"],
         })
+        await audit.emit(
+            "saga.failed",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={
+                "reason": "hold_unexpected",
+                "error_message": str(exc),
+                "error_class": type(exc).__name__,
+            },
+        )
         logger.error(
             f"[saga] [{checkout_id}] Hold failed unexpectedly", exc_info=True
         )
         return
+
+    # L6: hold succeeded — emit BEFORE record_hold so a record_hold failure
+    # doesn't suppress the audit row for an authorization that genuinely
+    # exists at Stripe.
+    await audit.emit(
+        "payment.hold_created",
+        subject={"job_id": job_id, "checkout_id": checkout_id},
+        data={
+            "hold_id": hold.hold_id,
+            "amount_cents": hold.amount_authorized_cents,
+            "mode": hold.mode,
+        },
+    )
 
     # Record the hold in the reconciliation index BEFORE the sagas update.
     # If `record_hold` fails (DB transient), we want the saga to abort here
@@ -948,6 +1111,14 @@ async def _execute_checkout_saga_inner(
                 hold_id=hold.hold_id,
                 idempotency_key=f"cancel-{checkout_id}",
             )
+            await audit.emit(
+                "payment.cancelled",
+                subject={"job_id": job_id, "checkout_id": checkout_id},
+                data={
+                    "hold_id": hold.hold_id,
+                    "reason": "record_hold_failed_rollback",
+                },
+            )
         except Exception as cancel_exc:
             logger.critical(
                 f"[saga] [{checkout_id}] cancel after record_hold failure "
@@ -962,6 +1133,15 @@ async def _execute_checkout_saga_inner(
             "error": f"payment_holds INSERT failed: {exc}",
             "customer_message": ERROR_MESSAGES["payment_transient"],
         })
+        await audit.emit(
+            "saga.failed",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={
+                "reason": "payment_holds_insert_failed",
+                "hold_id": hold.hold_id,
+                "error_message": str(exc),
+            },
+        )
         return
 
     await checkout_store.update(job_id, {
@@ -969,6 +1149,15 @@ async def _execute_checkout_saga_inner(
         "payment_authorized_cents": hold.amount_authorized_cents,
         "saga_status": SagaStatus.STRIPE_HELD,
     })
+    await audit.emit(
+        "saga.stripe_held",
+        subject={"job_id": job_id, "checkout_id": checkout_id},
+        data={
+            "hold_id": hold.hold_id,
+            "amount_cents": hold.amount_authorized_cents,
+            "currency": hold.currency,
+        },
+    )
 
     # ── Step 2: Place orders per seller ──────────────────────────────────────
     current_allocation = allocation
@@ -1114,6 +1303,17 @@ async def _execute_checkout_saga_inner(
                     ),
                     "customer_message": ERROR_MESSAGES["manual_review"],
                 })
+                await audit.emit(
+                    "saga.manual_review",
+                    subject={"job_id": job_id, "checkout_id": checkout_id},
+                    data={
+                        "reason": "stockout_retry_cancel_failed",
+                        "hold_id": hold.hold_id,
+                        "authorized_cents": hold.amount_authorized_cents,
+                        "brickowl_failed": [oid for oid, _ in failures],
+                        "brickowl_attempted": list(placed_brickowl_ids),
+                    },
+                )
                 logger.critical(
                     f"[saga] [{checkout_id}] MANUAL_REVIEW — "
                     f"{len(failures)} stockout-retry cancel(s) failed: {failed_summary}"
@@ -1232,6 +1432,16 @@ async def _execute_checkout_saga_inner(
         break  # all orders placed
 
     await checkout_store.update(job_id, {"saga_status": SagaStatus.ORDERS_PLACED})
+    await audit.emit(
+        "saga.orders_placed",
+        subject={"job_id": job_id, "checkout_id": checkout_id},
+        data={
+            "order_ids": {
+                "brickowl": list(placed_brickowl_ids),
+                "lego": [lego_order_id] if lego_order_id else [],
+            },
+        },
+    )
 
     # ── Step 3: Capture payment ───────────────────────────────────────────────
     # The capture amount is the FINAL allocated total — possibly different
@@ -1271,6 +1481,16 @@ async def _execute_checkout_saga_inner(
             "error": "Allocation drift exceeded hold buffer",
             "customer_message": ERROR_MESSAGES["manual_review"],
         })
+        await audit.emit(
+            "saga.manual_review",
+            subject={"job_id": job_id, "checkout_id": checkout_id},
+            data={
+                "reason": "drift_post_placement",
+                "hold_id": hold.hold_id,
+                "authorized_cents": hold.amount_authorized_cents,
+                "capture_amount_cents": capture_amount,
+            },
+        )
         return
 
     capture_succeeded = await _capture_with_retry(
@@ -1289,6 +1509,14 @@ async def _execute_checkout_saga_inner(
         "total_charged_cents": capture_amount,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     })
+    await audit.emit(
+        "saga.captured",
+        subject={"job_id": job_id, "checkout_id": checkout_id},
+        data={
+            "hold_id": hold.hold_id,
+            "captured_amount_cents": capture_amount,
+        },
+    )
     logger.info(
         f"[saga] [{checkout_id}] complete — charged {capture_amount} cents "
         f"(authorized {hold.amount_authorized_cents}, mode={hold.mode})"
@@ -1337,6 +1565,16 @@ async def _capture_with_retry(
                 logger.info(
                     f"[saga] [{checkout_id}] capture succeeded on attempt {attempt + 1}"
                 )
+            # L6: payment.captured — provider-level success event (paired
+            # with saga.captured at the outer call site once state writes).
+            await audit.emit(
+                "payment.captured",
+                subject={"job_id": job_id, "checkout_id": checkout_id},
+                data={
+                    "hold_id": hold.hold_id,
+                    "captured_amount_cents": capture_amount,
+                },
+            )
             # Mirror the terminal Stripe state onto payment_holds so the
             # reconciler won't try to cancel a captured hold. Best-effort:
             # if this UPDATE fails, the reconciler would still see the row
@@ -1408,5 +1646,17 @@ async def _capture_with_retry(
         "error": f"Capture failed after orders placed: {last_error}",
         "customer_message": ERROR_MESSAGES["manual_review"],
     })
+    await audit.emit(
+        "saga.manual_review",
+        subject={"job_id": job_id, "checkout_id": checkout_id},
+        data={
+            "reason": "capture_exhausted_retries",
+            "hold_id": hold.hold_id,
+            "authorized_cents": hold.amount_authorized_cents,
+            "capture_amount_cents": capture_amount,
+            "last_error": str(last_error) if last_error else None,
+            "last_error_class": type(last_error).__name__ if last_error else None,
+        },
+    )
     logger.critical(f"[saga] [{checkout_id}] MANUAL_REVIEW — {reason}")
     return False
