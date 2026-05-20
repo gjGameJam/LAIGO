@@ -41,7 +41,11 @@ python colorQuant.py <num_colors>
 # Note: image path is hardcoded to ../images/labrador.jpg
 ```
 
-There are no automated tests. Manual testing is done via the Swagger UI at `/docs`.
+Automated tests are runnable as bare modules from project root:
+`.venv\Scripts\python.exe -m scripts.test_<name>`. See `docs/ORDER_OPTIMIZER.md §16` for the
+full list — optimizer / gate / saga state machine run with no DB or network; jobs-store
+dispatcher + Phase E + reconciler suites need `DB_BACKEND=postgres` + a Neon DSN. For UI / API
+walkthroughs, use the Swagger UI at `/docs`.
 
 ### Troubleshooting pip installs (corporate SSL proxy)
 

@@ -775,12 +775,12 @@ Listed in priority order:
 | 6 | Implement BrickOwl order placement once strategy decided | BrickOwl API access + strategy decision |
 | 7 | Create BrickLink seller account; obtain API credentials | — |
 | 8 | Implement BrickLink price guide client | API credentials |
-| 9 | Enable Stripe: set `STRIPE_ENABLED=True` in `payment/stripe_provider.py` + `STRIPE_SECRET_KEY=sk_test_...` in `.env.secrets` + `CHECKOUT_ENABLED=true` in `.env` + verify `GET /checkout/gate` returns `mode: "test"` | End-to-end Stripe test with `pm_card_visa` (see PRE_RELEASE_PAYMENT_CHECKLIST.md §6 for the full go-live runbook) |
-| 10 | Send customer confirmation email after saga completes | Email service (e.g. SendGrid / SES). Should fire on `saga_status == payment_captured` AND on `saga_status == manual_review` (different templates). |
-| 11 | Add `checkout_store._locks` cleanup on job TTL expiry | Main.py cleanup thread integration. Subsumed by roadmap #2 (Postgres state) when that ships. |
+| 9 | ~~Enable Stripe (`STRIPE_ENABLED=True` + `sk_test_...` + `CHECKOUT_ENABLED=true`)~~ | ✅ Done 2026-05-19 (TEST mode). Live mode still requires §6 go-live checklist + the U3/U4/U5 Render actions in `PRE_RELEASE_PAYMENT_CHECKLIST.md §9.5`. |
+| 10 | Send customer confirmation email after saga completes | Email service (e.g. SendGrid / SES). Fire on `saga_status == payment_captured` AND on `saga_status == manual_review` (different templates). |
+| 11 | Add `checkout_store._locks` cleanup on job TTL expiry | Subsumed by Phase F — JSON backend disappears once `DB_BACKEND=postgres` is the only path on Render. |
 | 12 | ~~B12 customer-facing error translation~~ | ✅ Shipped 2026-05-16. |
-| 13 | L6 audit log — wire remaining call sites | Schema + first call site shipped 2026-05-19. Checklist in `PRE_RELEASE_PAYMENT_CHECKLIST.md §2.6`. |
-| 14 | ~~Postgres-backed state + resume-on-restart~~ | ✅ Phases A–E.1 shipped 2026-05-16 → 2026-05-19. Remaining: E.2 (`reconcile_orphan_holds`) + F (Render cutover). See `PRE_RELEASE_PAYMENT_CHECKLIST.md §9`. |
+| 13 | ~~L6 audit log — wire remaining call sites~~ | ✅ Shipped 2026-05-19 — 26 emits in `saga.py`. Schema + envelope in `PRE_RELEASE_PAYMENT_CHECKLIST.md §2`. |
+| 14 | ~~Postgres-backed state + resume-on-restart~~ | ✅ Phases A–E shipped 2026-05-16 → 2026-05-19. Remaining: Phase F (Render cutover) per `PRE_RELEASE_PAYMENT_CHECKLIST.md §9.4`. |
 
 ---
 
