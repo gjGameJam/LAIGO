@@ -1,34 +1,68 @@
-To Run Project Locally:
-1) enter virtual envrionment and navigate to scripts folder:
-    A) .venv\Scripts\activate.bat
-    B) cd scripts
-2) run picture to mosiac script
-    B) Python picToMosiac.py
-3) upload order list to LEGO website
-    A) go to https://www.lego.com/en-us/pick-and-build/pick-a-brick
-    B) click "Upload List"
-    C) upload the jsons in the OrderLists folder
-    D) click "View All Pieces"
-    E) Click "Pick Selected Pieces
-    F) Check out and buy all the uploaded pieces from the order lists
-4) Follow the instructions
-    A) go to the InstructionSets folder
+LAIGO — LEGO Mosaic Builder
+============================
+
+Converts a photo into a LEGO mosaic: a color-quantized brick layout,
+a Pick-a-Brick order list (uploadable to lego.com), and a step-by-step
+PDF build guide.
+
+Full project guide: CLAUDE.md
+Checkout / payment reference: docs/ORDER_OPTIMIZER.md, docs/PRE_RELEASE_PAYMENT_CHECKLIST.md
 
 
+Running locally
+---------------
 
-To Test/View API endpoints
-1) run uvicorn fastapi
-    A) uvicorn Main:app --reload
-2) go to fast api local ui
-    A) navigate to http://127.0.0.1:8000/docs#/ in a browser
-2) enter information into a endpoint
-    A) example: generate (POST) could accept the following:
-    {
-        "image_path": "C:/Users/bgern/Desktop/AIEng/LAIGO/images/stella1.jpg",
-        "settings": {
-            "mosiac_block_width": 1,
-            "mosaic_type": "2d",
-            "background_color_percent": 100,
-            "to_frame": true
-        }
-    }
+From the project root, in PowerShell:
+
+    .venv\Scripts\activate.ps1
+    uvicorn scripts.Main:app --reload
+
+Open the Swagger UI at  http://127.0.0.1:8000/docs
+
+The server MUST be started from the project root with the
+package-qualified path (`scripts.Main:app`) — `cd scripts; uvicorn Main:app`
+fails because `Main.py` uses relative imports.
+
+
+First-time setup
+----------------
+
+1. Create the venv and install deps (project root).
+2. Copy `.env` (committed defaults) and create `.env.secrets` (gitignored).
+   Required keys live in docs/ORDER_OPTIMIZER.md §4.1; the checkout
+   pipeline is gated off until those are present.
+3. Apply DB migrations against your Neon DSN — see CLAUDE.md
+   "Database migrations (alembic)" for the exact commands.
+
+
+Basic usage
+-----------
+
+POST /generate  (multipart upload) — kicks off a mosaic job.
+GET  /jobs/{job_id}                — poll job status.
+GET  /jobs/{job_id}/download       — download the artifact zip when complete.
+
+The zip contains:
+  - order_list.json       (upload to lego.com Pick-a-Brick)
+  - instructions.pdf      (step-by-step build guide)
+
+Checkout endpoints (`/jobs/{id}/checkout/...`) are gated by the
+checkout gate (see `GET /checkout/gate` and docs/CHECKOUT_AUDIT.md §10).
+
+
+Running the tests
+-----------------
+
+From project root:
+
+    .venv\Scripts\python.exe -m scripts.test_optimizer
+    .venv\Scripts\python.exe -m scripts.test_gate_bypass
+    .venv\Scripts\python.exe -m scripts.test_saga_state_machine
+    .venv\Scripts\python.exe -m scripts.test_jobs_store_json
+    .venv\Scripts\python.exe -m scripts.test_jobs_store_edge
+
+Postgres-backed tests (need DB_BACKEND=postgres + a Neon DSN):
+
+    .venv\Scripts\python.exe -m scripts.test_jobs_store_dispatch
+    .venv\Scripts\python.exe -m scripts.test_phase_e_pg
+    .venv\Scripts\python.exe -m scripts.test_reconcile_pg

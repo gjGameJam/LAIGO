@@ -755,9 +755,7 @@ Operational issues only — defects in the saga / payment layer are tracked in `
 
 8. **`checkout_store._locks` dict grows unbounded.** A new `asyncio.Lock` is created per `job_id` and never removed. For a long-running server with many jobs, this accumulates locks indefinitely. Low memory impact in practice, but worth cleaning up when a job's TTL expires. (Tracked as H13 — defer to roadmap #2 if Postgres state lands; otherwise tier-4 cleanup.)
 
-9. **B23 — concurrent `/confirm` with different `checkout_id` for the same `job_id` clobbers in-flight state.** If a customer opens a second tab, makes a fresh `/quote`, and confirms before the first saga finishes, the second `/confirm` overwrites the row. Today's `_locks[job_id]` serialization (B1) makes this atomic but not safe — the two sagas race their state writes. See PRE_RELEASE §4 B23 for the recommended fix (Option B — reject if the existing saga is non-terminal).
-
-10. ~~Error-field information leak (B12).~~ **RESOLVED 2026-05-16.** `/status` now returns the customer-facing `customer_message` (from the `ERROR_MESSAGES` translation table in `models.py`); the raw `error` field stays operator-internal. Every saga write that sets `error` MUST also set `customer_message`.
+9. **B23 — concurrent `/confirm` with different `checkout_id` for the same `job_id`.** PG mode closes this structurally via the `sagas_one_active_per_job_idx` partial unique index (router translates the resulting `UniqueViolationError` to HTTP 422 with `code="ACTIVE_CHECKOUT_EXISTS"`). JSON-mode deployments remain exposed — disappears post-Phase-F. See PRE_RELEASE §4 B23.
 
 ---
 
@@ -788,7 +786,21 @@ Listed in priority order:
 
 ## 16. Testing
 
-### Optimizer unit test (no API key needed)
+### Automated test suites (shipped 2026-05-19, §6.10 coverage)
+
+| File | Coverage | Requires |
+|---|---|---|
+| `scripts/test_optimizer.py` | optimizer happy path, shipping consolidation, free-shipping threshold, stockout fall-through, 2000×15 perf, `merge_listings` ordering, `compute_laigo_fee` boundary | nothing — pure functions |
+| `scripts/test_gate_bypass.py` | L0 gate matrix, `require_open` raise/return, L3 503 wire contract, L4 watchdog (saga never reaches provider when gate closed) | nothing — JSON-backed |
+| `scripts/test_saga_state_machine.py` | 7 saga state transitions (happy path + hold permanent/transient + STRIPE_HELD→COMPENSATED/MANUAL_REVIEW + capture failures) | nothing — fake provider + monkey-patched LEGO client |
+| `scripts/test_jobs_store_json.py` / `_edge.py` | jobs lifecycle API parity, FIFO dequeue, TTL eviction | nothing |
+| `scripts/test_jobs_store_dispatch.py` | dispatcher backend routing parity | `DB_BACKEND=postgres` + Neon DSN |
+| `scripts/test_phase_e_pg.py` | `saga_resume` routing branches + `payment_holds_store` + `audit.emit` failure-swallowing | same |
+| `scripts/test_reconcile_pg.py` | `reconcile_orphan_holds` decision matrix | same |
+
+Run any test from the project root: `.venv\Scripts\python.exe -m scripts.test_<name>`. None require Stripe or marketplace network access.
+
+### Optimizer unit test (no API key needed) — inline example
 
 ```python
 from checkout.optimizer import optimize
