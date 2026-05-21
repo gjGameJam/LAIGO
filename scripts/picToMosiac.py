@@ -12,6 +12,7 @@ import traceback
 sys.path.append(str(Path(__file__).resolve().parent)) #look in same folder for scripts
 from .MosiacToOrder import GenerateOrderList
 from .MosiacToInstruction import GenerateInstructions
+from .preview_builder import build_preview_payload, write_preview_atomic
 from .Util import GetPaletteRGBArray, load_project_env
 # Only load .env when running locally
 if os.getenv("RENDER") is None:
@@ -270,6 +271,25 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             bg_rgb_simplified = LEGO_PALETTE_RGB[bg_idx_simplified]
             bg_out_img = Image.fromarray(bg_rgb_simplified.astype(np.uint8))
 
+            if output_dir is not None:
+                try:
+                    studs_h = fg_idx.shape[0]
+                    preview_payload = build_preview_payload(
+                        job_id=job_id or "",
+                        mosaic_type="3d",
+                        block_width=block_width // STUDS_PER_BLOCK,
+                        block_height=studs_h // STUDS_PER_BLOCK,
+                        studs_width=block_width,
+                        studs_height=studs_h,
+                        to_frame=to_frame,
+                        bg_idx=bg_idx_simplified,
+                        fg_idx=fg_idx,
+                        fg_mask=fg_mask_np,
+                    )
+                    write_preview_atomic(preview_payload, Path(output_dir) / "preview.json")
+                except Exception as e:
+                    log_error(f"preview.json build/write failed (non-fatal): {e}")
+
             fg_alpha_resized = fg_a.resize((block_width, fg_idx.shape[0]), Image.NEAREST)
             fg_out_rgba = fg_out_img.convert("RGBA").resize((block_width, fg_idx.shape[0]), Image.NEAREST)
             fg_out_rgba.putalpha(fg_alpha_resized)
@@ -293,6 +313,25 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             out_img, img_idx = image_to_lego_mosaic(filtered_image, block_width)
 
             out_img_rgba = out_img.convert("RGBA")
+
+            if output_dir is not None:
+                try:
+                    studs_h = img_idx.shape[0]
+                    preview_payload = build_preview_payload(
+                        job_id=job_id or "",
+                        mosaic_type="2d",
+                        block_width=block_width // STUDS_PER_BLOCK,
+                        block_height=studs_h // STUDS_PER_BLOCK,
+                        studs_width=block_width,
+                        studs_height=studs_h,
+                        to_frame=to_frame,
+                        bg_idx=img_idx,
+                        fg_idx=None,
+                        fg_mask=None,
+                    )
+                    write_preview_atomic(preview_payload, Path(output_dir) / "preview.json")
+                except Exception as e:
+                    log_error(f"preview.json build/write failed (non-fatal): {e}")
 
             log_debug("generating order list...")
             report(30)

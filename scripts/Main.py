@@ -7,7 +7,7 @@ import asyncio
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
@@ -720,6 +720,15 @@ def run_job(job_id: str,
         except Exception as e:
             wlog.warning(f"Job {job_id} could not copy order_list.json: {e}")
 
+    # Copy preview.json (3D-preview payload for the frontend) to the stable
+    # location before workspace deletion. Mirrors the order_list handoff above.
+    _preview_src = workspace / "preview.json"
+    if _preview_src.exists():
+        try:
+            shutil.copy2(_preview_src, job_root / "preview.json")
+        except Exception as e:
+            wlog.warning(f"Job {job_id} could not copy preview.json: {e}")
+
     # --- Success cleanup ---
     shutil.rmtree(workspace, ignore_errors=True)
 
@@ -1373,6 +1382,40 @@ async def get_job(job_id: str):
         response["queue_length"] = queue_length
 
     return response
+
+
+@app.get("/jobs/{job_id}/preview")
+async def get_job_preview(job_id: str):
+    """Return the 3D-preview payload for a completed job.
+
+    File existence is the sole readiness signal — the frontend polls
+    /jobs/{job_id} for status, and only fetches /preview once status==complete.
+    The bytes are read into memory and returned via Response (NOT FileResponse)
+    so the file descriptor closes immediately, avoiding races with cleanup_loop
+    rmtreeing the job directory on Windows.
+    """
+    preview_path = OUTPUT_DIR / job_id / "preview.json"
+    try:
+        data = preview_path.read_bytes()
+    except FileNotFoundError:
+        log.info(f"Preview requested for job {job_id} but file not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Preview is not available for this job.",
+                "code": "PREVIEW_NOT_AVAILABLE",
+            },
+        )
+    except Exception as e:
+        log.error(f"Preview file unreadable for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Preview file is unreadable.",
+                "code": "PREVIEW_CORRUPTED",
+            },
+        )
+    return Response(content=data, media_type="application/json")
 
 
 @app.get("/jobs/{job_id}/download")

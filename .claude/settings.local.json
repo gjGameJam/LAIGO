@@ -93,7 +93,14 @@
       "Bash(awk -F= '/^[A-Z]/ {print $1}' .env.local)",
       "Bash(awk -F= '/^DATABASE_URL/ {print NR\": \"$1\"=\"\\(length\\($2\\)>10 ? substr\\($2,1,10\\)\"...<\"length\\($2\\)\" chars>\" : \"<short or empty>\"\\)}' .env.secrets)",
       "Bash(awk *)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\" -Recurse -Filter \"Main.py\")",
+      "Bash(Select-Object FullName)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\\\\outputs\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -First 20)",
+      "Bash(Find \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\\\\scripts\\\\checkout\" -name \"router.py\" -type f)",
+      "Bash(.venv\\\\Scripts\\\\python.exe *)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m scripts.test_preview)"
     ]
   },
   "enabledPlugins": {}
