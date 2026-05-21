@@ -176,7 +176,8 @@ async def fetch_for_reconcile(*, older_than_seconds: int = 3600) -> list[dict]:
         SELECT ph.hold_id, ph.checkout_id, ph.provider, ph.mode,
                ph.amount_authorized_cents, ph.currency,
                ph.last_known_status, ph.last_reconciled_at, ph.created_at,
-               s.saga_status, s.job_id, s.last_transition_at
+               s.saga_status, s.job_id, s.last_transition_at,
+               s.hold_disposition
         FROM payment_holds ph
         LEFT JOIN sagas s ON s.payment_hold_id = ph.hold_id
         WHERE ph.last_known_status = 'requires_capture'
@@ -187,8 +188,9 @@ async def fetch_for_reconcile(*, older_than_seconds: int = 3600) -> list[dict]:
     )
     # Each row keys: hold_id, checkout_id, provider, mode, amount_authorized_cents,
     # currency, last_known_status, last_reconciled_at, created_at, saga_status,
-    # job_id, last_transition_at. saga_status / job_id / last_transition_at are
-    # NULL when the LEFT JOIN doesn't match (rare — payment_holds.checkout_id
-    # has a FK to checkouts, but the sagas row may have been purged or never
-    # written if a saga crashed between record_hold and the sagas update).
+    # job_id, last_transition_at, hold_disposition. saga_status / job_id /
+    # last_transition_at / hold_disposition are NULL when the LEFT JOIN doesn't
+    # match (rare — payment_holds.checkout_id has a FK to checkouts, but the
+    # sagas row may have been purged or never written if a saga crashed between
+    # record_hold and the sagas update).
     return [dict(r) for r in rows]

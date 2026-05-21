@@ -53,8 +53,9 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .models import AllocationResult, ERROR_MESSAGES, SagaStatus, StockoutError
+from .models import AllocationResult, ERROR_MESSAGES, HoldDisposition, SagaStatus, StockoutError
 from . import audit
+from ._cancel_helpers import cancel_hold_with_retry
 from . import checkout_store_dispatch as checkout_store
 from . import payment_holds_store
 from .clients import lego_client, brickowl_client, bricklink_client
@@ -215,92 +216,6 @@ class _CompensationOutcome:
             or self.stripe_failed
             or self.stripe_skip_reason in ("missing_checkout_id", "provider_unavailable")
         )
-
-
-async def _cancel_hold_with_retry(
-    *,
-    provider,
-    checkout_id: str,
-    hold_id: str,
-) -> tuple[bool, str | None]:
-    """Cancel a payment hold with bounded retries on transient errors only.
-
-    Mirrors `_capture_with_retry`'s policy:
-      - PaymentRetryableError → retry with `_CAPTURE_BACKOFFS_SECONDS` backoff
-      - PaymentPermanentError → fail immediately (won't recover)
-      - Unexpected Exception → fail immediately, log with stack trace
-
-    Returns (True, None) on success, (False, error_message) on permanent
-    failure or exhausted retries.
-
-    Idempotency: stable f"cancel-{checkout_id}" across all attempts. Stripe's
-    24h idempotency cache returns the original response on retry, so a
-    transient network error on the first attempt followed by a successful
-    retry is safe — the second call hits the cache, not a fresh cancel.
-
-    Same retry budget as capture (1s/4s/16s, ~21s worst case). Compensation
-    is already a degraded path; we want either a recovered-by-retry success
-    or a fast escalation to MANUAL_REVIEW, not an unbounded loop.
-    """
-    idempotency_key = f"cancel-{checkout_id}"
-    max_attempts = len(_CAPTURE_BACKOFFS_SECONDS) + 1
-    last_error: Exception | None = None
-
-    for attempt in range(max_attempts):
-        try:
-            await provider.cancel(hold_id=hold_id, idempotency_key=idempotency_key)
-            if attempt > 0:
-                logger.info(
-                    f"[saga] cancel succeeded for hold {hold_id} on attempt {attempt + 1}"
-                )
-            # L6: payment.cancelled — provider-level success. Subject carries
-            # only checkout_id (job_id is not in scope here; the caller's
-            # state-write contains the join key via checkouts.job_id FK).
-            await audit.emit(
-                "payment.cancelled",
-                subject={"checkout_id": checkout_id},
-                data={"hold_id": hold_id, "reason": "compensation"},
-            )
-            # Mirror the terminal Stripe state onto payment_holds (same
-            # rationale as the capture site — keep the reconciliation
-            # index in sync so the reconciler doesn't ask Stripe again).
-            try:
-                await payment_holds_store.mark_status(hold_id, "canceled")
-            except Exception as exc:
-                logger.error(
-                    f"[saga] payment_holds.mark_status(canceled) failed for "
-                    f"hold {hold_id}: {exc}. Reconciler will catch up.",
-                    exc_info=True,
-                )
-            return True, None
-
-        except PaymentRetryableError as exc:
-            last_error = exc
-            if attempt < max_attempts - 1:
-                wait_s = _CAPTURE_BACKOFFS_SECONDS[attempt]
-                logger.warning(
-                    f"[saga] cancel attempt {attempt + 1} transient failure for "
-                    f"hold {hold_id}: {exc}. Retrying in {wait_s}s."
-                )
-                await asyncio.sleep(wait_s)
-                continue
-            break  # exhausted retries
-
-        except PaymentPermanentError as exc:
-            logger.error(
-                f"[saga] cancel permanent failure for hold {hold_id}: {exc}. "
-                "Skipping remaining retries."
-            )
-            return False, f"permanent: {exc}"
-
-        except Exception as exc:
-            logger.error(
-                f"[saga] cancel unexpected exception for hold {hold_id}",
-                exc_info=True,
-            )
-            return False, f"unexpected: {exc}"
-
-    return False, f"exhausted {max_attempts} attempts: {last_error}"
 
 
 def _compose_compensation_reason(
@@ -527,10 +442,12 @@ async def _compensate(
                     f"Cancel hold {hold_id} manually in the Stripe dashboard."
                 )
             else:
-                succeeded, error_msg = await _cancel_hold_with_retry(
+                succeeded, error_msg = await cancel_hold_with_retry(
                     provider=provider,
                     checkout_id=checkout_id,
                     hold_id=hold_id,
+                    audit_reason="compensation",
+                    audit_subject={"job_id": job_id, "checkout_id": checkout_id},
                 )
                 if succeeded:
                     outcome.stripe_succeeded = True
@@ -541,6 +458,20 @@ async def _compensate(
     # ── Decide terminal status (single state write) ──────────────────────────
     if outcome.needs_manual_review():
         terminal_status = SagaStatus.MANUAL_REVIEW
+        # B55 — disposition rules for _compensate's MANUAL_REVIEW writes:
+        #   - hold authorized AND cancel failed/skipped       → CANCEL_SAFE
+        #     (runbook says "cancel manually"; reconciler is a valid safety
+        #      net since it constructs its own idempotency key from hold_id)
+        #   - state_load_error / lego_uncancellable           → leave None
+        #     (NULL = conservative; we don't reliably know if a hold is open)
+        #   - brickowl_failed only (stripe ok / no hold)      → leave None
+        #     (no hold to dispose)
+        hold_id_in_state = state.get("payment_hold_id")
+        hold_authorized = bool(hold_id_in_state) and (
+            outcome.stripe_failed
+            or outcome.stripe_skip_reason in ("missing_checkout_id", "provider_unavailable")
+        )
+        disposition = HoldDisposition.CANCEL_SAFE if hold_authorized else None
         update_fields = {
             "saga_status": terminal_status,
             "manual_review_reason": _compose_compensation_reason(
@@ -549,6 +480,7 @@ async def _compensate(
             ),
             "error": "Compensation partial failure (see manual_review_reason)",
             "customer_message": ERROR_MESSAGES["manual_review"],
+            "hold_disposition": disposition,
         }
         log_fn = logger.critical
         log_msg = f"[saga] [{job_id}] MANUAL_REVIEW — compensation partial failure"
@@ -670,6 +602,9 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
                 ),
                 "error": f"Timeout + state load failure: {exc}",
                 "customer_message": ERROR_MESSAGES["manual_review"],
+                # B55 — state unreadable, hold existence unknown. Leave NULL
+                # so the reconciler treats this conservatively (don't touch).
+                "hold_disposition": None,
             })
             await audit.emit(
                 "saga.manual_review",
@@ -730,6 +665,10 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
             ),
             "error": "Saga deadline exceeded with orders placed",
             "customer_message": ERROR_MESSAGES["manual_review"],
+            # B55 — runbook offers capture-OR-cancel. Reconciler MUST NOT
+            # auto-cancel; operator decides whether to capture for the placed
+            # orders or refund them.
+            "hold_disposition": HoldDisposition.OPERATOR_DECIDES,
         })
         await audit.emit(
             "saga.manual_review",
@@ -746,33 +685,28 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
         return
 
     # ── Branch 2: hold exists, no orders → best-effort cancel hold ───────────
+    # B57 — uses cancel_hold_with_retry (same as compensation + saga_resume) so
+    # a transient Stripe error during the timeout handler doesn't immediately
+    # escalate to MANUAL_REVIEW. The 21s worst-case retry budget runs OUTSIDE
+    # the saga's wait_for (we got here BECAUSE wait_for fired), so no nested-
+    # timeout concern.
     if hold_id:
         cancel_succeeded = False
         cancel_error: str | None = None
         try:
             provider = payment_registry.get_active()
-            await provider.cancel(
-                hold_id=hold_id,
-                idempotency_key=f"cancel-{checkout_id}",
-            )
-            cancel_succeeded = True
-            # Mirror the cancel onto payment_holds. Best-effort — same
-            # rationale as _cancel_hold_with_retry's mark_status call.
-            try:
-                await payment_holds_store.mark_status(hold_id, "canceled")
-            except Exception as exc:
-                logger.error(
-                    f"[saga] [{checkout_id}] timeout-cancel: payment_holds."
-                    f"mark_status(canceled) failed for hold {hold_id}: {exc}. "
-                    "Reconciler will catch up.",
-                    exc_info=True,
-                )
         except PaymentProviderUnavailable as exc:
             cancel_error = (
                 f"No payment provider registered when releasing hold: {exc}"
             )
-        except Exception as exc:
-            cancel_error = str(exc)
+        else:
+            cancel_succeeded, cancel_error = await cancel_hold_with_retry(
+                provider=provider,
+                checkout_id=checkout_id,
+                hold_id=hold_id,
+                audit_reason="timeout.no_orders",
+                audit_subject={"job_id": job_id, "checkout_id": checkout_id},
+            )
 
         if cancel_succeeded:
             await checkout_store.update(job_id, {
@@ -783,11 +717,8 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
                 ),
                 "customer_message": ERROR_MESSAGES["timeout"],
             })
-            await audit.emit(
-                "payment.cancelled",
-                subject={"job_id": job_id, "checkout_id": checkout_id},
-                data={"hold_id": hold_id, "reason": "timeout.no_orders"},
-            )
+            # cancel_hold_with_retry already emitted `payment.cancelled` with
+            # reason="timeout.no_orders". Just emit the saga-level event.
             await audit.emit(
                 "saga.failed",
                 subject={"job_id": job_id, "checkout_id": checkout_id},
@@ -810,6 +741,10 @@ async def _handle_saga_timeout(job_id: str, checkout_id: str) -> None:
                 ),
                 "error": f"Timeout cleanup cancel failed: {cancel_error}",
                 "customer_message": ERROR_MESSAGES["manual_review"],
+                # B55 — runbook says "cancel manually". Reconciler is a valid
+                # safety net (different idempotency key, possibly recovered
+                # Stripe state).
+                "hold_disposition": HoldDisposition.CANCEL_SAFE,
             })
             await audit.emit(
                 "saga.manual_review",
@@ -1097,36 +1032,54 @@ async def _execute_checkout_saga_inner(
     try:
         await payment_holds_store.record_hold(checkout_id, hold)
     except Exception as exc:
-        # Roll back: cancel the brand-new hold (best-effort; the reconciler
-        # would catch a stranded hold eventually but we have the provider in
-        # hand right now). Then fail the saga so the customer sees a
-        # retryable error rather than silently stranding funds.
+        # B56 rollback path. record_hold INSERT failed AFTER provider.create_hold
+        # already succeeded at Stripe. The hold is real and authorized; without
+        # this rollback the customer's auth sits orphaned for up to 7 days
+        # (Stripe's default).
+        #
+        # Pre-B56 this used a single naked provider.cancel; a transient Stripe
+        # error there left an INVISIBLE orphan (no payment_holds row → reconciler
+        # can't see it; saga immediately marked FAILED → saga_resume doesn't
+        # see it). Now we:
+        #   1. Use cancel_hold_with_retry (1s/4s/16s budget) so transient
+        #      Stripe failures recover on their own.
+        #   2. If retries are exhausted, emit `payment.hold_orphan` so the
+        #      orphan is queryable in audit_events and an operator alert can
+        #      fire (see PRE_RELEASE §2.6 vocabulary).
         logger.error(
             f"[saga] [{checkout_id}] payment_holds.record_hold failed after "
-            f"create_hold succeeded: {exc}. Attempting cancel.",
+            f"create_hold succeeded: {exc}. Attempting cancel with retries.",
             exc_info=True,
         )
-        try:
-            await provider.cancel(
-                hold_id=hold.hold_id,
-                idempotency_key=f"cancel-{checkout_id}",
+        cancel_succeeded, cancel_error = await cancel_hold_with_retry(
+            provider=provider,
+            checkout_id=checkout_id,
+            hold_id=hold.hold_id,
+            audit_reason="record_hold_failed_rollback",
+            audit_subject={"job_id": job_id, "checkout_id": checkout_id},
+        )
+        if not cancel_succeeded:
+            # B56 — invisible orphan would have been the pre-fix outcome. Emit
+            # a dedicated audit event so the hold IS queryable in audit_events
+            # (the only persistent record, since no payment_holds row exists
+            # and the saga is about to be marked FAILED).
+            logger.critical(
+                f"[saga] [{checkout_id}] cancel after record_hold failure "
+                f"ALSO failed after retries: {cancel_error}. Hold "
+                f"{hold.hold_id} is stranded. Emitting payment.hold_orphan "
+                "audit event so the orphan is discoverable by ops."
             )
             await audit.emit(
-                "payment.cancelled",
+                "payment.hold_orphan",
                 subject={"job_id": job_id, "checkout_id": checkout_id},
                 data={
                     "hold_id": hold.hold_id,
-                    "reason": "record_hold_failed_rollback",
+                    "amount_authorized_cents": hold.amount_authorized_cents,
+                    "currency": hold.currency,
+                    "reason": "record_hold_failed_unrecoverable",
+                    "record_hold_error": str(exc),
+                    "cancel_error": cancel_error,
                 },
-            )
-        except Exception as cancel_exc:
-            logger.critical(
-                f"[saga] [{checkout_id}] cancel after record_hold failure "
-                f"ALSO failed: {cancel_exc}. Hold {hold.hold_id} is stranded "
-                "until reconciler picks it up — but reconciler won't see it "
-                "either (no payment_holds row). Operator must inspect Stripe "
-                "dashboard manually.",
-                exc_info=True,
             )
         await checkout_store.update(job_id, {
             "saga_status": SagaStatus.FAILED,
@@ -1140,6 +1093,10 @@ async def _execute_checkout_saga_inner(
                 "reason": "payment_holds_insert_failed",
                 "hold_id": hold.hold_id,
                 "error_message": str(exc),
+                # Surface whether the rollback succeeded so post-hoc analysis
+                # can distinguish "clean rollback" from "orphan emitted".
+                "rollback_succeeded": cancel_succeeded,
+                "rollback_error": cancel_error,
             },
         )
         return
@@ -1302,6 +1259,11 @@ async def _execute_checkout_saga_inner(
                         f"Stockout-retry compensation failed: {len(failures)} cancel(s) raised"
                     ),
                     "customer_message": ERROR_MESSAGES["manual_review"],
+                    # B55 — some BrickOwl orders may have actually shipped despite
+                    # the cancel failures. Operator may want to capture for the
+                    # partial fulfillment rather than refund. Reconciler MUST NOT
+                    # auto-cancel.
+                    "hold_disposition": HoldDisposition.OPERATOR_DECIDES,
                 })
                 await audit.emit(
                     "saga.manual_review",
@@ -1480,6 +1442,9 @@ async def _execute_checkout_saga_inner(
             ),
             "error": "Allocation drift exceeded hold buffer",
             "customer_message": ERROR_MESSAGES["manual_review"],
+            # B55 — runbook offers capture-OR-refund. Reconciler MUST NOT
+            # auto-cancel; operator decides whether to capture authorized cents.
+            "hold_disposition": HoldDisposition.OPERATOR_DECIDES,
         })
         await audit.emit(
             "saga.manual_review",
@@ -1645,6 +1610,9 @@ async def _capture_with_retry(
         "manual_review_reason": reason,
         "error": f"Capture failed after orders placed: {last_error}",
         "customer_message": ERROR_MESSAGES["manual_review"],
+        # B55 — runbook offers retry-capture-from-dashboard OR cancel-and-refund.
+        # Reconciler MUST NOT auto-cancel; operator may be working on retry.
+        "hold_disposition": HoldDisposition.OPERATOR_DECIDES,
     })
     await audit.emit(
         "saga.manual_review",

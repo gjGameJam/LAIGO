@@ -110,9 +110,10 @@ import logging
 from typing import Optional
 
 from . import audit
+from ._cancel_helpers import cancel_hold_with_retry
 from . import checkout_store_dispatch as checkout_store
 from . import payment_holds_store
-from .models import ERROR_MESSAGES, SagaStatus
+from .models import ERROR_MESSAGES, HoldDisposition, SagaStatus
 from .payment import registry as payment_registry
 from .payment.base import PaymentProviderUnavailable
 from ..db import get_pool, is_postgres_backend
@@ -267,6 +268,12 @@ async def _recover_stripe_held(job_id: str, checkout_id: str, state: dict) -> No
             "manual_review_reason": reason,
             "error": "Resume: stripe_held with no hold_id",
             "customer_message": ERROR_MESSAGES["manual_review"],
+            # B55 — no hold_id in our state. We don't know if Stripe has a
+            # hold to dispose. NULL is the conservative default (reconciler
+            # won't touch). If a hold exists at Stripe under this checkout_id,
+            # the reconciler will only find it via payment_holds; if that row
+            # exists, the reconciler will use its OWN saga-status branch.
+            "hold_disposition": None,
         })
         await audit.emit(
             "saga.manual_review",
@@ -291,6 +298,11 @@ async def _recover_stripe_held(job_id: str, checkout_id: str, state: dict) -> No
             "manual_review_reason": reason,
             "error": f"No provider for resume cancel: {exc}",
             "customer_message": ERROR_MESSAGES["manual_review"],
+            # B55 — hold authorized; runbook says "cancel from Stripe dashboard".
+            # CANCEL_SAFE because once the provider re-registers (operator fixes
+            # the env), the reconciler's next tick can release the hold without
+            # operator intervention.
+            "hold_disposition": HoldDisposition.CANCEL_SAFE,
         })
         await audit.emit(
             "saga.manual_review",
@@ -300,21 +312,34 @@ async def _recover_stripe_held(job_id: str, checkout_id: str, state: dict) -> No
         logger.critical(f"[resume] {checkout_id}: {reason}")
         return
 
-    try:
-        await provider.cancel(
-            hold_id=hold_id,
-            idempotency_key=f"cancel-{checkout_id}",
-        )
-    except Exception as exc:
+    # B57 — use the retry helper so a transient Stripe error during boot
+    # recovery doesn't escalate to MANUAL_REVIEW prematurely. The helper
+    # handles audit emit (`payment.cancelled` with reason="resume.restart")
+    # and `payment_holds_store.mark_status('canceled')` on success.
+    cancel_succeeded, cancel_error = await cancel_hold_with_retry(
+        provider=provider,
+        checkout_id=checkout_id,
+        hold_id=hold_id,
+        audit_reason="resume.restart",
+        audit_subject={"job_id": job_id, "checkout_id": checkout_id},
+    )
+
+    if not cancel_succeeded:
+        # Retries exhausted (~21s). Mark MANUAL_REVIEW with cancel_safe
+        # disposition so the reconciler is the next safety net (B55).
         reason = (
-            f"Resume-on-startup: held {hold_id} could not be cancelled "
-            f"({type(exc).__name__}: {exc}). Cancel in Stripe dashboard."
+            f"Resume-on-startup: hold {hold_id} could not be cancelled "
+            f"after retries ({cancel_error}). Cancel in Stripe dashboard."
         )
         await checkout_store.update(job_id, {
             "saga_status": SagaStatus.MANUAL_REVIEW.value,
             "manual_review_reason": reason,
-            "error": f"Resume cancel failed: {exc}",
+            "error": f"Resume cancel failed: {cancel_error}",
             "customer_message": ERROR_MESSAGES["manual_review"],
+            # B55 — runbook says "Cancel in Stripe dashboard". With the B57
+            # retry helper above, reaching this branch means retries already
+            # exhausted; reconciler is the next safety net.
+            "hold_disposition": HoldDisposition.CANCEL_SAFE,
         })
         await audit.emit(
             "saga.manual_review",
@@ -322,7 +347,7 @@ async def _recover_stripe_held(job_id: str, checkout_id: str, state: dict) -> No
             data={
                 "reason": "resume.cancel_failed",
                 "hold_id": hold_id,
-                "error_class": type(exc).__name__,
+                "cancel_error": cancel_error,
             },
         )
         logger.critical(f"[resume] {checkout_id}: {reason}")
@@ -334,24 +359,6 @@ async def _recover_stripe_held(job_id: str, checkout_id: str, state: dict) -> No
         "error": "Resumed after restart; hold released",
         "customer_message": ERROR_MESSAGES["timeout"],
     })
-    # Mirror the status flip on the payment_holds index so the reconciler
-    # doesn't try to re-cancel later. mark_status is best-effort — a
-    # failure here only delays the next reconcile tick from seeing the
-    # canceled hold; it doesn't risk double-cancellation (Stripe is
-    # idempotent via the cancel key).
-    try:
-        await payment_holds_store.mark_status(hold_id, "canceled")
-    except Exception as exc:
-        logger.error(
-            f"[resume] {checkout_id}: cancel succeeded but payment_holds "
-            f"mark_status failed: {exc}. Reconciler will catch up.",
-            exc_info=True,
-        )
-    await audit.emit(
-        "payment.cancelled",
-        subject={"job_id": job_id, "checkout_id": checkout_id},
-        data={"hold_id": hold_id, "reason": "resume.restart"},
-    )
     await audit.emit(
         "saga.failed",
         subject={"job_id": job_id, "checkout_id": checkout_id},
@@ -393,6 +400,10 @@ async def _recover_orders_placed(
         "manual_review_reason": reason,
         "error": "Process restart with orders placed",
         "customer_message": ERROR_MESSAGES["manual_review"],
+        # B55 — runbook offers capture-OR-refund (item 4 above). Reconciler
+        # MUST NOT auto-cancel; orders are real and operator may want to
+        # capture for them.
+        "hold_disposition": HoldDisposition.OPERATOR_DECIDES,
     })
     await audit.emit(
         "saga.manual_review",

@@ -127,6 +127,12 @@ _SAGA_COLS: dict[str, str] = {
     "error":                    "error_message",   # rename
     "customer_message":         "customer_message",
     "manual_review_reason":     "manual_review_reason",
+    # B55 — orphan-hold reconciler reads this to disambiguate "operator wants
+    # this cancelled" (cancel_safe) from "operator must decide" (operator_decides).
+    # Set at every MANUAL_REVIEW write site in saga.py + saga_resume.py. NULL
+    # for any non-MANUAL_REVIEW state OR for MANUAL_REVIEW with no hold to
+    # dispose. See HoldDisposition in models.py.
+    "hold_disposition":         "hold_disposition",
     "completed_at":             "completed_at",
 }
 
@@ -151,8 +157,12 @@ def _coerce_for_db(key: str, value):
     """Coerce a state value to an asyncpg-acceptable form on the way in."""
     if value is None:
         return None
-    # Pydantic enum value (e.g., SagaStatus.INITIATED) — extract the .value.
-    if key == "saga_status" and hasattr(value, "value"):
+    # Pydantic enum value (e.g., SagaStatus.INITIATED, HoldDisposition.CANCEL_SAFE)
+    # — extract .value so the DB sees the string the CHECK constraint expects.
+    # Listed explicitly (not generalized to "any enum") to keep the conversion
+    # surface intentional; adding a new enum-bearing column requires touching
+    # this list, which is the right level of friction.
+    if key in ("saga_status", "hold_disposition") and hasattr(value, "value"):
         return value.value
     # Timestamp keys may arrive as ISO strings (the JSON backend's format).
     if key in _TIMESTAMP_KEYS and isinstance(value, str):
@@ -247,6 +257,7 @@ async def load(job_id: str) -> Optional[dict]:
             s.error_message,
             s.customer_message,
             s.manual_review_reason,
+            s.hold_disposition,
             s.initiated_at,
             s.last_transition_at,
             s.completed_at,
@@ -390,14 +401,15 @@ async def _insert_sagas(conn: asyncpg.Connection, job_id: str, state: dict) -> N
             error_message,
             customer_message,
             manual_review_reason,
+            hold_disposition,
             initiated_at,
             last_transition_at,
             completed_at
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
             NOW(),
             NOW(),
-            $14
+            $15
         )
         """,
         state["checkout_id"],
@@ -413,6 +425,10 @@ async def _insert_sagas(conn: asyncpg.Connection, job_id: str, state: dict) -> N
         state.get("error"),  # state["error"] -> column error_message
         state.get("customer_message"),
         state.get("manual_review_reason"),
+        # B45 contract: hold_disposition is NULLABLE without a DEFAULT. Initial
+        # saves never set it (no MANUAL_REVIEW at /confirm). saga.py +
+        # saga_resume.py set it via update() at MANUAL_REVIEW transitions.
+        _coerce_for_db("hold_disposition", state.get("hold_disposition")),
         _coerce_for_db("completed_at", state.get("completed_at")),
     )
 

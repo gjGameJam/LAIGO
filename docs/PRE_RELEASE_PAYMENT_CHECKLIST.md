@@ -6,6 +6,73 @@
 
 ---
 
+## 🛑 PAUSED 2026-05-20 — Stripe/DB work on hold; 3D preview API + frontend is active focus
+
+**Why:** Pivoting to 3D preview work. 2D editor deferred until after Stripe/DB resumes.
+
+> **One operator action required to finalize the pause cleanly** — apply migration 0002 to Neon `dev` so uvicorn boots without the schema-mismatch error. From any local shell with the Neon dev DIRECT DSN:
+> ```powershell
+> $env:ALEMBIC_DATABASE_URL = "<Neon dev DIRECT DSN — no '-pooler' in host>"
+> alembic upgrade head
+> # then: SELECT version_num FROM alembic_version;  -- expect '0002'
+> ```
+> Until this is run, every `uvicorn scripts.Main:app` will refuse to boot with `verify_schema()` mismatch. The migration is a single nullable column add + CHECK constraint — semantically inert until a saga writes MANUAL_REVIEW.
+
+**State at pause (the work to come back to):**
+- B55, B56, B57 — HIGH-severity audit fixes — **code shipped 2026-05-19** (see §4.2).
+- Migration 0002 (`sagas.hold_disposition`) — **assumed-applied to Neon `dev` 2026-05-20** (run the command above if you haven't). Pending on Neon `main` until Phase F cutover window.
+- Phase F prerequisites: U3 ✅ U4 ✅ U5 ❌ (Neon Launch upgrade) U6 ✅ on dev, ❌ on main.
+- All HIGH-severity work compiles; no in-flight work; task ledger is closed.
+- Tests at pause time: `test_optimizer`, `test_gate_bypass`, `test_saga_state_machine`, `test_jobs_store_json` all green (no-DB). `test_reconcile_pg`, `test_phase_e_pg`, `test_jobs_store_dispatch` green against Neon dev with migration 0002 applied.
+
+### To resume the Stripe/DB work — exact sequence
+
+1. **Re-read this section + §4.2 catalog (B55/B56/B57 entries)** — refreshes context in <5 min.
+2. **Verify Neon `dev` state** — `SELECT version_num FROM alembic_version;` should return `'0002'`. If it doesn't, re-run `alembic upgrade head` against the dev DIRECT DSN.
+3. **Re-run integration smoke tests against dev** —
+   ```powershell
+   .venv\Scripts\python.exe -m scripts.test_reconcile_pg
+   .venv\Scripts\python.exe -m scripts.test_phase_e_pg
+   .venv\Scripts\python.exe -m scripts.test_jobs_store_dispatch
+   ```
+   All three must pass before proceeding. Requires `.env.secrets` has the Neon dev DSN as `DATABASE_URL` and `DB_BACKEND=postgres` in `.env`.
+4. **Coordinate Phase F cutover window** — see §9.4. Specifically: U5 (Neon Launch tier $19/mo) MUST be done in the same maintenance window as the `DB_BACKEND=postgres` flag flip on Render, otherwise Free-tier autosuspend cold-starts the first `/status` poll.
+5. **Apply migration 0002 to Neon `main`** during the cutover window. Render's pre-deploy hook (U3) will run `alembic upgrade head` automatically on the first deploy after the env vars are in place — verify by tailing the Render deploy logs for `Running upgrade 0001 -> 0002`.
+6. **Phase F observation week** — see §9.4 Step 6. Daily MANUAL_REVIEW + saga-status SQL queries.
+7. **Phase F Step 7 cleanup** after 7 clean days — delete the JSON code path (see §9.4 Step 7 file list).
+8. **Pick up §3 roadmap items #3–#10 + #12–#14** in parallel or after.
+
+### Freeze zone (do not modify during the pause)
+
+Touching any of these while building 3D preview risks regressing the audit work and creating subtle latent bugs that won't surface until resume:
+
+- `scripts/checkout/**` (entire package — saga, reconcile, audit, payment providers, stores)
+- `scripts/migrations/**` (don't author 0003 until 0002 is on Neon `main`)
+- `scripts/db.py` (especially `_EXPECTED_SCHEMA_VERSION`, `init_pool`, `verify_schema`)
+- `scripts/jobs_store_pg.py`, `scripts/jobs_store_json.py`, `scripts/jobs_store_dispatch.py`
+- `scripts/Main.py` lifespan (the `async def lifespan(app)` block — boot invariants are load-bearing)
+- `.env` keys: `DB_BACKEND`, `CHECKOUT_ENABLED`, `DATABASE_URL`, `STRIPE_*`
+- This file (§0–§9). `docs/CHECKOUT_AUDIT.md`, `docs/ORDER_OPTIMIZER.md`.
+
+If 3D preview work genuinely needs to touch any of these, **treat the pause as ended** — re-read this section, the freeze-zone constraints don't apply mid-resume.
+
+### Scope of the new (3D preview) work
+
+3D preview API + frontend is mosaic-pipeline territory:
+- Likely touches: `scripts/picToMosiac.py`, `scripts/VisualMaker.py`, `scripts/MosiacToInstruction.py`, possibly new modules under `scripts/`, and new routes in `scripts/Main.py` outside the lifespan block.
+- Does NOT need: checkout, payment, reconciler, audit log, payment_holds. New HTTP endpoints for 3D preview are read-side (return preview data) — they do NOT need `Depends(require_checkout_gate_open)` per the doctrine in `scripts/checkout/dependencies.py` docstring.
+- If a new endpoint mutates state, follow `{detail: {error, code, ...}}` shape (CLAUDE.md "Public API contracts" bullet).
+
+### Resuming under "I forgot everything"
+
+If enough time passes that the resumption sequence above isn't enough, re-read in this order:
+1. This section (§0 PAUSED) — restores immediate context.
+2. `CLAUDE.md` — module map + boot invariants + doctrine bullets. The single most concentrated source of project knowledge.
+3. §4.2 B55/B56/B57 entries — explains exactly what was changed and why.
+4. §9 (migration history + Phase F playbook) — the operational sequence.
+
+---
+
 ## 0. Status snapshot — where we are right now
 
 ### What's working
@@ -36,8 +103,11 @@
 | 3 | ~~Phase E step 4 — end-to-end mid-saga restart test~~ | ✅ Covered by `test_phase_e_pg` (15 assertions, every routing branch) + Action A boot-log verification. Live Stripe exercise deferred until U1 (SSL fix); harness at `scripts/phase_e_4_inject.py`. |
 | 4 | ~~Wire remaining L6 audit call sites (§2.6 checklist)~~ | ✅ Shipped 2026-05-19 — 26 emits in saga.py |
 | 5 | ~~Roadmap §3 #11 — §6.10 minimum test suite~~ | ✅ Shipped 2026-05-19 — `test_optimizer.py`, `test_gate_bypass.py`, `test_saga_state_machine.py` (28 assertions; no DB, no network) |
-| 6 | **Phase F — `DB_BACKEND=postgres` cutover on Render** | U3 + U4 + U5 (§9.5 ops actions). Now the top remaining gate. |
-| 7 | Roadmap §3 #3–#10 + #12–#14 (pre-commit revalidation, MarketplaceAdapter, BrickOwl cancel, rate limit, etc.) | None — engineering work; pick up in parallel with #6. |
+| 6 | ~~B55 — Reconciler MANUAL_REVIEW handling~~ | ✅ Code shipped 2026-05-19; migration 0002 applied to Neon `dev` 2026-05-20. HoldDisposition column threaded through saga.py + saga_resume.py + reconcile.py; test_reconcile_pg adds 4 cases. |
+| 7 | ~~B56+B57 — Hold-cancel retry helper + orphan audit~~ | ✅ Code shipped 2026-05-19. New module `scripts/checkout/_cancel_helpers.py` (`cancel_hold_with_retry`). All naked `provider.cancel` sites in `saga.py` + `saga_resume.py` migrated. `payment.hold_orphan` audit event added to §2.2 vocabulary; **always alerts** in production. |
+| 8 | **🛑 PAUSED 2026-05-20 — 3D preview API + frontend** | Active focus shifted away from Stripe/DB. See pause section at top of this file for resume sequence + freeze zones. |
+| 9 | **Phase F — `DB_BACKEND=postgres` cutover on Render** | Resume after pause. U5 (Neon Launch upgrade) + flag flip. U6b (apply 0002 to main) is handled by Render's pre-deploy hook. |
+| 10 | Roadmap §3 #3–#10 + #12–#14 (pre-commit revalidation, MarketplaceAdapter, BrickOwl cancel, rate limit, etc.) | None — engineering work; pick up in parallel with Phase F. |
 
 ### Hard launch gate
 
@@ -53,10 +123,12 @@ Before any real `sk_live_` Stripe key is configured, ALL of the following must b
 
 **B — Local smoke** — runnable any time. See "Running the tests" in `README` for the full command list; the postgres-backed suites (`test_jobs_store_dispatch`, `test_phase_e_pg`, `test_reconcile_pg`) need `DB_BACKEND=postgres` + a Neon DSN in `.env.secrets`. Boot log on `uvicorn scripts.Main:app --reload` should show `[resume] examined N in-flight sagas` AND `[reconcile] periodic task started (interval=300s)`.
 
-**C — Render configuration (Phase F prerequisite)**
-- **U3:** Render dashboard → laigo service → Settings → add pre-deploy command `alembic upgrade head`.
-- **U4:** Render dashboard → Environment → add `DATABASE_URL=<Neon main pooler DSN>` and `DATABASE_URL_DIRECT=<Neon main direct DSN — no '-pooler' in host>`. Leave `DB_BACKEND=json` until cutover.
+**C — Render + Neon configuration (Phase F prerequisite)**
+- ~~**U3:**~~ ✅ Done 2026-05-19. Render pre-deploy command `alembic upgrade head` configured.
+- ~~**U4:**~~ ✅ Done 2026-05-19. `DATABASE_URL=<Neon main pooler DSN>` + `DATABASE_URL_DIRECT=<Neon main direct DSN>` in Render env. `DB_BACKEND` still `json` until cutover.
 - **U5:** Neon dashboard → Billing → Free → Launch ($19/mo). Do this in the same window as the flag flip — Free tier autosuspends after 5 min of idle.
+- ~~**U6a:**~~ ✅ Done 2026-05-20. Migration 0002 applied to Neon `dev` via local `alembic upgrade head`.
+- **U6b:** Migration 0002 applies to Neon `main` automatically via U3's pre-deploy hook on the first cutover deploy. No separate operator action.
 
 **D — Product decisions (block roadmap items)**
 - BrickOwl ordering strategy: Option A (Playwright order + LAIGO collects payment) vs Option B (cart URL redirect). Picks roadmap #5's path.
@@ -65,22 +137,28 @@ Before any real `sk_live_` Stripe key is configured, ALL of the following must b
 - Customer concurrency policy: can a customer have two open `/quote`s for the same job? Drives the active-quote partial unique index.
 - Refund policy on capture-failed-after-orders-placed: contact for alt payment, refund and eat cost, or both? Drives MANUAL_REVIEW runbook.
 
-### Open defects (none launch-blocking; see §4.1 for full table)
+### Open defects (see §4.1 for full table)
 
 | Severity | Open IDs |
 |---|---|
+| HIGH (code-shipped) | B55, B56, B57 — all moved to §4.2 closed catalog. Migration 0002 applied to Neon `dev` 2026-05-20; pending on `main` (handled by Render pre-deploy hook at Phase F cutover — U6b). |
+| MEDIUM | B58 (500 leaks exception class), B59 (jobs cleanup blocked by sagas FK → unbounded disk), B60 (audit actor.ip masked by LB) |
 | MEDIUM (LATENT) | B11 (cross-iteration brickowl_order_ids checkpoint — only when roadmap #5 ships), B23 in json mode, B28 (per-order cancel retry — when roadmap #5 ships), B36 (semaphore-per-call) |
-| LOW | B26, B27, B29, B30, B31, B35 |
+| LOW | B26, B27, B29, B30, B31, B35, B61 (CORS env unread), B63 (no stop_cache_sweeper), B64 (Stripe msg substring), B65 (422 missing code) |
+| DOC | B31 |
 | COSMETIC | B48, B49 |
 | FUTURE-PROOFING | B51 (dither hardcoded), B52 (started_at == completed_at on fast jobs) |
 
+**HIGH-severity items are resolved in code.** Migration 0002 is applied to Neon `dev` (U6a, 2026-05-20); apply to `main` is U6b, handled by Render's pre-deploy hook on the next deploy. After Phase F (U5 + DB_BACKEND flip), the live-Stripe flip is unblocked.
+
 ### Where to read after `/clear`
 
-1. **This file (§0)** — current state, what's working, what's next.
-2. **`CLAUDE.md`** — module map + boot invariants + doctrine bullets.
-3. **§9.3 here** — Phase E step 4 playbook (the next live test).
-4. **§9.4 here** — Phase F (Render cutover) playbook.
-5. **§4** — open defects.
+1. **🛑 PAUSED section at the top of this file** — the active project state. If you're returning to Stripe/DB work, the resume checklist there is your entry point.
+2. **This file §0 (here)** — current state, what's working, what's next.
+3. **`CLAUDE.md`** — module map + boot invariants + doctrine bullets. Also flags the active focus and freeze zones.
+4. **§9.3 here** — reconciler decision matrix (includes B55's MANUAL_REVIEW disposition branch).
+5. **§9.4 here** — Phase F (Render cutover) playbook.
+6. **§4** — open defects + §4.2 closed catalog (B55-B57 entries with file lists).
 
 ---
 
@@ -138,9 +216,12 @@ Frozen schema. New events extend `data`; never rename top-level keys.
 | `payment.hold_created` | Payment hold via provider | `{hold_id, amount_cents, mode}` |
 | `payment.captured` | Capture via provider | `{hold_id, captured_amount_cents}` |
 | `payment.cancelled` | Cancel via provider | `{hold_id, reason?}` |
+| `payment.hold_orphan` | Hold authorized at Stripe but rollback could not release it (B56). Saga writes FAILED with no payment_holds row, so this event is the only persistent record. | `{hold_id, amount_authorized_cents, currency, reason, record_hold_error?, cancel_error?}` — **always alerts** |
 | `payment.skipped` | (LEGACY — must never appear in prod after L4) | `{reason}` |
 
 A non-zero `payment.skipped` count in production is **a P0 page**. The event is wired only to detect a regression that would otherwise reintroduce RPN #1.
+
+A non-zero `payment.hold_orphan` count is **also a P0 page**. The event fires only when the record_hold rollback path exhausted retries — the customer's authorization is stranded at Stripe until manual cancellation or the 7-day auto-expiry. Operator runbook: query the event, take the `hold_id` to the Stripe dashboard, cancel manually.
 
 ### 2.3 Storage
 
@@ -243,8 +324,15 @@ Items 1–7 are the minimum-viable pre-launch set. Items 8–14 reduce tail-risk
 | B49 | COSMETIC | `schema_meta` table created but never used | `scripts/migrations/sql/0001_initial_schema.up.sql` |
 | B51 | LOW (FUTURE-PROOFING) | `dither` hardcoded TRUE in jobs INSERT — fires when /generate exposes a dither param | `scripts/checkout/jobs_store_pg.py`, `scripts/jobs_store_json.py` |
 | B52 | LOW | Race-induced `started_at == completed_at` on fast jobs (residual after B41) | `scripts/jobs_store_pg.py` |
+| B58 | MEDIUM | `unhandled_exception_handler` leaks exception class + message to clients (info disclosure in prod) | `scripts/Main.py` |
+| B59 | MEDIUM | `jobs.cleanup_expired` cannot delete jobs once a saga exists (FK ON DELETE RESTRICT) — `outputs/{job_id}/` grows unbounded | `scripts/jobs_store_pg.py`, schema |
+| B60 | MEDIUM | `actor.ip` audit field captures Render LB IP, not real customer IP — no `X-Forwarded-For` parsing middleware | `scripts/checkout/dependencies.py` |
+| B61 | LOW | CORS allowed origins hardcoded in `Main.py`; `FRONTEND_ORIGIN` env exists but is never read | `scripts/Main.py` |
+| B63 | LOW | Cache sweeper has no `stop_cache_sweeper()` — relies on event-loop close to cancel (asymmetric with reconcile task) | `scripts/checkout/cache.py`, `scripts/Main.py` |
+| B64 | LOW | `stripe_provider._is_already_captured` / `_is_already_terminal_state` match Stripe error messages by substring — fragile to wording changes | `scripts/checkout/payment/stripe_provider.py` |
+| B65 | LOW | `/confirm` 422 for unsourceable items lacks the `code:` discriminator the rest of the API uses (`{error, code, ...}` shape) | `scripts/checkout/router.py` |
 
-**None are launch-blocking today.** B28/B29/B35/B36 are gated on other roadmap work; B48/B49/B51/B52 are cosmetic / future-proofing.
+**B55, B56, B57 (HIGH severity) — code shipped 2026-05-19**; see §4.2 closed catalog. Migration 0002 applied to Neon `dev` 2026-05-20; pending on `main` (U6b). B58 should be resolved before any public frontend points at the deployed API. B28/B29/B35/B36 are gated on other roadmap work; B48/B49/B51/B52 are cosmetic / future-proofing.
 
 #### B11 — Cross-iteration `placed_brickowl_ids` checkpoint
 
@@ -302,6 +390,82 @@ Items 1–7 are the minimum-viable pre-launch set. Items 8–14 reduce tail-risk
 
 **Fix:** None planned. If duration histograms matter for ops, switch to NOW() ± some default minimum.
 
+#### B58 — `unhandled_exception_handler` leaks exception class + message
+
+**File:** `scripts/Main.py` — `unhandled_exception_handler`.
+
+**Symptom:**
+```python
+content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"}
+```
+Reveals internal Python class names, file paths in tracebacks, query fragments, Stripe IDs, etc. to anyone hitting the API on a 500.
+
+**Impact:** Info disclosure once the API is publicly reachable. Useful in dev; problematic in prod.
+
+**Fix:** Return a static `"Internal server error"` detail; preserve the full `log.error(..., exc_info=True)` server-side. Optionally include a short request-correlation ID (`secrets.token_hex(8)`) that the operator can grep for.
+
+#### B59 — Mosaic-job `cleanup_expired` blocked by sagas FK → unbounded disk
+
+**File:** `scripts/jobs_store_pg.py` — `cleanup_expired`; schema `sagas.job_id REFERENCES jobs(job_id) ON DELETE RESTRICT`.
+
+**Symptom:** Once any customer confirms a checkout, a `sagas` row exists pointing at the job. The FK is `ON DELETE RESTRICT`. Even after the saga reaches a terminal status (PAYMENT_CAPTURED, COMPENSATED, FAILED, MANUAL_REVIEW), the FK still blocks deletion of the `jobs` row. `cleanup_expired` catches the ForeignKeyViolationError per-row and skips, so the corresponding `outputs/{job_id}/` directory is never `rmtree`'d.
+
+A typical mosaic artifact zip is 1–10 MB. At production traffic (1 confirmed checkout = forever-retained directory), disk usage grows monotonically.
+
+**Impact:** Not visible pre-launch. Will surface as a Render disk-full or Neon-disk-exceeded alert weeks-to-months after monetized traffic starts.
+
+**Fix:** Add a second cleanup task targeting jobs whose latest saga is **terminal** AND `sagas.completed_at` is older than a retention window (90 days is a sensible default — past the typical chargeback dispute window). Delete in dependency order: `audit_events` rows (no FK; lenient delete by job_id), then `payment_holds`, then `sagas`, then `checkouts`, then `jobs`. *Important constraint:* `outputs/{job_id}/order_list.json` must remain readable while any saga is non-terminal — the FK currently provides this guarantee, and the new cleanup must preserve it (only delete after the saga is terminal + retention window).
+
+#### B60 — `actor.ip` audit field captures LB IP, not customer IP
+
+**File:** `scripts/checkout/dependencies.py` — `require_checkout_gate_open` (already documented as TODO inline; promoted here for tracking).
+
+**Symptom:** `request.client.host` returns the immediate hop's IP. Behind Render's load balancer, that's the LB IP for every customer. The §2.7 abuse-detection use case ("rate-limit per customer IP") can't function — every rejected `/confirm` looks like it came from the same IP.
+
+**Impact:** Audit log's actor.ip column carries zero signal in production. Not currently used by any alert, so impact is latent until L6 alerting is wired.
+
+**Fix:** Add a small FastAPI middleware that parses `X-Forwarded-For` (take the *first* IP, since Render is the only trusted proxy) and stuffs it onto `request.state.real_ip`. `require_checkout_gate_open` reads from there. Document the single-proxy trust assumption in the middleware so a future multi-proxy setup doesn't silently trust spoofed XFF headers.
+
+#### B61 — `FRONTEND_ORIGIN` env unused; CORS origins hardcoded
+
+**File:** `scripts/Main.py` — `app.add_middleware(CORSMiddleware, allow_origins=[...])`.
+
+**Symptom:** `.env` carries `FRONTEND_ORIGIN` but `Main.py` does not read it. Origins are hardcoded to `https://laigo-frontend.onrender.com` and `http://localhost:5173`. Already documented as antipattern in CLAUDE.md; tracked here for the fix.
+
+**Impact:** Frontend URL changes require a code edit + redeploy.
+
+**Fix:** Read `FRONTEND_ORIGIN` env (comma-separated to support multi-origin), fall back to the current hardcoded list when unset. One-line change.
+
+#### B63 — No `stop_cache_sweeper()` for graceful shutdown
+
+**File:** `scripts/checkout/cache.py`; `scripts/Main.py` lifespan shutdown.
+
+**Symptom:** `start_cache_sweeper` has no shutdown counterpart. The sweep task is cancelled when the event loop closes — works in practice (sweeper uses no DB pool, just an in-memory dict), but inconsistent with the reconcile task which has `stop_reconcile_task(timeout=5.0)` called explicitly before `close_pool()`.
+
+**Impact:** Minor. Any future addition that makes the sweeper touch external state would inherit a race.
+
+**Fix:** Add `async def stop_cache_sweeper(timeout=5.0)` modeled on `stop_reconcile_task`. Call it from lifespan shutdown right after `stop_reconcile_task` (cache sweeper has no pool dependency, so ordering relative to `close_pool` is flexible).
+
+#### B64 — Stripe error message substring matching is fragile
+
+**File:** `scripts/checkout/payment/stripe_provider.py` — `_is_already_captured`, `_is_already_terminal_state`.
+
+**Symptom:** Stripe could change the wording of `InvalidRequestError` messages ("has already been captured", "already been canceled", etc.) and our idempotent-retry detection silently breaks. The error code (`payment_intent_unexpected_state`) covers multiple states and isn't safe to match alone — hence the message-substring approach.
+
+**Impact:** Currently no incident. A Stripe message change would cause a "second-attempt cancel of a hold that's already cancelled" to surface as PaymentPermanentError instead of being treated as success.
+
+**Fix:** Add a unit test that constructs a fake `InvalidRequestError` with each current message string and asserts the detector returns True. A regression in detector logic OR a Stripe wording change shows up at CI rather than in production.
+
+#### B65 — `/confirm` 422 for unsourceable items lacks `code:` discriminator
+
+**File:** `scripts/checkout/router.py` — `confirm_checkout` unsourceable-items branch.
+
+**Symptom:** Returns `{detail: {error, unsourceable_items}}`. The rest of the API follows `{detail: {error, code, ...}}` so the frontend can match on `code`. This pre-existing 422 doesn't.
+
+**Impact:** Frontend matches on HTTP status today, so behaviorally fine. If a second 422 reason ever lands on this endpoint, the frontend can't distinguish them without parsing the `error` string.
+
+**Fix:** Add `"code": "UNSOURCEABLE_ITEMS"` to the detail dict. Coordinated change with the frontend if it currently matches on the error-string shape.
+
 ### 4.2 Closed defects (catalog)
 
 For full context on any shipped fix, see git history. One-line summary kept for "did we already address this?" queries:
@@ -346,6 +510,10 @@ For full context on any shipped fix, see git history. One-line summary kept for 
 | B50 | 2026-05-18 | `smoke_test_db.py` imports psycopg2 + checks alembic_version |
 | B53 | 2026-05-18 | `/generate` insert ordering + pre-dispatch shadow writes |
 | B54 | 2026-05-18 | `/generate` validates `mosaic_block_width / mosaic_type / background_color_percent` |
+| B55 | 2026-05-19 (code); 2026-05-20 (migration on Neon `dev`); main pending Phase F via U6b | Reconciler MANUAL_REVIEW handling via `sagas.hold_disposition` (HoldDisposition enum). Decision matrix updated in §9.3. New module-scope name `_CLEAN_TERMINAL_SAGA_STATUSES`. `test_reconcile_pg` cases 9a-9d. |
+| B56 | 2026-05-19 | `record_hold` failure rollback now uses `cancel_hold_with_retry`; persistent failures emit `payment.hold_orphan` audit event (vocabulary §2.2). `saga.failed` data extended with `rollback_succeeded` / `rollback_error`. |
+| B57 | 2026-05-19 | `saga_resume._recover_stripe_held` + `_handle_saga_timeout` branch 2 (saga.py) both use the shared `cancel_hold_with_retry` helper (new module `scripts/checkout/_cancel_helpers.py`). Naked `provider.cancel` removed from both sites. |
+| B62 | 2026-05-19 | `CLAUDE.md` `cache.py` block updated — removed stale "Open bug B24" callout; B24's strong-reference fix shipped 2026-05-16. |
 
 ---
 
@@ -452,9 +620,11 @@ Columns: `checkout_id` PK, `job_id` FK → jobs (CASCADE), `shipping_country` (C
 ### `sagas`
 One row per `POST /confirm`. Source of truth for saga state.
 
-Columns: `checkout_id` PK FK → checkouts (RESTRICT), `job_id` FK → jobs (RESTRICT), `saga_status` (8 values), `payment_provider`, `payment_mode`, `payment_hold_id`, `payment_authorized_cents`, `total_charged_cents`, `brickowl_order_ids` JSONB, `lego_order_id`, `error_message` (operator-internal), `customer_message` (customer-facing), `manual_review_reason`, `initiated_at`, `last_transition_at`, `completed_at`.
+Columns: `checkout_id` PK FK → checkouts (RESTRICT), `job_id` FK → jobs (RESTRICT), `saga_status` (8 values), `payment_provider`, `payment_mode`, `payment_hold_id`, `payment_authorized_cents`, `total_charged_cents`, `brickowl_order_ids` JSONB, `lego_order_id`, `error_message` (operator-internal), `customer_message` (customer-facing), `manual_review_reason`, **`hold_disposition`** (NULLABLE TEXT, CHECK `IN ('cancel_safe','operator_decides')` OR NULL — B55), `initiated_at`, `last_transition_at`, `completed_at`.
 
 **B23 enforcement:** `sagas_one_active_per_job_idx` is a partial unique index on `(job_id)` where saga_status is non-terminal. Router translates the resulting `UniqueViolationError` to HTTP 422 with `code="ACTIVE_CHECKOUT_EXISTS"`.
+
+**B55 — `hold_disposition`:** read by `reconcile_orphan_holds` only when `saga_status='manual_review'`. `cancel_safe` permits the reconciler to release the hold as a safety net; `operator_decides` / NULL keep the reconciler hands-off (preserves operator's capture option). Set by every MANUAL_REVIEW write site in `saga.py` + `saga_resume.py`. See `HoldDisposition` in `scripts/checkout/models.py`.
 
 ### `payment_holds`
 Reconciliation index. Every Stripe hold ever created. Source of truth via `scripts/checkout/payment_holds_store.py`.
@@ -508,6 +678,7 @@ Both have a default branch called `main`. Qualify every reference.
 | C — Checkout state to Postgres | 2026-05-18 | `checkout_store_pg.py` + `checkout_store_dispatch.py`. `ActiveCheckoutExistsError` raised on B23 violation → router 422 with `code="ACTIVE_CHECKOUT_EXISTS"`. saga.py + router.py + debug_router.py switched to dispatcher. |
 | D step 2 — Replace `app.state.jobs` with DB | 2026-05-19 | Trio `jobs_store_{pg,json,dispatch}.py` with 23/23 API parity. Main.py fully on the dispatcher (`queue.Queue` removed; `dequeue_next()` with `SELECT FOR UPDATE SKIP LOCKED`; progress mirroring; cleanup_expired). `jobs_db.py` deleted. Resolves B42 + B44. |
 | E.1 — Saga resume-on-startup | 2026-05-19 | `saga_resume.py` routes every non-terminal saga to a safe terminal state at boot. `audit.py` writes structured events. First call site `gate.confirm_rejected` wired. `payment_holds_store.py` wired at saga create_hold + capture/cancel. Closes audit FMEA #3 (RPN 450). |
+| 0002 — `sagas.hold_disposition` | 2026-05-19 (code); 2026-05-20 (Neon `dev` applied); Neon `main` pending Phase F (U6b) | Resolves B55. Nullable TEXT column with CHECK constraint `IN ('cancel_safe','operator_decides')` OR NULL. Set by every MANUAL_REVIEW write site (saga.py × 6, saga_resume.py × 3). Reconciler reads it via the `fetch_for_reconcile` LEFT JOIN to choose between safety-net cancel and hands-off. |
 
 For commit-level detail, see git log filtered by phase tag.
 
@@ -521,22 +692,24 @@ For commit-level detail, see git log filtered by phase tag.
 
 Backend-gated: no-op when `DB_BACKEND != postgres`. Caller-gated: no-op when no `PaymentProvider` is registered (gate closed).
 
-Decision matrix (Stripe status × persisted saga_status):
+Decision matrix (Stripe status × persisted saga_status × `sagas.hold_disposition`):
 
-| Stripe says | Saga says | Action |
-|---|---|---|
-| `succeeded` | anything | Mirror payment_holds.last_known_status='succeeded'; preserve saga |
-| `canceled` | terminal | Mirror payment_holds; preserve saga |
-| `canceled` | non-terminal (stripe_held/orders_placed/fallback_ordered) | Mirror + escalate saga to MANUAL_REVIEW with verbose reason |
-| `requires_capture` | NULL / terminal / `initiated` | Orphan — call provider.cancel; mirror on success |
-| `requires_capture` | `stripe_held` AND stale >1h | Stuck — mark saga MANUAL_REVIEW; do NOT touch Stripe |
-| `requires_capture` | `orders_placed`/`fallback_ordered` AND stale >1h | Same as stuck stripe_held |
-| `requires_capture` | non-terminal AND recent <1h | Skip — saga healthy; bump reconciled_at (1h cooldown) |
-| `unknown` (unmapped Stripe status) | anything | Mark payment_holds='unknown'; stop re-querying |
-| `PaymentRetryableError` from provider | anything | Skip — do NOT bump reconciled_at; retry next tick |
-| `PaymentPermanentError` from provider | anything | Mark payment_holds='unknown'; stop re-querying |
+| Stripe says | Saga says | Disposition | Action |
+|---|---|---|---|
+| `succeeded` | anything | — | Mirror payment_holds.last_known_status='succeeded'; preserve saga |
+| `canceled` | clean terminal (payment_captured / compensated / failed) OR MANUAL_REVIEW | — | Mirror payment_holds; preserve saga |
+| `canceled` | non-terminal (stripe_held/orders_placed/fallback_ordered) | — | Mirror + escalate saga to MANUAL_REVIEW with verbose reason |
+| `requires_capture` | NULL / clean terminal / `initiated` | — | Orphan — call provider.cancel; mirror on success |
+| `requires_capture` | MANUAL_REVIEW | `cancel_safe` | Safety net — call provider.cancel (B55) |
+| `requires_capture` | MANUAL_REVIEW | `operator_decides` OR NULL | **Skip** — bump reconciled_at, do NOT touch Stripe (B55 — preserves operator's capture option) |
+| `requires_capture` | `stripe_held` AND stale >1h | — | Stuck — mark saga MANUAL_REVIEW (no disposition set); do NOT touch Stripe |
+| `requires_capture` | `orders_placed`/`fallback_ordered` AND stale >1h | — | Same as stuck stripe_held |
+| `requires_capture` | non-terminal AND recent <1h | — | Skip — saga healthy; bump reconciled_at (1h cooldown) |
+| `unknown` (unmapped Stripe status) | anything | — | Mark payment_holds='unknown'; stop re-querying |
+| `PaymentRetryableError` from provider | anything | — | Skip — do NOT bump reconciled_at; retry next tick |
+| `PaymentPermanentError` from provider | anything | — | Mark payment_holds='unknown'; stop re-querying |
 
-The matrix is exercised by `scripts/test_reconcile_pg.py` (11 assertions, all branches covered with a fake provider).
+The matrix is exercised by `scripts/test_reconcile_pg.py` (15 assertions, all branches including B55's 4 disposition cases).
 
 **Step 4 — End-to-end recovery test** — closed-by-integration 2026-05-19
 
@@ -583,9 +756,11 @@ The boot path itself was verified during Action A: `[resume] examined 0 in-fligh
 
 **Prerequisites:**
 - ✅ Phases B+C+D+E complete on git `main`.
-- ❌ U3 — Render pre-deploy hook configured for `alembic upgrade head`.
-- ❌ U4 — `DATABASE_URL` + `DATABASE_URL_DIRECT` env vars added to Render.
+- ✅ B55-B57 code shipped 2026-05-19 (HIGH-severity audit fixes; live-Stripe gating).
+- ✅ U3 — Render pre-deploy hook configured for `alembic upgrade head` (done 2026-05-19).
+- ✅ U4 — `DATABASE_URL` + `DATABASE_URL_DIRECT` env vars added to Render (done 2026-05-19).
 - ❌ U5 — Neon project upgraded Free → Launch ($19/mo) in the same window. Free-tier autosuspend would cold-start the first `/status` poll.
+- ✅ U6a — Migration 0002 applied to Neon `dev` (2026-05-20). ❌ U6b — Apply to Neon `main` during the cutover window; Render's pre-deploy hook (U3) handles this automatically on the first deploy after Phase F env vars are in place. Verify in Render deploy logs (`Running upgrade 0001 -> 0002`).
 - 🛑 Schedule cutover during low-traffic hours. Pre-launch this is moot; make it habit.
 
 **Step 1 — Deploy with `DB_BACKEND=json` first** (≈15 min)
@@ -662,10 +837,12 @@ If any flare: roll back to `DB_BACKEND=json`, file the issue, fix offline, re-at
 | # | Action | Phase | Blocker level |
 |---|---|---|---|
 | U1 | Resolve corporate-proxy SSL cert root cause (so `pip install` works without `--trusted-host`) | Eventually | LOW |
-| U3 | Configure Render pre-deploy hook for `alembic upgrade head` | F | MEDIUM |
-| U4 | Add `DATABASE_URL` + `DATABASE_URL_DIRECT` env vars to Render | F | MEDIUM |
-| U5 | Upgrade Neon project Free → Launch ($19/mo) | F (same window as flag flip) | HIGH at cutover |
-| U6 | Commit packaging strategy for all Phase A-E work (no commits made yet) | Whenever | LOW |
+| ~~U3~~ | ~~Configure Render pre-deploy hook for `alembic upgrade head`~~ | F | ✅ Done 2026-05-19 |
+| ~~U4~~ | ~~Add `DATABASE_URL` + `DATABASE_URL_DIRECT` env vars to Render~~ | F | ✅ Done 2026-05-19 |
+| U5 | Upgrade Neon project Free → Launch ($19/mo) | F (same window as `DB_BACKEND=postgres` flag flip on Render) | HIGH at cutover |
+| U6a | ~~Apply migration 0002 to Neon `dev`~~ via `alembic upgrade head` against the DIRECT DSN. | B55 | ✅ Done 2026-05-20 |
+| U6b | Apply migration 0002 to Neon `main` — Render's pre-deploy hook (U3) handles this automatically on the next deploy after Phase F env vars are in place. Verify in deploy logs. | B55 / Phase F | HIGH at cutover |
+| U7 | Commit packaging strategy for all Phase A-E + B55-B57 work | Whenever | LOW |
 
 ### 9.6 Risk register
 

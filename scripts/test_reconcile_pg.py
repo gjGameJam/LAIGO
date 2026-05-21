@@ -82,24 +82,32 @@ async def _make_saga(
     pool, checkout_id: str, job_id: str,
     *, saga_status: str, payment_hold_id: str | None,
     last_transition_offset: timedelta = timedelta(seconds=0),
+    hold_disposition: str | None = None,
 ) -> None:
-    """Insert sagas row with a controllable last_transition_at."""
+    """Insert sagas row with a controllable last_transition_at.
+
+    B55: `hold_disposition` defaults to NULL — matches saga rows written before
+    the disposition column was added, and exercises the reconciler's "NULL =
+    conservative" branch by default. Tests for cancel_safe / operator_decides
+    pass the value explicitly.
+    """
     last_transition = datetime.now(timezone.utc) - last_transition_offset
     await pool.execute(
         """
         INSERT INTO sagas (
             checkout_id, job_id, saga_status,
             payment_provider, payment_mode, payment_hold_id,
-            brickowl_order_ids,
+            brickowl_order_ids, hold_disposition,
             initiated_at, last_transition_at
         ) VALUES (
             $1, $2, $3,
             'stripe', 'test', $4,
-            '[]'::jsonb,
-            $5, $5
+            '[]'::jsonb, $5,
+            $6, $6
         )
         """,
-        checkout_id, job_id, saga_status, payment_hold_id, last_transition,
+        checkout_id, job_id, saga_status, payment_hold_id,
+        hold_disposition, last_transition,
     )
 
 
@@ -423,6 +431,133 @@ async def main() -> int:
         assert row["last_known_status"] == "unknown"
         del fake.exception_responses["reconcile-test-hold-9"]
         print("OK: Stripe permanent error -> marked 'unknown', stops re-querying")
+
+        # ─── B55: MANUAL_REVIEW disposition matrix ─────────────────────────
+        #
+        # Three sub-cases distinguished by sagas.hold_disposition:
+        #
+        #   9a. MANUAL_REVIEW + cancel_safe       -> auto-cancel (safety net)
+        #   9b. MANUAL_REVIEW + operator_decides  -> skip (do not touch Stripe)
+        #   9c. MANUAL_REVIEW + NULL              -> skip (conservative default)
+        #
+        # Pre-B55 (when MANUAL_REVIEW was lumped into the terminal-saga set),
+        # all three would have auto-cancelled, destroying the operator's
+        # capture option in 9b/9c. See PRE_RELEASE §4.1 B55.
+
+        # 9a — cancel_safe: runbook said "cancel manually"; reconciler is the
+        #      safety net. Same outcome as the pre-B55 default, now opt-in.
+        await _make_job(pool, "reconcile-test-job-9a")
+        await _make_checkout(pool, "reconcile-test-co-9a", "reconcile-test-job-9a")
+        await _make_saga(
+            pool, "reconcile-test-co-9a", "reconcile-test-job-9a",
+            saga_status="manual_review", payment_hold_id="reconcile-test-hold-9a",
+            hold_disposition="cancel_safe",
+        )
+        await _make_hold(pool, "reconcile-test-hold-9a", "reconcile-test-co-9a")
+        fake.status_responses["reconcile-test-hold-9a"] = "requires_capture"
+        fake.cancel_calls = []
+        fake.cancel_should_fail = False
+
+        hist = await reconcile.reconcile_orphan_holds()
+        assert hist["canceled_orphan"] == 1, f"hist={hist}"
+        assert "reconcile-test-hold-9a" in fake.cancel_calls, (
+            "cancel_safe MANUAL_REVIEW must be auto-cancelled by reconciler"
+        )
+        row = await pool.fetchrow(
+            "SELECT last_known_status FROM payment_holds WHERE hold_id = $1",
+            "reconcile-test-hold-9a",
+        )
+        assert row["last_known_status"] == "canceled"
+        # Audit event must carry the new reason code so dashboards distinguish
+        # cancel-safe MANUAL_REVIEW from generic terminal-orphan cancels.
+        n = await pool.fetchval(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event = 'payment.cancelled' "
+            "AND checkout_id = 'reconcile-test-co-9a' "
+            "AND data->>'reason' = 'reconcile.manual_review_cancel_safe'"
+        )
+        assert n == 1, f"expected 1 reconcile.manual_review_cancel_safe audit, got {n}"
+        print("OK: MANUAL_REVIEW + cancel_safe -> cancelled (reconciler safety net)")
+
+        # 9b — operator_decides: runbook offered capture-OR-refund. Reconciler
+        #      MUST NOT touch Stripe.
+        await _make_job(pool, "reconcile-test-job-9b")
+        await _make_checkout(pool, "reconcile-test-co-9b", "reconcile-test-job-9b")
+        await _make_saga(
+            pool, "reconcile-test-co-9b", "reconcile-test-job-9b",
+            saga_status="manual_review", payment_hold_id="reconcile-test-hold-9b",
+            hold_disposition="operator_decides",
+        )
+        await _make_hold(pool, "reconcile-test-hold-9b", "reconcile-test-co-9b")
+        fake.status_responses["reconcile-test-hold-9b"] = "requires_capture"
+        fake.cancel_calls = []
+
+        hist = await reconcile.reconcile_orphan_holds()
+        assert hist["manual_review_skipped"] == 1, f"hist={hist}"
+        assert "reconcile-test-hold-9b" not in fake.cancel_calls, (
+            "operator_decides MANUAL_REVIEW must NOT be cancelled by reconciler"
+        )
+        row = await pool.fetchrow(
+            "SELECT last_known_status, last_reconciled_at FROM payment_holds WHERE hold_id = $1",
+            "reconcile-test-hold-9b",
+        )
+        # Status MUST stay at requires_capture (hold still authorized at Stripe)
+        # AND last_reconciled_at MUST be bumped (cooldown so we don't re-pick
+        # this row every tick while operator is working it).
+        assert row["last_known_status"] == "requires_capture"
+        assert (datetime.now(timezone.utc) - row["last_reconciled_at"]) < timedelta(minutes=1), (
+            "operator_decides branch must bump last_reconciled_at"
+        )
+        # Saga state must be preserved — reconciler did not escalate
+        saga_row = await pool.fetchrow(
+            "SELECT saga_status, hold_disposition FROM sagas WHERE checkout_id = $1",
+            "reconcile-test-co-9b",
+        )
+        assert saga_row["saga_status"] == "manual_review"
+        assert saga_row["hold_disposition"] == "operator_decides"
+        print("OK: MANUAL_REVIEW + operator_decides -> SKIPPED (capture option preserved)")
+
+        # 9c — NULL disposition: conservative default. Same outcome as
+        #      operator_decides (skip + bump reconciled_at).
+        await _make_job(pool, "reconcile-test-job-9c")
+        await _make_checkout(pool, "reconcile-test-co-9c", "reconcile-test-job-9c")
+        await _make_saga(
+            pool, "reconcile-test-co-9c", "reconcile-test-job-9c",
+            saga_status="manual_review", payment_hold_id="reconcile-test-hold-9c",
+            hold_disposition=None,  # explicit NULL (matches pre-B55 rows)
+        )
+        await _make_hold(pool, "reconcile-test-hold-9c", "reconcile-test-co-9c")
+        fake.status_responses["reconcile-test-hold-9c"] = "requires_capture"
+        fake.cancel_calls = []
+
+        hist = await reconcile.reconcile_orphan_holds()
+        assert hist["manual_review_skipped"] == 1, f"hist={hist}"
+        assert "reconcile-test-hold-9c" not in fake.cancel_calls, (
+            "NULL disposition MUST be treated conservatively (no cancel)"
+        )
+        row = await pool.fetchrow(
+            "SELECT last_known_status FROM payment_holds WHERE hold_id = $1",
+            "reconcile-test-hold-9c",
+        )
+        assert row["last_known_status"] == "requires_capture"
+        print("OK: MANUAL_REVIEW + NULL disposition -> SKIPPED (conservative default)")
+
+        # 9d — Regression guard: payment_captured terminal still auto-cancels
+        #      a stranded hold (B55 must not have changed this behavior).
+        await _make_job(pool, "reconcile-test-job-9d")
+        await _make_checkout(pool, "reconcile-test-co-9d", "reconcile-test-job-9d")
+        await _make_saga(
+            pool, "reconcile-test-co-9d", "reconcile-test-job-9d",
+            saga_status="payment_captured", payment_hold_id="reconcile-test-hold-9d",
+        )
+        await _make_hold(pool, "reconcile-test-hold-9d", "reconcile-test-co-9d")
+        fake.status_responses["reconcile-test-hold-9d"] = "requires_capture"
+        fake.cancel_calls = []
+
+        hist = await reconcile.reconcile_orphan_holds()
+        assert hist["canceled_orphan"] == 1, f"hist={hist}"
+        assert "reconcile-test-hold-9d" in fake.cancel_calls
+        print("OK: payment_captured terminal + requires_capture -> cancelled (regression guard)")
 
         # ─── 10. Empty payment_holds table -> no-op tick ───────────────────
         await _ensure_clean(pool)

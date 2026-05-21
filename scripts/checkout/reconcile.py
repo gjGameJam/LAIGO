@@ -19,17 +19,20 @@ alone cannot:
 
 Decision matrix (Stripe status × persisted saga_status):
 
-| Stripe says        | Saga says              | Action                                              |
-|--------------------|------------------------|-----------------------------------------------------|
-| `succeeded`        | anything               | Mirror to payment_holds; don't touch saga          |
-| `canceled`         | terminal               | Mirror to payment_holds                            |
-| `canceled`         | non-terminal           | Mirror + escalate saga to MANUAL_REVIEW            |
-| `requires_capture` | NULL / terminal        | Orphan — cancel hold; mirror on success             |
-| `requires_capture` | stripe_held, stale >1h | Stuck — MANUAL_REVIEW the saga; leave Stripe alone |
-| `requires_capture` | orders_placed stale    | Same as stuck stripe_held                          |
-| `requires_capture` | in-flight (<1h)        | Skip — saga is healthy; bump reconciled_at         |
-| `requires_capture` | initiated              | Orphan — cancel hold (saga never advanced)         |
-| `unknown`          | anything               | Mark payment_holds=unknown; stop re-querying        |
+| Stripe says        | Saga says                       | Action                                              |
+|--------------------|---------------------------------|-----------------------------------------------------|
+| `succeeded`        | anything                        | Mirror to payment_holds; don't touch saga          |
+| `canceled`         | terminal                        | Mirror to payment_holds                            |
+| `canceled`         | non-terminal                    | Mirror + escalate saga to MANUAL_REVIEW            |
+| `requires_capture` | NULL / clean terminal           | Orphan — cancel hold; mirror on success             |
+| `requires_capture` | MANUAL_REVIEW + cancel_safe     | Cancel hold (B55 — operator was asked to do this manually; reconciler is the safety net) |
+| `requires_capture` | MANUAL_REVIEW + operator_decides | **Skip** (B55 — runbook offered capture-or-refund; do not destroy operator's capture option) |
+| `requires_capture` | MANUAL_REVIEW + NULL disposition | Skip (B55 — conservative default: don't touch)     |
+| `requires_capture` | stripe_held, stale >1h          | Stuck — MANUAL_REVIEW the saga; leave Stripe alone |
+| `requires_capture` | orders_placed stale             | Same as stuck stripe_held                          |
+| `requires_capture` | in-flight (<1h)                 | Skip — saga is healthy; bump reconciled_at         |
+| `requires_capture` | initiated                       | Orphan — cancel hold (saga never advanced)         |
+| `unknown`          | anything                        | Mark payment_holds=unknown; stop re-querying        |
 
 Every row decision emits a corresponding `audit.emit(...)` event for the
 operator audit trail.
@@ -51,7 +54,7 @@ from typing import Optional
 from . import audit
 from . import checkout_store_dispatch as checkout_store
 from . import payment_holds_store
-from .models import ERROR_MESSAGES, SagaStatus
+from .models import ERROR_MESSAGES, HoldDisposition, SagaStatus
 from .payment import registry as payment_registry
 from .payment.base import (
     PaymentPermanentError,
@@ -70,14 +73,22 @@ logger = logging.getLogger("laigo.reconcile")
 _reconcile_task: Optional[asyncio.Task] = None
 
 
-# Saga statuses we treat as "terminal" for reconciliation purposes — Stripe
-# can do whatever it wants to the hold and we don't need to escalate the
-# saga (it's already past the point of action).
-_TERMINAL_SAGA_STATUSES = frozenset({
+# Saga statuses we treat as "clean terminal" for reconciliation purposes —
+# the saga reached a known-good conclusion AND we never need to consult the
+# operator about hold disposition. Stripe still holding funds for one of
+# these is a true orphan that should be auto-cancelled.
+#
+# NOTE (B55): MANUAL_REVIEW is intentionally NOT in this set. It's a
+# *terminal-but-pending-operator* state — the saga finished writing but the
+# operator hasn't decided what to do with the hold yet. Auto-cancelling
+# would destroy the operator's "capture this hold" option for the
+# MANUAL_REVIEW sites whose runbook offers capture-or-refund. The dedicated
+# branch in `_reconcile_one` reads `hold_disposition` to choose between
+# cancel-as-safety-net and hands-off.
+_CLEAN_TERMINAL_SAGA_STATUSES = frozenset({
     SagaStatus.PAYMENT_CAPTURED.value,
     SagaStatus.COMPENSATED.value,
     SagaStatus.FAILED.value,
-    SagaStatus.MANUAL_REVIEW.value,
 })
 
 # Saga statuses where Stripe still holding funds means the saga is in flight.
@@ -141,6 +152,9 @@ async def reconcile_orphan_holds(
         "canceled_orphan": 0,
         "stuck_saga_marked_review": 0,
         "in_flight_skipped": 0,
+        # B55 — counts `requires_capture` + saga MANUAL_REVIEW rows we
+        # deliberately did NOT touch (operator_decides disposition OR NULL).
+        "manual_review_skipped": 0,
         "stripe_unknown_marked": 0,
         "stripe_retryable_skipped": 0,
         "stripe_permanent_errored": 0,
@@ -183,6 +197,10 @@ async def _reconcile_one(row: dict, provider: PaymentProvider) -> str:
     job_id: Optional[str] = row.get("job_id")
     saga_status: Optional[str] = row.get("saga_status")
     last_transition_at: Optional[datetime] = row.get("last_transition_at")
+    # B55 — only meaningful when saga_status == MANUAL_REVIEW. NULL for
+    # other states (or any pre-B55 row); the MANUAL_REVIEW branch below
+    # treats NULL the same as OPERATOR_DECIDES (conservative).
+    hold_disposition: Optional[str] = row.get("hold_disposition")
 
     # ─── 1. Ask Stripe what it thinks ───────────────────────────────────────
     try:
@@ -313,10 +331,10 @@ async def _reconcile_one(row: dict, provider: PaymentProvider) -> str:
         f"unreachable: get_hold_status returned {stripe_status!r}"
     )
 
-    # 3a. No saga row, OR saga is terminal — pure orphan. Stripe is holding
-    # funds for a customer whose order is either non-existent or completed/
-    # failed. Cancel the hold.
-    if saga_status is None or saga_status in _TERMINAL_SAGA_STATUSES:
+    # 3a. No saga row, OR saga is in a clean terminal state — pure orphan.
+    # Stripe is holding funds for a customer whose order is either
+    # non-existent or completed/failed/compensated. Cancel the hold.
+    if saga_status is None or saga_status in _CLEAN_TERMINAL_SAGA_STATUSES:
         return await _cancel_orphan_hold(
             hold_id=hold_id,
             checkout_id=checkout_id,
@@ -328,6 +346,32 @@ async def _reconcile_one(row: dict, provider: PaymentProvider) -> str:
                 else "reconcile.orphan_terminal_saga"
             ),
         )
+
+    # 3a'. MANUAL_REVIEW — operator-pending terminal. The hold's disposition
+    # decides whether the reconciler may cancel as a safety net (cancel_safe:
+    # runbook said "cancel manually") or must stay hands-off (operator_decides
+    # / NULL: runbook offered capture-or-refund, OR pre-B55 row of unknown
+    # intent). See B55 in PRE_RELEASE_PAYMENT_CHECKLIST.md §4.1.
+    if saga_status == SagaStatus.MANUAL_REVIEW.value:
+        if hold_disposition == HoldDisposition.CANCEL_SAFE.value:
+            return await _cancel_orphan_hold(
+                hold_id=hold_id,
+                checkout_id=checkout_id,
+                job_id=job_id,
+                saga_status=saga_status,
+                provider=provider,
+                reason_code="reconcile.manual_review_cancel_safe",
+            )
+        # OPERATOR_DECIDES, NULL, or any unknown value: leave Stripe alone.
+        # Bump last_reconciled_at to space alerts (1-hour cooldown) so we don't
+        # re-pick this row every tick while the operator is still working it.
+        await payment_holds_store.mark_status(hold_id, "requires_capture")
+        logger.info(
+            "[reconcile] %s: saga %s at MANUAL_REVIEW with disposition=%r — "
+            "skipping (operator decides hold fate)",
+            hold_id, checkout_id, hold_disposition,
+        )
+        return "manual_review_skipped"
 
     # 3b. Saga is "initiated" — saga never wrote the hold_id but a
     # payment_holds row exists with this hold_id. This means create_hold
@@ -412,10 +456,10 @@ async def _reconcile_one(row: dict, provider: PaymentProvider) -> str:
         )
         return "in_flight_skipped"
 
-    # 3d. Unreachable — `_IN_FLIGHT_WITH_HOLD`, `_TERMINAL_SAGA_STATUSES`,
-    # INITIATED, and None together cover every value in the schema CHECK
-    # constraint. If a new SagaStatus is added without updating this
-    # function, we hit this branch. Defensive log + bump reconciled_at.
+    # 3d. Unreachable — `_IN_FLIGHT_WITH_HOLD`, `_CLEAN_TERMINAL_SAGA_STATUSES`,
+    # MANUAL_REVIEW, INITIATED, and None together cover every value in the
+    # schema CHECK constraint. If a new SagaStatus is added without updating
+    # this function, we hit this branch. Defensive log + bump reconciled_at.
     logger.error(
         "[reconcile] %s: unknown saga_status %r — defensive skip. "
         "Update _reconcile_one's branches in scripts/checkout/reconcile.py.",

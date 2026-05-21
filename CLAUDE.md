@@ -9,6 +9,10 @@ LAIGO converts photos into LEGO mosaic building kits. Given an image, it:
 2. Produces a LEGO brick purchase order list (JSON, uploadable to lego.com Pick-a-Brick)
 3. Generates step-by-step building instructions as a multi-page PDF
 
+## 🛑 Active focus — 3D preview API + frontend (Stripe/DB paused)
+
+Stripe / DB migration work is **paused 2026-05-20** with B55-B57 audit fixes shipped and migration 0002 applied to Neon `dev`. Phase F (DB_BACKEND=postgres cutover) is pending. Read `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §0 PAUSED` for the resume sequence + freeze-zone constraints before touching anything under `scripts/checkout/**`, `scripts/migrations/**`, `scripts/db.py`, `scripts/jobs_store_*.py`, or `scripts/Main.py` lifespan. 2D editor work is also deferred until Stripe/DB resumes.
+
 ## Running locally
 
 Activate the virtual environment from the project root:
@@ -316,7 +320,7 @@ GET /checkout/gate
 
 - Imports: `.models` (AllocationResult, SagaStatus, StockoutError), `.checkout_store`, `.clients.{lego,brickowl}_client`, `.cache` (cache_delete), `.gate` (require_open, GateClosedError), `.payment.registry`, `.payment.base` (PaymentHold + error types). Deferred imports inside the loop: `.optimizer.{optimize, merge_listings, apply_free_shipping_thresholds}`, `.clients.bricklink_client`.
 - Public: `execute_checkout_saga(job_id, checkout_id, allocation, payment_method_id, max_stockout_retries=2)` — the **only** legitimate entry point. Wraps `_execute_checkout_saga_inner` in a single `asyncio.wait_for(..., timeout=_SAGA_TIMEOUT_SECONDS)`.
-- Internal: `_execute_checkout_saga_inner`, `_handle_saga_timeout`, `_compensate`, `_compose_compensation_reason`, `_capture_with_retry`, `_cancel_hold_with_retry`, `_CompensationOutcome` dataclass.
+- Internal: `_execute_checkout_saga_inner`, `_handle_saga_timeout`, `_compensate`, `_compose_compensation_reason`, `_capture_with_retry`, `_CompensationOutcome` dataclass. Hold cancellation goes through `cancel_hold_with_retry` imported from `_cancel_helpers.py` (B56/B57 — also used by `saga_resume.py` and `_handle_saga_timeout` branch 2).
 - Module constants: `_HOLD_BUFFER_MULTIPLIER = 1.05`, `_CAPTURE_BACKOFFS_SECONDS = (1, 4, 16)`, `_SAGA_TIMEOUT_SECONDS = int(env "SAGA_TIMEOUT_SECONDS", "900")`, `_TERMINAL_STATUSES` frozenset, `_LEGO_SELLER_ID`.
 - Reads env at runtime: `STRIPE_CURRENCY` (default `usd`).
 
@@ -356,7 +360,14 @@ GET /checkout/gate
 - Public: `async def emit(event, *, subject=None, actor=None, data=None, request_id=None) -> None`.
 - **NEVER raises** — failures log `[audit] FAILED` at CRITICAL. Audit must not break checkout.
 - `data` dict passed directly — the asyncpg JSONB codec encodes. Do NOT `json.dumps(data)` at call site (double-encode → quoted string in DB).
-- Schema: `audit_events` table (per PRE_RELEASE §8). First call site wired: `dependencies.py::require_checkout_gate_open` emits `gate.confirm_rejected`. Migration of other call sites tracked in PRE_RELEASE §2.6.
+- Schema: `audit_events` table (per PRE_RELEASE §8). First call site wired: `dependencies.py::require_checkout_gate_open` emits `gate.confirm_rejected`. Event vocabulary locked in PRE_RELEASE §2.2 — `payment.hold_orphan` is the **P0-alerting** event for B56's unrecoverable-rollback case.
+
+#### `checkout/_cancel_helpers.py` (B56/B57) — shared hold-cancel retry helper
+
+- Public: `async def cancel_hold_with_retry(*, provider, checkout_id, hold_id, audit_reason="compensation", audit_subject=None) -> tuple[bool, str | None]`.
+- 1s/4s/16s retry budget on `PaymentRetryableError`. Immediate fail on `PaymentPermanentError` or unexpected exceptions. Returns `(True, None)` on success, `(False, error_message)` after retries.
+- On success: emits `payment.cancelled` audit (with caller-supplied `audit_reason`) AND mirrors `payment_holds_store.mark_status(hold_id, "canceled")` (best-effort). Caller decides what to do on failure (MANUAL_REVIEW write, orphan audit emit, etc.).
+- Used by: `saga._compensate` Phase 3, `saga` record_hold-rollback (B56), `saga._handle_saga_timeout` branch 2 (B57), `saga_resume._recover_stripe_held` (B57). DO NOT call `provider.cancel` directly anywhere else — the helper is the canonical path.
 
 #### `checkout/reconcile.py` — orphan-hold reconciler (Phase E step 2)
 
@@ -364,13 +375,14 @@ GET /checkout/gate
 - Periodic task runs every `RECONCILE_INTERVAL_SECONDS` (env, default 300s, floor 60s); held by module-level `_reconcile_task: Optional[asyncio.Task]` strong reference (C1/B24 pattern).
 - For each `payment_holds` row with `last_known_status='requires_capture'` AND `last_reconciled_at < NOW - older_than_seconds`: asks Stripe (`provider.get_hold_status`), then applies the decision matrix in PRE_RELEASE §9.3 (mirror succeeded/canceled; cancel orphans; MANUAL_REVIEW stuck sagas; skip in-flight; mark unknown on Stripe errors).
 - **Stuck-saga branch DOES NOT touch Stripe** — operator may be working it manually. Bumps `last_reconciled_at` to space alerts.
+- **B55 — MANUAL_REVIEW + `sagas.hold_disposition`:** when Stripe says `requires_capture` and saga is MANUAL_REVIEW, the reconciler reads `hold_disposition`. `cancel_safe` → auto-cancel (safety net for "cancel manually" runbooks). `operator_decides` OR NULL → skip + bump reconciled_at (preserves operator's capture option for "capture-or-refund" runbooks). See `HoldDisposition` in `models.py`.
 - No-op when `DB_BACKEND != postgres` OR no provider registered (gate closed). Loop NEVER raises; per-row safety net + histogram.
 
 #### `checkout/cache.py` (54 LOC) — in-process TTL cache
 
 - Imports: stdlib only.
 - Public: `async cache_get(key)`, `async cache_set(key, value, ttl_seconds)`, `async cache_delete(key)`, `start_cache_sweeper()`.
-- Sweeper runs every 300s. Started from `Main.py` lifespan. **Open bug B24**: the sweep task is created with `asyncio.create_task(_sweep_loop())` without a strong reference, leaving it GC-vulnerable like the pre-C1 Saga tasks.
+- Sweeper runs every 300s. Started from `Main.py` lifespan. Held by module-level `_sweeper_task: Optional[asyncio.Task]` strong reference (C1/B24 pattern) so Python 3.11+ asyncio doesn't GC it. No `stop_cache_sweeper()` today — cancelled when the event loop closes (B63, latent).
 - Key conventions: `lego_raw:{eid}`, `boid:{eid}`, `brickowl_listings:{eid}`, `quote:{checkout_id}`.
 
 #### `checkout/optimizer.py` (249 LOC) — pure two-pass greedy allocator

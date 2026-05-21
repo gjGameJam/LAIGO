@@ -169,7 +169,7 @@ async def close_pool() -> None:
 # equal the latest revision identifier under scripts/migrations/versions/.
 # Refusing boot on a mismatch catches the classic deploy-order mistake:
 # new app code shipped against an old DB schema (or vice versa).
-_EXPECTED_SCHEMA_VERSION = "0001"
+_EXPECTED_SCHEMA_VERSION = "0002"
 
 
 async def verify_schema() -> None:

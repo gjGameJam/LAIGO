@@ -106,6 +106,34 @@ class SagaStatus(str, Enum):
     MANUAL_REVIEW     = "manual_review"
 
 
+class HoldDisposition(str, Enum):
+    """B55 — describes how the orphan-hold reconciler should treat a Stripe
+    hold whose saga has reached MANUAL_REVIEW.
+
+    Set by every saga write site that transitions to MANUAL_REVIEW with a
+    still-authorized hold. Read by `reconcile_orphan_holds` to branch between
+    auto-cancel and hands-off.
+
+    CANCEL_SAFE: the saga's MANUAL_REVIEW runbook tells the operator to cancel
+        manually in the Stripe dashboard (because automated cancel already
+        failed, or because no further capture is possible). The reconciler
+        may safely auto-cancel as a safety net within its normal cadence.
+
+    OPERATOR_DECIDES: the saga's MANUAL_REVIEW runbook offers the operator a
+        choice between capture and cancel (capture-exhausted-retries with
+        orders placed, post-placement drift, stockout-retry cancel failed
+        with some BrickOwl orders potentially live). The reconciler MUST NOT
+        touch Stripe; auto-cancellation would defeat the operator's capture
+        option.
+
+    NULL (no value): MANUAL_REVIEW was reached without a known hold, OR the
+        write site is from pre-B55 code. Reconciler treats NULL conservatively
+        — same as OPERATOR_DECIDES (don't touch Stripe).
+    """
+    CANCEL_SAFE       = "cancel_safe"
+    OPERATOR_DECIDES  = "operator_decides"
+
+
 # ── Customer-facing error translation (B12 / H1) ─────────────────────────────
 # Every saga write that sets `error: ...` MUST also set `customer_message: ...`
 # using a key from this table. `error` is operator-internal (raw exception
