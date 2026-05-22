@@ -102,7 +102,8 @@
       "Bash(.venv\\\\Scripts\\\\python.exe *)",
       "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m scripts.test_preview)",
       "Bash(Select-String -Pattern \"preview\" -SimpleMatch)",
-      "Bash(Select-Object -First 5)"
+      "Bash(Select-Object -First 5)",
+      "PowerShell($env:ALEMBIC_DATABASE_URL)"
     ]
   },
   "enabledPlugins": {}
