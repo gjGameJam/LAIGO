@@ -107,9 +107,12 @@ async def init_pool() -> None:
         # a password coincidentally containing 'pooler' or 'neon' would otherwise
         # mis-trigger this guard.
         host = (urlsplit(dsn).hostname or "").lower()
-        # TEMP DIAGNOSTIC — remove once Phase F cutover is confirmed.
+        # Boot-visible "which DB are we actually on" signal. Cheap; one log
+        # line per process. Caught the Phase F cutover ep-mismatch on
+        # 2026-05-22 where DATABASE_URL and DATABASE_URL_DIRECT pointed at
+        # different Neon endpoints. See docs/DATABASE_OPS.md "Debug playbook".
         import logging as _logging
-        _logging.getLogger("laigo.db").info(f"[diag] DATABASE_URL host={host!r}")
+        _logging.getLogger("laigo.db").info(f"DATABASE_URL host={host!r}")
         if "neon.tech" in host and "-pooler" not in host:
             raise RuntimeError(
                 "DATABASE_URL points at the Neon DIRECT endpoint, not the pooler. "

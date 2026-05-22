@@ -1,11 +1,20 @@
-"""One-off diagnostic — connects to the DSN in env var DIAG_DSN and reports
-which database/schema/user/alembic_version it actually reaches.
+"""Debug utility — connects to the DSN in env var DIAG_DSN and reports which
+database / schema / user / alembic_version it actually reaches.
+
+When to use:
+- "App is on Postgres but I'm not sure which Neon branch/project."
+- "alembic_version mismatch at boot — is my DATABASE_URL pointing where I think?"
+- "Render env vars look right but the app sees stale schema."
+- Sanity-check any DSN before pasting it into Render or .env.secrets.
 
 Run from project root:
-    $env:DIAG_DSN = "<paste the full DATABASE_URL from Render>"
+    $env:DIAG_DSN = "<paste full DSN — pooler or direct, either works>"
     .\.venv\Scripts\python.exe scripts\diagnose_db.py
 
-Delete this file once the cutover is confirmed.
+Output is four labelled lines. Caught the Phase F cutover endpoint mismatch
+on 2026-05-22 (DATABASE_URL and DATABASE_URL_DIRECT were pointed at two
+different Neon endpoints). See docs/DATABASE_OPS.md "Debug playbook" for the
+common patterns.
 """
 
 import asyncio

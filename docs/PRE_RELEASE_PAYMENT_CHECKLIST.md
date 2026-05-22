@@ -2,74 +2,28 @@
 
 **Audience:** LAIGO maintainers — single source of truth for "what must be true before the first real $1 moves."
 
-**Posture today:** Stripe wired + enabled in TEST mode (`STRIPE_ENABLED = True` in `stripe_provider.py`, `sk_test_...` in `.env.secrets`, `CHECKOUT_ENABLED=true` in `.env`, `DB_BACKEND=postgres`). BrickOwl catalog API not granted. LEGO.com Playwright never run in live. No live customer money has moved.
+**Posture today:** Stripe wired + enabled in TEST mode (`STRIPE_ENABLED = True` in `stripe_provider.py`, `sk_test_...` in `.env.secrets`, `CHECKOUT_ENABLED=true` in `.env`, `DB_BACKEND=postgres` **on Render against Neon `main` at schema `0002` since 2026-05-22**). BrickOwl catalog API not granted. LEGO.com Playwright never run in live. No live customer money has moved.
 
 ---
 
-## 🛑 PAUSED 2026-05-20 — Stripe/DB work on hold; 3D preview API + frontend is active focus
+## §0 — Phase F shipped 2026-05-22; observation window open
 
-**Why:** Pivoting to 3D preview work. 2D editor deferred until after Stripe/DB resumes.
-
-> **One operator action required to finalize the pause cleanly** — apply migration 0002 to Neon `dev` so uvicorn boots without the schema-mismatch error. From any local shell with the Neon dev DIRECT DSN:
-> ```powershell
-> $env:ALEMBIC_DATABASE_URL = "<Neon dev DIRECT DSN — no '-pooler' in host>"
-> alembic upgrade head
-> # then: SELECT version_num FROM alembic_version;  -- expect '0002'
-> ```
-> Until this is run, every `uvicorn scripts.Main:app` will refuse to boot with `verify_schema()` mismatch. The migration is a single nullable column add + CHECK constraint — semantically inert until a saga writes MANUAL_REVIEW.
-
-**State at pause (the work to come back to):**
+**State now:**
+- 3D preview API + frontend done and shipped.
+- 3D preview pause from 2026-05-20 is **ended.**
+- `DB_BACKEND=postgres` on Render against Neon `main`. Schema `0002` applied via the pre-deploy hook (U3). App lifespan logs `DATABASE_URL host='ep-...'` at every boot — that's the canonical "which DB are we on" signal.
 - B55, B56, B57 — HIGH-severity audit fixes — **code shipped 2026-05-19** (see §4.2).
-- Migration 0002 (`sagas.hold_disposition`) — **assumed-applied to Neon `dev` 2026-05-20** (run the command above if you haven't). Pending on Neon `main` until Phase F cutover window.
-- Phase F prerequisites: U3 ✅ U4 ✅ U5 ❌ (Neon Launch upgrade) U6 ✅ on dev, ❌ on main.
-- All HIGH-severity work compiles; no in-flight work; task ledger is closed.
-- Tests at pause time: `test_optimizer`, `test_gate_bypass`, `test_saga_state_machine`, `test_jobs_store_json` all green (no-DB). `test_reconcile_pg`, `test_phase_e_pg`, `test_jobs_store_dispatch` green against Neon dev with migration 0002 applied.
+- Migration 0002 (`sagas.hold_disposition`) — applied to Neon `dev` 2026-05-20, Neon `main` 2026-05-22.
 
-### To resume the Stripe/DB work — exact sequence
+**Still open:**
+- **U5 — Neon Launch tier upgrade** ($19/mo). Free-tier autosuspend can cold-start the first request after idle by 3–10s, close to `command_timeout=10s`. Pre-launch this is acceptable; do it before first paying customer.
+- **§9.4 Step 7 cleanup** — JSON code path deletion. Deferred ≥7 clean days from cutover (2026-05-22). Rollback path stays available until then. **Do not delete `jobs_store_json.py`, `jobs_store_dispatch.py`, `checkout_store.py`, or `checkout_store_dispatch.py` before that window closes.**
+- **§3 roadmap items #3–#10 + #12–#14** — engineering work, no longer blocked.
 
-1. **Re-read this section + §4.2 catalog (B55/B56/B57 entries)** — refreshes context in <5 min.
-2. **Verify Neon `dev` state** — `SELECT version_num FROM alembic_version;` should return `'0002'`. If it doesn't, re-run `alembic upgrade head` against the dev DIRECT DSN.
-3. **Re-run integration smoke tests against dev** —
-   ```powershell
-   .venv\Scripts\python.exe -m scripts.test_reconcile_pg
-   .venv\Scripts\python.exe -m scripts.test_phase_e_pg
-   .venv\Scripts\python.exe -m scripts.test_jobs_store_dispatch
-   ```
-   All three must pass before proceeding. Requires `.env.secrets` has the Neon dev DSN as `DATABASE_URL` and `DB_BACKEND=postgres` in `.env`.
-4. **Coordinate Phase F cutover window** — see §9.4. Specifically: U5 (Neon Launch tier $19/mo) MUST be done in the same maintenance window as the `DB_BACKEND=postgres` flag flip on Render, otherwise Free-tier autosuspend cold-starts the first `/status` poll.
-5. **Apply migration 0002 to Neon `main`** during the cutover window. Render's pre-deploy hook (U3) will run `alembic upgrade head` automatically on the first deploy after the env vars are in place — verify by tailing the Render deploy logs for `Running upgrade 0001 -> 0002`.
-6. **Phase F observation week** — see §9.4 Step 6. Daily MANUAL_REVIEW + saga-status SQL queries.
-7. **Phase F Step 7 cleanup** after 7 clean days — delete the JSON code path (see §9.4 Step 7 file list).
-8. **Pick up §3 roadmap items #3–#10 + #12–#14** in parallel or after.
-
-### Freeze zone (do not modify during the pause)
-
-Touching any of these while building 3D preview risks regressing the audit work and creating subtle latent bugs that won't surface until resume:
-
-- `scripts/checkout/**` (entire package — saga, reconcile, audit, payment providers, stores)
-- `scripts/migrations/**` (don't author 0003 until 0002 is on Neon `main`)
-- `scripts/db.py` (especially `_EXPECTED_SCHEMA_VERSION`, `init_pool`, `verify_schema`)
-- `scripts/jobs_store_pg.py`, `scripts/jobs_store_json.py`, `scripts/jobs_store_dispatch.py`
-- `scripts/Main.py` lifespan (the `async def lifespan(app)` block — boot invariants are load-bearing)
-- `.env` keys: `DB_BACKEND`, `CHECKOUT_ENABLED`, `DATABASE_URL`, `STRIPE_*`
-- This file (§0–§9). `docs/CHECKOUT_AUDIT.md`, `docs/ORDER_OPTIMIZER.md`.
-
-If 3D preview work genuinely needs to touch any of these, **treat the pause as ended** — re-read this section, the freeze-zone constraints don't apply mid-resume.
-
-### Scope of the new (3D preview) work
-
-3D preview API + frontend is mosaic-pipeline territory:
-- Likely touches: `scripts/picToMosiac.py`, `scripts/VisualMaker.py`, `scripts/MosiacToInstruction.py`, possibly new modules under `scripts/`, and new routes in `scripts/Main.py` outside the lifespan block.
-- Does NOT need: checkout, payment, reconciler, audit log, payment_holds. New HTTP endpoints for 3D preview are read-side (return preview data) — they do NOT need `Depends(require_checkout_gate_open)` per the doctrine in `scripts/checkout/dependencies.py` docstring.
-- If a new endpoint mutates state, follow `{detail: {error, code, ...}}` shape (CLAUDE.md "Public API contracts" bullet).
-
-### Resuming under "I forgot everything"
-
-If enough time passes that the resumption sequence above isn't enough, re-read in this order:
-1. This section (§0 PAUSED) — restores immediate context.
-2. `CLAUDE.md` — module map + boot invariants + doctrine bullets. The single most concentrated source of project knowledge.
-3. §4.2 B55/B56/B57 entries — explains exactly what was changed and why.
-4. §9 (migration history + Phase F playbook) — the operational sequence.
+**Where to read up:**
+- For DB ops, debug playbook, operator queries, migration workflow — `docs/DATABASE_OPS.md`.
+- For schema details — `§9.2` here, or the canonical SQL in `scripts/migrations/sql/`.
+- For the cutover lesson (env-var mismatch that ate 90 min on 2026-05-22) — `docs/DATABASE_OPS.md` "Debug playbook → Cutover gotcha".
 
 ---
 
@@ -750,7 +704,11 @@ The boot path itself was verified during Action A: `[resume] examined 0 in-fligh
 - ✅ Mid-saga restart test — closed-by-integration via `test_phase_e_pg` + boot-log verification 2026-05-19 (live Stripe exercise deferred until U1).
 - 📦 §0 + §9.5 updated when complete.
 
-### 9.4 Phase F — Cutover (≈½ day + 1 week observation + 1 hour cleanup)
+### 9.4 Phase F — Cutover (shipped 2026-05-22)
+
+**Status:** Cutover complete. Steps 1–5 done; Step 6 (one-week observation)
+in progress; Step 7 (JSON code path deletion) deferred until observation
+window closes.
 
 **Goal:** Flip production. `DB_BACKEND=postgres` on Render. Validate. Wait one week. Delete the JSON code path.
 
@@ -759,11 +717,11 @@ The boot path itself was verified during Action A: `[resume] examined 0 in-fligh
 - ✅ B55-B57 code shipped 2026-05-19 (HIGH-severity audit fixes; live-Stripe gating).
 - ✅ U3 — Render pre-deploy hook configured for `alembic upgrade head` (done 2026-05-19).
 - ✅ U4 — `DATABASE_URL` + `DATABASE_URL_DIRECT` env vars added to Render (done 2026-05-19).
-- ❌ U5 — Neon project upgraded Free → Launch ($19/mo) in the same window. Free-tier autosuspend would cold-start the first `/status` poll.
-- ✅ U6a — Migration 0002 applied to Neon `dev` (2026-05-20). ❌ U6b — Apply to Neon `main` during the cutover window; Render's pre-deploy hook (U3) handles this automatically on the first deploy after Phase F env vars are in place. Verify in Render deploy logs (`Running upgrade 0001 -> 0002`).
+- ❌ U5 — Neon project upgraded Free → Launch ($19/mo). Still **open** post-cutover; deferrable pre-launch. Free-tier autosuspend can cold-start first request by 3–10s, close to `command_timeout=10s`.
+- ✅ U6a — Migration 0002 applied to Neon `dev` (2026-05-20). ✅ U6b — Migration 0002 applied to Neon `main` via Render pre-deploy hook on 2026-05-22.
 - 🛑 Schedule cutover during low-traffic hours. Pre-launch this is moot; make it habit.
 
-**Step 1 — Deploy with `DB_BACKEND=json` first** (≈15 min)
+**Step 1 — ✅ Deploy with `DB_BACKEND=json` first** (2026-05-22)
 
 🛑 Do NOT flip `DB_BACKEND` and deploy at the same time.
 
@@ -774,11 +732,11 @@ Verify:
 - `POST /generate` with test image succeeds.
 - `GET /checkout/gate` returns `mode=test` (TEST keys) or `mode=live` (live keys).
 
-**Step 2 — Smoke test pool is open** (≈5 min)
+**Step 2 — ✅ Smoke test pool is open** (2026-05-22)
 
 Confirm the lifespan log line `"DB pool skipped (DB_BACKEND=json; Phase F not yet flipped)"` appears. That proves `DB_BACKEND=json` is the active path.
 
-**Step 3 — Flip the switch** (≈5 min)
+**Step 3 — ✅ Flip the switch** (2026-05-22)
 
 Render dashboard → Environment → `DB_BACKEND=postgres`. Save. Render restarts.
 
@@ -790,15 +748,15 @@ Watch deploy logs for:
 
 🛑 If lifespan errors, flip `DB_BACKEND=json` immediately and investigate offline.
 
-**Step 4 — End-to-end production smoke** (≈30 min)
+> **Cutover lesson — env-var mismatch (2026-05-22):** the first three flip attempts failed with `Schema version mismatch: DB at '0001', app expects '0002'` despite the pre-deploy hook reporting success. Root cause: Render's `DATABASE_URL` and `DATABASE_URL_DIRECT` were pointing at two different Neon compute endpoints (different `ep-XXXX` prefixes — different projects entirely). Pre-deploy alembic was migrating one branch; the app was reading from the other. Fix: align both env vars to the same `ep-XXXX` (only `-pooler` should differ). Now caught early by a permanent `DATABASE_URL host='...'` log line in `init_pool` and the `scripts/diagnose_db.py` utility. See `docs/DATABASE_OPS.md` "Debug playbook → Cutover gotcha".
 
-Run the full flow against the live URL (still TEST mode, no real money). Verify rows land in `jobs`, `checkouts`, `sagas`, `payment_holds`.
+**Step 4 — ✅ End-to-end production smoke** (2026-05-22)
 
-**Step 5 — Upgrade to Neon Launch tier** (≈5 min, same window)
+Ran the full flow against the live URL (TEST mode). Jobs visible in `jobs` table via Neon production SQL editor.
 
-Neon dashboard → laigo project → Billing → Launch tier ($19/mo). Confirms autosuspend OFF.
+**Step 5 — ❌ Upgrade to Neon Launch tier** — deferred post-cutover. Pre-launch the cold-start is acceptable. Do before first paying customer.
 
-**Step 6 — One-week observation window**
+**Step 6 — One-week observation window** (in progress; starts 2026-05-22)
 
 🛑 **Do NOT delete the JSON code path yet.** Rollback to JSON must remain a single env-var flip for one week.
 
@@ -839,9 +797,9 @@ If any flare: roll back to `DB_BACKEND=json`, file the issue, fix offline, re-at
 | U1 | Resolve corporate-proxy SSL cert root cause (so `pip install` works without `--trusted-host`) | Eventually | LOW |
 | ~~U3~~ | ~~Configure Render pre-deploy hook for `alembic upgrade head`~~ | F | ✅ Done 2026-05-19 |
 | ~~U4~~ | ~~Add `DATABASE_URL` + `DATABASE_URL_DIRECT` env vars to Render~~ | F | ✅ Done 2026-05-19 |
-| U5 | Upgrade Neon project Free → Launch ($19/mo) | F (same window as `DB_BACKEND=postgres` flag flip on Render) | HIGH at cutover |
+| U5 | Upgrade Neon project Free → Launch ($19/mo). Deferrable pre-launch; do before first paying customer to remove the cold-start risk. | F | MEDIUM post-cutover |
 | U6a | ~~Apply migration 0002 to Neon `dev`~~ via `alembic upgrade head` against the DIRECT DSN. | B55 | ✅ Done 2026-05-20 |
-| U6b | Apply migration 0002 to Neon `main` — Render's pre-deploy hook (U3) handles this automatically on the next deploy after Phase F env vars are in place. Verify in deploy logs. | B55 / Phase F | HIGH at cutover |
+| ~~U6b~~ | ~~Apply migration 0002 to Neon `main`~~ via Render's pre-deploy hook. | B55 / Phase F | ✅ Done 2026-05-22 |
 | U7 | Commit packaging strategy for all Phase A-E + B55-B57 work | Whenever | LOW |
 
 ### 9.6 Risk register

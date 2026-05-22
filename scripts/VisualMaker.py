@@ -37,17 +37,17 @@ def get_font(size=32):
         # Fall back to PIL default bitmap font
         return ImageFont.load_default()
 
-def save_img_and_increment_step(img, step, output_dir=None):
-    save_copy = img.copy()
-    width, height = save_copy.size
-    draw = ImageDraw.Draw(save_copy)
+def save_img_and_increment_step(img, step, output_dir=None, copy=True):
+    save_target = img.copy() if copy else img
+    width, height = save_target.size
+    draw = ImageDraw.Draw(save_target)
     font = get_font(32)
     x_middle = width / 2
     x_offset = -len(str(step)) * 5
     offset = 50
     draw.text((x_middle + x_offset, height - offset), str(step), fill="black", font=font)
     saveName = get_file_name(step, output_dir)
-    save_copy.save(saveName)
+    save_target.convert("RGB").save(saveName, format="PNG", compress_level=1)
     return (step + 1)
 
 
@@ -864,21 +864,56 @@ def draw_stud(draw, cx, cy, blockZ, color):
     )
 
 
+# Per-process cache of rendered baseplate-setup canvases. Keys:
+#   "stepA"          — blank baseplate piece (case-independent)
+#   "stepB:{case}"   — positioned baseplate with connectors
+#   "stepC:{case}"   — top-of-baseplate view (also returned as foundation canvas)
+# Values are pristine PIL Images (no step number stamp). Cache lifetime = worker
+# process lifetime (max_tasks_per_child=1), so no cross-job leakage.
+# Memory cost: up to 9 entries × ~2 MB each = ~18 MB.
+_baseplate_setup_cache = {}
+
+
+def _render_baseplate_step_a():
+    img, _ = get_img_and_draw(step=1, wantClear=True)
+    draw = ImageDraw.Draw(img)
+    draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), -1)
+    return img
+
+
+def _render_baseplate_step_b(case):
+    img = _get_or_build_baseplate("stepA", _render_baseplate_step_a).copy()
+    draw = ImageDraw.Draw(img)
+    draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), case)
+    return img
+
+
+def _render_baseplate_step_c(case):
+    img, _ = get_img_and_draw(step=1, wantClear=True)
+    draw = ImageDraw.Draw(img)
+    draw_baseplate_top(draw, 16, (0.2, 0.2, 0.2), case)
+    return img
+
+
+def _get_or_build_baseplate(key, builder):
+    if key not in _baseplate_setup_cache:
+        _baseplate_setup_cache[key] = builder()
+    return _baseplate_setup_cache[key]
+
+
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
 def generate_baseplate_setup(step, case, output_dir=None):
-    # Step 1: blank canvas, show the standalone baseplate piece
-    img, draw = get_img_and_draw(step, True, output_dir)
-    draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), -1)
-    step = save_img_and_increment_step(img, step, output_dir)
-    # Step 2: same canvas (img is clean — save_img_and_increment_step does not mutate it),
-    # draw the positioned baseplate on top to show placement
-    draw_baseplate_bottom(draw, 16, (0.2, 0.2, 0.2), case)
-    step = save_img_and_increment_step(img, step, output_dir)
-    # Step 3: fresh canvas for the top-of-baseplate view
-    img, draw = get_img_and_draw(step, True, output_dir)
-    draw_baseplate_top(draw, 16, (0.2, 0.2, 0.2), case)
-    step = save_img_and_increment_step(img, step, output_dir)
-    return step, img  # return canvas so caller avoids a disk read
+    # Step 1: blank canvas, show the standalone baseplate piece (case-independent)
+    img_a = _get_or_build_baseplate("stepA", _render_baseplate_step_a).copy()
+    step = save_img_and_increment_step(img_a, step, output_dir)
+    # Step 2: positioned baseplate with connectors (varies by case)
+    img_b = _get_or_build_baseplate(f"stepB:{case}", lambda: _render_baseplate_step_b(case)).copy()
+    step = save_img_and_increment_step(img_b, step, output_dir)
+    # Step 3: top-of-baseplate view; returned canvas is mutated by caller for
+    # column drawing, so we .copy() the cached pristine version.
+    img_c = _get_or_build_baseplate(f"stepC:{case}", lambda: _render_baseplate_step_c(case)).copy()
+    step = save_img_and_increment_step(img_c, step, output_dir)
+    return step, img_c  # return canvas so caller avoids a disk read
 
 # -----------------------------
 # Convert block grid to isometric XY
@@ -905,6 +940,34 @@ def draw_plate_column(draw, start_blockX, height, colors, highlight):
         #print("DRAWING color:", colors[i])
         if (colors[i][3] != 0):
             draw_plate(draw, start_blockX, i, height, colors[i], highlight)
+
+
+# Draw ONLY the yellow highlight outline for a column on top of an already-drawn
+# canvas. Used by the column-save loop in MosiacToInstruction.GenerateInstructions
+# to avoid re-drawing the full ~80 polygons just to add a yellow outline.
+# Outline coordinates MUST stay in lockstep with the `if highlight:` block in
+# draw_plate() below.
+def draw_column_highlight_only(draw, start_blockX, height, colors):
+    if len(colors) != 16:
+        log_error("need 16 color indexes")
+        return
+    yellow = (255, 255, 0)
+    for i in range(15, -1, -1):
+        if colors[i][3] == 0:
+            continue
+        x, y = get_block_xy(start_blockX, i)
+        if height == 1:
+            y += PLATE_HALF_HEIGHT
+        outline = [
+            to_pillow(x + 0,                y + 0),
+            to_pillow(x + 0,                y - PLATE_HALF_HEIGHT + 1),
+            to_pillow(x + PLATE_HALF_WIDTH, y - PLATE_HEIGHT + 1),
+            to_pillow(x + PLATE_WIDTH,      y - PLATE_HALF_HEIGHT + 1),
+            to_pillow(x + PLATE_WIDTH,      y + 0),
+            to_pillow(x + PLATE_HALF_WIDTH, y + PLATE_HALF_HEIGHT),
+            to_pillow(x + 0,                y + 0),
+        ]
+        draw.line(outline, fill=yellow, width=2)
 
 
 def draw_plate(draw, blockX, blockY, blockZ, color, highlight):

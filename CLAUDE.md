@@ -9,9 +9,16 @@ LAIGO converts photos into LEGO mosaic building kits. Given an image, it:
 2. Produces a LEGO brick purchase order list (JSON, uploadable to lego.com Pick-a-Brick)
 3. Generates step-by-step building instructions as a multi-page PDF
 
-## 🛑 Active focus — 3D preview API + frontend (Stripe/DB paused)
+## Active focus — Phase F shipped on Render 2026-05-22
 
-Stripe / DB migration work is **paused 2026-05-20** with B55-B57 audit fixes shipped and migration 0002 applied to Neon `dev`. Phase F (DB_BACKEND=postgres cutover) is pending. Read `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §0 PAUSED` for the resume sequence + freeze-zone constraints before touching anything under `scripts/checkout/**`, `scripts/migrations/**`, `scripts/db.py`, `scripts/jobs_store_*.py`, or `scripts/Main.py` lifespan. 2D editor work is also deferred until Stripe/DB resumes.
+`DB_BACKEND=postgres` is live on Render against Neon `main` at schema `0002`.
+Boot lifespan logs `DATABASE_URL host='...'` at every start — sanity-check
+this line first when something's off. For DB operations, debug playbook,
+operator queries, and the env-var-mismatch cutover lesson, read
+`docs/DATABASE_OPS.md`. Phase F Step 7 (delete the JSON code path +
+dispatchers) is **deferred** until ≥7 clean observation days pass — see
+`docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.4 Step 7`. U5 (Neon Launch tier
+upgrade) is still open; pre-launch this is a deferrable cost decision.
 
 ## Running locally
 
@@ -668,3 +675,4 @@ ALL boot refusals raise `RuntimeError` after `log.critical(...)`. Fail loud, fai
 - **Diagnostic record (FMEA, audit history):** `docs/CHECKOUT_AUDIT.md`.
 - **Checkout module reference:** `docs/ORDER_OPTIMIZER.md`.
 - **3D preview API + payload schema (frontend-facing):** `docs/PREVIEW_API.md`.
+- **DB operations + debug playbook (Neon):** `docs/DATABASE_OPS.md` — connection model, migration workflow, operator queries, debug playbook, the diagnose_db.py tool.
