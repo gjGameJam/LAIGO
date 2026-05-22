@@ -942,34 +942,6 @@ def draw_plate_column(draw, start_blockX, height, colors, highlight):
             draw_plate(draw, start_blockX, i, height, colors[i], highlight)
 
 
-# Draw ONLY the yellow highlight outline for a column on top of an already-drawn
-# canvas. Used by the column-save loop in MosiacToInstruction.GenerateInstructions
-# to avoid re-drawing the full ~80 polygons just to add a yellow outline.
-# Outline coordinates MUST stay in lockstep with the `if highlight:` block in
-# draw_plate() below.
-def draw_column_highlight_only(draw, start_blockX, height, colors):
-    if len(colors) != 16:
-        log_error("need 16 color indexes")
-        return
-    yellow = (255, 255, 0)
-    for i in range(15, -1, -1):
-        if colors[i][3] == 0:
-            continue
-        x, y = get_block_xy(start_blockX, i)
-        if height == 1:
-            y += PLATE_HALF_HEIGHT
-        outline = [
-            to_pillow(x + 0,                y + 0),
-            to_pillow(x + 0,                y - PLATE_HALF_HEIGHT + 1),
-            to_pillow(x + PLATE_HALF_WIDTH, y - PLATE_HEIGHT + 1),
-            to_pillow(x + PLATE_WIDTH,      y - PLATE_HALF_HEIGHT + 1),
-            to_pillow(x + PLATE_WIDTH,      y + 0),
-            to_pillow(x + PLATE_HALF_WIDTH, y + PLATE_HALF_HEIGHT),
-            to_pillow(x + 0,                y + 0),
-        ]
-        draw.line(outline, fill=yellow, width=2)
-
-
 def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
     x, y = get_block_xy(blockX, blockY)
     if blockZ == 1:

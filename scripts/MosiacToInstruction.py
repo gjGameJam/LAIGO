@@ -1,4 +1,4 @@
-from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, draw_column_highlight_only, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
+from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas as rl_canvas
 import numpy as np
@@ -136,31 +136,27 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
             bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
             for col in range(0, len(bg_block[0])):
                 #loop over columns of 16x16 block (each column is 16 plates)
-                # take the column and convert to a list of 3-element tuples (R,G,B)
-                column_rgb = [tuple(c / 255.0 for c in bg_block[15 - y, col]) for y in range(16)]
-                # Draw on persistent canvas FIRST so the copy below captures the new column.
-                draw_plate_column(draw, col, 0, column_rgb, False) #zero height no highlight
                 to_reuse = img.copy()
                 draw2 = ImageDraw.Draw(to_reuse)
-                # Add ONLY the yellow outline on the copy — geometry is already drawn.
-                draw_column_highlight_only(draw2, col, 0, column_rgb)
+                # take the column and convert to a list of 3-element tuples (R,G,B)
+                column_rgb = [tuple(c / 255.0 for c in bg_block[15 - y, col]) for y in range(16)]
+                draw_plate_column(draw, col, 0, column_rgb, False) #zero height no highlight
+                draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
                 step = save_img_and_increment_step(to_reuse, step, output_dir, copy=False)
 
             #layer 2: foreground
             if not fg_rgba is None:
                 fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
                 for col in range(0, len(fg_block[0])):
+                    to_reuse = img.copy()
+                    draw2 = ImageDraw.Draw(to_reuse)
                     # take the column and convert to a list of 3-element tuples (R,G,B,A)
                     column_rgba = [tuple(c / 255.0 for c in fg_block[15 - y, col]) for y in range(16)]
                     if all(pixel[3] == 0 for pixel in column_rgba):
-                        # Entire column is transparent, skip (do NOT mutate persistent canvas)
+                        # Entire column is transparent, skip
                         continue
-                    # Draw on persistent canvas FIRST so the copy below captures the new column.
                     draw_plate_column(draw, col, 1, column_rgba, False) #one height no highlight
-                    to_reuse = img.copy()
-                    draw2 = ImageDraw.Draw(to_reuse)
-                    # Add ONLY the yellow outline on the copy — geometry is already drawn.
-                    draw_column_highlight_only(draw2, col, 1, column_rgba)
+                    draw_plate_column(draw2, col, 1, column_rgba, True) #one height with highlight
                     step = save_img_and_increment_step(to_reuse, step, output_dir, copy=False)
 
             block_count += 1
