@@ -118,7 +118,7 @@ All runtime knobs live in `.env` (committed — no secrets):
 
 ### Processing pipeline
 
-`POST /generate` → upload saved to `inputs/` → job queued → worker process runs `pic_to_mosaic()` → outputs zipped to `outputs/{job_id}/artifact.zip` → poll `GET /jobs/{job_id}` → download via `GET /jobs/{job_id}/download`
+`POST /generate` → upload saved to `inputs/` → job queued → worker process runs `pic_to_mosaic()` → outputs zipped to `outputs/{job_id}/artifact.zip` (plus stable `order_list.json` + `preview.json` alongside) → poll `GET /jobs/{job_id}` → download via `GET /jobs/{job_id}/download`; 3D-renderable mosaic via `GET /jobs/{job_id}/preview`
 
 ### Module layout (`LAIGO/scripts/`)
 
@@ -129,6 +129,7 @@ All runtime knobs live in `.env` (committed — no secrets):
 | `MosiacToOrder.py` | Generates brick purchase JSONs (splits >999-qty items across multiple files) |
 | `MosiacToInstruction.py` | Sequences instruction PNG steps → PDF |
 | `VisualMaker.py` | Draws isometric LEGO stud visuals for each instruction step |
+| `preview_builder.py` | Pure `build_preview_payload(...)` + atomic `write_preview_atomic(...)` for the 3D preview JSON. Consumed by `GET /jobs/{id}/preview`. See `docs/PREVIEW_API.md`. |
 | `Util.py` | LEGO palette (43 RGB colors → element IDs), logging wrappers, JSON serialization |
 | `logger.py` | Rotating file logger (`laigo.log`, default 10 MB cap, 1 backup; tunable via `MAX_LOG_SIZE_MB`) |
 | `colorQuant.py` | Standalone KMeans color quantization demo (not used by the pipeline) |
@@ -204,7 +205,7 @@ Main.py (FastAPI + scheduler + cleanup threads + ProcessPoolExecutor)
 #### `Main.py` — FastAPI app + job lifecycle
 
 - Imports: `.picToMosiac`, `.Util`, `.checkout.router/debug_router/gate_router`, `.checkout.cache`, `.checkout.gate`, `.jobs_store_dispatch`; lazy-imports `.checkout.payment.{registry,base,stripe_provider}` + `.checkout.saga_resume` inside lifespan.
-- HTTP routes: `GET /health`, `GET /`, `GET /queue`, `POST /generate`, `GET /jobs/{job_id}`, `GET /jobs/{job_id}/download`. Static mount: `/artifacts` → `OUTPUT_DIR`.
+- HTTP routes: `GET /health`, `GET /`, `GET /queue`, `POST /generate`, `GET /jobs/{job_id}`, `GET /jobs/{job_id}/preview` (3D preview JSON — see `docs/PREVIEW_API.md`), `GET /jobs/{job_id}/download`. Static mount: `/artifacts` → `OUTPUT_DIR`.
 - Lifespan startup (in order — see boot invariants below): alembic-head check → `init_pool()` → `verify_schema()` → capture event loop → payment provider registration → gate computation → L1 boot invariants → `resume_in_flight_sagas()` (if postgres) → `ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1)` + scheduler + cleanup threads + cache sweeper.
 - Runtime-only side tables on `app.state` (persistent state lives in `jobs_store_dispatch`): `futures` (job_id → Future, also the arbitration sentinel for done-callback vs watchdog), `deadlines` (job_id → wallclock deadline), `intake` (job_id → full settings dict; preserves `to_frame` until TTL eviction), `progress` (job_id → .progress Path), `event_loop`. Plus `executor`, `active_jobs`, `progress_lock`, `scheduler_cv`, `scheduler_shutdown`.
 - Scheduler tick: timeout watchdog → progress mirroring (`.progress` file → store) → `dequeue_next()` (atomic `SELECT FOR UPDATE SKIP LOCKED` on PG; single-lock scan-and-flip on JSON) → executor.submit.
@@ -666,3 +667,4 @@ ALL boot refusals raise `RuntimeError` after `log.critical(...)`. Fail loud, fai
 - **Pre-launch gating checklist:** `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` — read §0 for current state, §3 for roadmap, §4 for open defects, §8 for schema, §9.3 for Phase E remaining, §9.4 for Phase F playbook.
 - **Diagnostic record (FMEA, audit history):** `docs/CHECKOUT_AUDIT.md`.
 - **Checkout module reference:** `docs/ORDER_OPTIMIZER.md`.
+- **3D preview API + payload schema (frontend-facing):** `docs/PREVIEW_API.md`.

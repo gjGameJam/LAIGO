@@ -100,7 +100,9 @@
       "Bash(Select-Object -First 20)",
       "Bash(Find \"C:\\\\Users\\\\Grant Benson\\\\OneDrive\\\\Desktop\\\\LAIGO\\\\scripts\\\\checkout\" -name \"router.py\" -type f)",
       "Bash(.venv\\\\Scripts\\\\python.exe *)",
-      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m scripts.test_preview)"
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m scripts.test_preview)",
+      "Bash(Select-String -Pattern \"preview\" -SimpleMatch)",
+      "Bash(Select-Object -First 5)"
     ]
   },
   "enabledPlugins": {}
