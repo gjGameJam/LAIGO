@@ -73,6 +73,7 @@ __all__ = (
     # Lifecycle: DELETE
     "delete",
     "cleanup_expired",
+    "cleanup_terminal_sagas",
     # Sync wrappers (thread → event loop)
     "mark_running_from_thread",
     "mark_complete_from_thread",
@@ -191,6 +192,10 @@ async def delete(job_id: str) -> None:
 
 async def cleanup_expired() -> list[str]:
     return await _backend().cleanup_expired()
+
+
+async def cleanup_terminal_sagas(retention_days: int = 90) -> list[str]:
+    return await _backend().cleanup_terminal_sagas(retention_days)
 
 
 # ─── Sync wrappers (route to active backend) ─────────────────────────────────

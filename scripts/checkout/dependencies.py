@@ -128,13 +128,13 @@ async def require_checkout_gate_open(request: Request) -> GateDecision:
     # no-ops when DB_BACKEND != postgres. Per §2.2 vocabulary, this is the
     # `gate.confirm_rejected` event.
     #
-    # actor.ip is best-effort: behind a proxy/CDN the immediate client.host
-    # is the load balancer, not the real customer. Render forwards the
-    # real IP in X-Forwarded-For but we don't have a uniform middleware
-    # yet to harvest it — passing the raw client host is correct for now
-    # and degrades to the LB IP in proxied deploys. When a real request-id
-    # / forwarded-for middleware lands, swap this for the parsed value.
-    actor_ip = request.client.host if request.client else None
+    # actor.ip is populated by the `real_ip_middleware` in Main.py from
+    # X-Forwarded-For (B60). Falls back to the immediate client host when
+    # the middleware was skipped (test stubs, direct connections with no
+    # XFF). The single-trusted-proxy assumption is documented at the
+    # middleware definition — do not bypass it here.
+    state_ip = getattr(getattr(request, "state", None), "real_ip", None)
+    actor_ip = state_ip or (request.client.host if request.client else None)
     actor_user_agent = request.headers.get("user-agent")
     # Harvest job_id from the URL path for per-job audit correlation. The
     # `audit_events_job_ts_idx` index supports the operator query "show me

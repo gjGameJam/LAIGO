@@ -96,9 +96,9 @@ Before any real `sk_live_` Stripe key is configured, ALL of the following must b
 | Severity | Open IDs |
 |---|---|
 | HIGH (code-shipped) | B55, B56, B57 — all moved to §4.2 closed catalog. Migration 0002 applied to Neon `dev` 2026-05-20; pending on `main` (handled by Render pre-deploy hook at Phase F cutover — U6b). |
-| MEDIUM | B58 (500 leaks exception class), B59 (jobs cleanup blocked by sagas FK → unbounded disk), B60 (audit actor.ip masked by LB) |
+| MEDIUM | B66 (LEGO.com listing API returns `available: false` for known-available element 302421 — optimizer can't source any LEGO items; blocks launch) |
 | MEDIUM (LATENT) | B11 (cross-iteration brickowl_order_ids checkpoint — only when roadmap #5 ships), B23 in json mode, B28 (per-order cancel retry — when roadmap #5 ships), B36 (semaphore-per-call) |
-| LOW | B26, B27, B29, B30, B31, B35, B61 (CORS env unread), B63 (no stop_cache_sweeper), B64 (Stripe msg substring), B65 (422 missing code) |
+| LOW | B26, B27, B29, B31, B35, B61 (CORS env unread), B63 (no stop_cache_sweeper), B64 (Stripe msg substring), B65 (422 missing code) |
 | DOC | B31 |
 | COSMETIC | B48, B49 |
 | FUTURE-PROOFING | B51 (dither hardcoded), B52 (started_at == completed_at on fast jobs) |
@@ -167,6 +167,7 @@ Frozen schema. New events extend `data`; never rename top-level keys.
 | `marketplace.order_placed` | Single marketplace order succeeded | `{seller_id, marketplace_order_id, items_count}` |
 | `marketplace.order_cancelled` | Cancellation succeeded | `{seller_id, marketplace_order_id}` |
 | `marketplace.cancel_failed` | Cancellation API failed | `{seller_id, order_id, error}` — **always alerts** |
+| `marketplace.endpoint_unavailable` | Marketplace pricing/availability endpoint returned a non-transient HTTP error (404, 401/403, 5xx). Throttled once per process per `(status_code, url)`. | `{seller_id, endpoint, status_code, url, triggered_by_element}` — **always alerts** |
 | `payment.hold_created` | Payment hold via provider | `{hold_id, amount_cents, mode}` |
 | `payment.captured` | Capture via provider | `{hold_id, captured_amount_cents}` |
 | `payment.cancelled` | Cancel via provider | `{hold_id, reason?}` |
@@ -228,6 +229,7 @@ Keep existing `logger.warning/info` lines for one month after each call-site mig
 | `count(event="payment.skipped") > 0 in 24h` | Impossible state | **Page on-call — RPN #1 regression** |
 | `count(event="gate.confirm_rejected") > 10 per 5min` | Frontend bug or attack | Page on-call |
 | Any `event="marketplace.cancel_failed"` | Manual review needed | Slack notify with order_id |
+| Any `event="marketplace.endpoint_unavailable"` | Sourcing for one marketplace is silently down — every quote routes affected pieces to unsourceable until restored. | **Page on-call** — re-derive endpoint URL/fields against live traffic (DevTools on the marketplace's purchase page), patch the client, restart to re-arm the dedup |
 | Any `event="saga.manual_review"` | Operator action required | Slack notify with reason |
 | `count(event="saga.failed") / count(event="saga.started") > 0.05 in 1h` | Reliability drop | Slack notify |
 
@@ -270,7 +272,6 @@ Items 1–7 are the minimum-viable pre-launch set. Items 8–14 reduce tail-risk
 | B27 | LOW | `_ALLOWED_CURRENCIES` hardcoded; adding currency requires code change + deploy | `scripts/checkout/payment/stripe_provider.py` |
 | B28 | MEDIUM (LATENT until roadmap #5) | `_parallel_brickowl_cancels` doesn't retry individual transient cancel failures | `scripts/checkout/saga.py` |
 | B29 | LOW | LEGO `StockoutError` branch plumbed but `order_from_lego` doesn't raise it today | `scripts/checkout/clients/lego_client.py` |
-| B30 | LOW | "Hold failed unexpectedly" categorized as `payment_transient` — may misguide on permanent bugs | `scripts/checkout/saga.py` |
 | B31 | DOC | CHECKOUT_AUDIT.md "now lives at" mapping table will drift as saga.py grows | `docs/CHECKOUT_AUDIT.md` |
 | B35 | LOW | JSON mode non-atomic file writes (disappears post-Phase-F) | `scripts/checkout/checkout_store.py` |
 | B36 | LOW (LATENT) | `_parallel_brickowl_cancels` semaphore per-call, not per-process (future concurrent-saga design) | `scripts/checkout/saga.py` |
@@ -278,15 +279,13 @@ Items 1–7 are the minimum-viable pre-launch set. Items 8–14 reduce tail-risk
 | B49 | COSMETIC | `schema_meta` table created but never used | `scripts/migrations/sql/0001_initial_schema.up.sql` |
 | B51 | LOW (FUTURE-PROOFING) | `dither` hardcoded TRUE in jobs INSERT — fires when /generate exposes a dither param | `scripts/checkout/jobs_store_pg.py`, `scripts/jobs_store_json.py` |
 | B52 | LOW | Race-induced `started_at == completed_at` on fast jobs (residual after B41) | `scripts/jobs_store_pg.py` |
-| B58 | MEDIUM | `unhandled_exception_handler` leaks exception class + message to clients (info disclosure in prod) | `scripts/Main.py` |
-| B59 | MEDIUM | `jobs.cleanup_expired` cannot delete jobs once a saga exists (FK ON DELETE RESTRICT) — `outputs/{job_id}/` grows unbounded | `scripts/jobs_store_pg.py`, schema |
-| B60 | MEDIUM | `actor.ip` audit field captures Render LB IP, not real customer IP — no `X-Forwarded-For` parsing middleware | `scripts/checkout/dependencies.py` |
 | B61 | LOW | CORS allowed origins hardcoded in `Main.py`; `FRONTEND_ORIGIN` env exists but is never read | `scripts/Main.py` |
 | B63 | LOW | Cache sweeper has no `stop_cache_sweeper()` — relies on event-loop close to cancel (asymmetric with reconcile task) | `scripts/checkout/cache.py`, `scripts/Main.py` |
 | B64 | LOW | `stripe_provider._is_already_captured` / `_is_already_terminal_state` match Stripe error messages by substring — fragile to wording changes | `scripts/checkout/payment/stripe_provider.py` |
 | B65 | LOW | `/confirm` 422 for unsourceable items lacks the `code:` discriminator the rest of the API uses (`{error, code, ...}` shape) | `scripts/checkout/router.py` |
+| B66 | MEDIUM | `lego_client.get_listing_for_element(302421)` returns `available:false / listing:null` despite 302421 being a stock Pick-a-Brick item. Optimizer has zero working sources (BrickOwl 403, BrickLink not wired) → every quote returns `can_proceed:false`. Blocks launch. | `scripts/checkout/clients/lego_client.py` |
 
-**B55, B56, B57 (HIGH severity) — code shipped 2026-05-19**; see §4.2 closed catalog. Migration 0002 applied to Neon `dev` 2026-05-20; pending on `main` (U6b). B58 should be resolved before any public frontend points at the deployed API. B28/B29/B35/B36 are gated on other roadmap work; B48/B49/B51/B52 are cosmetic / future-proofing.
+**B55, B56, B57 (HIGH severity) — code shipped 2026-05-19**; see §4.2 closed catalog. Migration 0002 applied to Neon `dev` 2026-05-20; pending on `main` (U6b). B28/B29/B35/B36 are gated on other roadmap work; B48/B49/B51/B52 are cosmetic / future-proofing.
 
 #### B11 — Cross-iteration `placed_brickowl_ids` checkpoint
 
@@ -320,14 +319,6 @@ Items 1–7 are the minimum-viable pre-launch set. Items 8–14 reduce tail-risk
 
 **Fix:** Add DOM-detection in `order_from_lego` to raise `StockoutError` on detected stockouts.
 
-#### B30 — "Hold failed unexpectedly" → payment_transient
-
-**File:** `scripts/checkout/saga.py` (hold-creation `except Exception` branch)
-
-**Symptom:** Real bugs (e.g., wrong Stripe SDK call) show customers "Our payment system is temporarily unavailable. Please retry shortly." — they retry forever. Should escalate to operator.
-
-**Fix:** Distinguish "known Stripe error class we have no policy for" (rare) vs "code bug" (catch in a stricter `except` chain). Code bugs → MANUAL_REVIEW with operator notification.
-
 #### B48/B49 — Unused schema features
 
 `pgcrypto` extension + `schema_meta` table created in migration 0001 but never queried. Drop in a 0002 migration when convenient, OR commit to a use case (e.g., `schema_meta` could store the cutover date + last-rotation marker).
@@ -343,42 +334,6 @@ Items 1–7 are the minimum-viable pre-launch set. Items 8–14 reduce tail-risk
 **Mitigation today:** Accepted imprecision. Real jobs take >1s.
 
 **Fix:** None planned. If duration histograms matter for ops, switch to NOW() ± some default minimum.
-
-#### B58 — `unhandled_exception_handler` leaks exception class + message
-
-**File:** `scripts/Main.py` — `unhandled_exception_handler`.
-
-**Symptom:**
-```python
-content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"}
-```
-Reveals internal Python class names, file paths in tracebacks, query fragments, Stripe IDs, etc. to anyone hitting the API on a 500.
-
-**Impact:** Info disclosure once the API is publicly reachable. Useful in dev; problematic in prod.
-
-**Fix:** Return a static `"Internal server error"` detail; preserve the full `log.error(..., exc_info=True)` server-side. Optionally include a short request-correlation ID (`secrets.token_hex(8)`) that the operator can grep for.
-
-#### B59 — Mosaic-job `cleanup_expired` blocked by sagas FK → unbounded disk
-
-**File:** `scripts/jobs_store_pg.py` — `cleanup_expired`; schema `sagas.job_id REFERENCES jobs(job_id) ON DELETE RESTRICT`.
-
-**Symptom:** Once any customer confirms a checkout, a `sagas` row exists pointing at the job. The FK is `ON DELETE RESTRICT`. Even after the saga reaches a terminal status (PAYMENT_CAPTURED, COMPENSATED, FAILED, MANUAL_REVIEW), the FK still blocks deletion of the `jobs` row. `cleanup_expired` catches the ForeignKeyViolationError per-row and skips, so the corresponding `outputs/{job_id}/` directory is never `rmtree`'d.
-
-A typical mosaic artifact zip is 1–10 MB. At production traffic (1 confirmed checkout = forever-retained directory), disk usage grows monotonically.
-
-**Impact:** Not visible pre-launch. Will surface as a Render disk-full or Neon-disk-exceeded alert weeks-to-months after monetized traffic starts.
-
-**Fix:** Add a second cleanup task targeting jobs whose latest saga is **terminal** AND `sagas.completed_at` is older than a retention window (90 days is a sensible default — past the typical chargeback dispute window). Delete in dependency order: `audit_events` rows (no FK; lenient delete by job_id), then `payment_holds`, then `sagas`, then `checkouts`, then `jobs`. *Important constraint:* `outputs/{job_id}/order_list.json` must remain readable while any saga is non-terminal — the FK currently provides this guarantee, and the new cleanup must preserve it (only delete after the saga is terminal + retention window).
-
-#### B60 — `actor.ip` audit field captures LB IP, not customer IP
-
-**File:** `scripts/checkout/dependencies.py` — `require_checkout_gate_open` (already documented as TODO inline; promoted here for tracking).
-
-**Symptom:** `request.client.host` returns the immediate hop's IP. Behind Render's load balancer, that's the LB IP for every customer. The §2.7 abuse-detection use case ("rate-limit per customer IP") can't function — every rejected `/confirm` looks like it came from the same IP.
-
-**Impact:** Audit log's actor.ip column carries zero signal in production. Not currently used by any alert, so impact is latent until L6 alerting is wired.
-
-**Fix:** Add a small FastAPI middleware that parses `X-Forwarded-For` (take the *first* IP, since Render is the only trusted proxy) and stuffs it onto `request.state.real_ip`. `require_checkout_gate_open` reads from there. Document the single-proxy trust assumption in the middleware so a future multi-proxy setup doesn't silently trust spoofed XFF headers.
 
 #### B61 — `FRONTEND_ORIGIN` env unused; CORS origins hardcoded
 
@@ -419,6 +374,50 @@ A typical mosaic artifact zip is 1–10 MB. At production traffic (1 confirmed c
 **Impact:** Frontend matches on HTTP status today, so behaviorally fine. If a second 422 reason ever lands on this endpoint, the frontend can't distinguish them without parsing the `error` string.
 
 **Fix:** Add `"code": "UNSOURCEABLE_ITEMS"` to the detail dict. Coordinated change with the frontend if it currently matches on the error-string shape.
+
+#### B66 — LEGO.com listing API returns no listings for known-available elements
+
+**File:** `scripts/checkout/clients/lego_client.py` — `_search`, `_parse_available`, `_parse_price_cents`.
+
+**Symptom (filed 2026-05-23):** `GET /checkout-debug/lego/element/302421/listing` returns:
+
+```json
+{ "element_id": "302421", "available": false, "listing": null }
+```
+
+302421 is a stock Pick-a-Brick item (red 1×1 plate). With BrickOwl blocked at `403` (vendor access pending) and BrickLink unwired, LEGO.com is the only source feeding the optimizer. Every quote therefore returns `can_proceed: false` with the element in `unsourceable_items`. Launch is blocked.
+
+**Root cause is one of three** (D1 disambiguates):
+
+1. **Search endpoint shape changed** — `_LEGO_SEARCH_URL` (`lego_client.py:55`) was reverse-engineered from network traffic; LEGO.com's frontend may have moved or renamed the endpoint. Diagnosis: `results: []` or 4xx when the URL is loaded directly.
+2. **Search returns results but `_parse_available()` rejects them** — the `availability` / `availabilityStatus` field rename or new enum value (`_AVAILABLE_STATUSES = {"instock", "available", "limitedavailability", "available for sale"}` at `lego_client.py:60`). Diagnosis: non-empty `results`, but the matching item's availability field uses a string our set doesn't include.
+3. **Search returns results, `_parse_available()` accepts, but `_parse_price_cents()` returns `None`** — would still produce a valid listing with `price_per_cent=0` (per `get_listing_for_element` fallback), so this is unlikely the *primary* cause but should be verified.
+
+**Diagnosis runbook (D1 → D3):**
+
+**D1 — raw URL fetch.** Open this URL in Chrome/Edge (curl is fragile against LEGO's UA filtering):
+
+```
+https://www.lego.com/api/product/search/en-US?q=302421&page=1&pageSize=10&searchTypes=PickABrick
+```
+
+  Outcomes:
+  - `results: []` → endpoint or query shape changed. Go to D1b.
+  - Non-empty `results` → root cause is parser drift. Go to D2.
+  - 4xx / HTML / redirect → endpoint moved entirely. Go to D1b.
+
+**D1b — re-derive endpoint.** Open DevTools Network on https://www.lego.com/en-us/pick-and-build/pick-a-brick. Search for any element ID. Find the XHR request returning product JSON. Update `_LEGO_SEARCH_URL` and (if needed) the query params in `_search()`.
+
+**D2 — fix parsers against live response.** Paste one result object into the team channel. Update `_parse_available()` (`lego_client.py:133`) — likely the `availability` field needs a new candidate value added to `_AVAILABLE_STATUSES`, OR the field path changed (e.g., nested under `variants[0]`). Update `_parse_price_cents()` (`lego_client.py:147`) — current candidates are `price.centAmount`, `price.amount`, `priceValue`, `prices[0].centAmount`; new shape may be under `variants[0].price.*`.
+
+**D3 — verify end-to-end.** After D2, re-run:
+- `GET /checkout-debug/lego/element/302421/listing` → expect `available: true`, `listing.price_per_cent > 0`.
+- `GET /checkout-debug/lego/element/302421` → expect `available_on_lego: true`.
+- Run `scripts/test_optimizer.py` to confirm parser changes don't break unit tests.
+
+**Acceptance:** B66 closes when `/checkout-debug/lego/element/302421/listing` returns a valid `SellerListing` and the optimizer's `unsourceable_items` is empty for a known-good order list.
+
+**Related:** This is the empirical bug that surfaced during the 2026-05-23 hardening session. Section `ORDER_OPTIMIZER.md §15 #1, #2, #3` documents the same parser-drift risk that B66 manifests.
 
 ### 4.2 Closed defects (catalog)
 
@@ -468,6 +467,10 @@ For full context on any shipped fix, see git history. One-line summary kept for 
 | B56 | 2026-05-19 | `record_hold` failure rollback now uses `cancel_hold_with_retry`; persistent failures emit `payment.hold_orphan` audit event (vocabulary §2.2). `saga.failed` data extended with `rollback_succeeded` / `rollback_error`. |
 | B57 | 2026-05-19 | `saga_resume._recover_stripe_held` + `_handle_saga_timeout` branch 2 (saga.py) both use the shared `cancel_hold_with_retry` helper (new module `scripts/checkout/_cancel_helpers.py`). Naked `provider.cancel` removed from both sites. |
 | B62 | 2026-05-19 | `CLAUDE.md` `cache.py` block updated — removed stale "Open bug B24" callout; B24's strong-reference fix shipped 2026-05-16. |
+| B58 | 2026-05-23 | `unhandled_exception_handler` returns static `"Internal server error"` + `request_id` correlation token; full exception class/message logged server-side. Closes info-disclosure surface on 500s. |
+| B60 | 2026-05-23 | `real_ip_middleware` (Main.py) parses `X-Forwarded-For` leftmost-first → `request.state.real_ip`. `require_checkout_gate_open` reads from there with graceful fallback. Single-trusted-proxy assumption documented inline. |
+| B59 | 2026-05-23 | `cleanup_terminal_sagas` (jobs_store_pg.py) reaps jobs whose sagas are ALL terminal AND `completed_at < NOW() - JOB_SAGA_RETENTION_DAYS` (default 90d). Atomic per-job transaction; FK-safe delete order: `audit_events → payment_holds → sagas → jobs (CASCADE→checkouts)`. Wired into `cleanup_loop` (Main.py) as a second pass after `cleanup_expired`. JSON-backend no-op. |
+| B30 | 2026-05-23 | Bare-`Exception` branch of `create_hold` now routes to MANUAL_REVIEW with `ERROR_MESSAGES["manual_review"]` + an operator runbook (Stripe Dashboard idempotency-key hint). Audit event upgraded `saga.failed` → `saga.manual_review`. Closes the customer-retry-loop against broken code. New test `test_hold_unexpected_failure_to_manual_review` pins the behavior. |
 
 ---
 

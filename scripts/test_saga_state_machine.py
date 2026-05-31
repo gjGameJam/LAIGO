@@ -60,6 +60,10 @@ class _FakeProvider:
             raise PaymentRetryableError("simulated transient hold failure")
         if self.hold_behavior == "permanent":
             raise PaymentPermanentError("simulated card decline")
+        if self.hold_behavior == "unexpected":
+            # Simulates a code bug or unexpected SDK exception class —
+            # the saga's `except Exception` branch (B30).
+            raise RuntimeError("simulated unexpected SDK exception")
         return PaymentHold(
             hold_id=f"pi_test_{self.calls['create_hold']}",
             amount_authorized_cents=amount_cents,
@@ -290,6 +294,60 @@ async def test_hold_transient_failure_to_failed(tmpdir: Path):
         _teardown()
 
 
+async def test_hold_unexpected_failure_to_manual_review(tmpdir: Path):
+    """Verifies B30: INITIATED -> MANUAL_REVIEW on bare Exception at hold.
+
+    Bugs in our code or the provider SDK surface here. Routing this to FAILED
+    with "transient — retry shortly" creates an infinite customer-retry loop
+    against a broken path with no operator escalation. MANUAL_REVIEW is the
+    only safe terminal state: customer is told it's under review, operator
+    gets a row to investigate.
+    """
+    provider, cstore, lego_client = await _setup(tmpdir)
+    try:
+        provider.hold_behavior = "unexpected"
+        from scripts.checkout import saga
+        from scripts.checkout.models import ERROR_MESSAGES
+
+        job_id = "sm-hold-unexpected"
+        checkout_id = "sm-hold-unexpected-co"
+        await cstore.save(job_id, {
+            "checkout_id": checkout_id,
+            "saga_status": "initiated",
+        })
+
+        await saga.execute_checkout_saga(
+            job_id=job_id,
+            checkout_id=checkout_id,
+            allocation=_make_allocation_lego_only(),
+            payment_method_id="pm_test_unexpected",
+        )
+
+        final = await cstore.load(job_id)
+        assert final["saga_status"] == "manual_review", (
+            f"expected manual_review, got {final['saga_status']!r}"
+        )
+        assert final.get("customer_message") == ERROR_MESSAGES["manual_review"], (
+            "B30: customer must NOT see payment_transient (would cause "
+            "retry-loop). Must see manual_review message instead."
+        )
+        # Operator-facing runbook must include the actionable Stripe lookup hint.
+        runbook = final.get("manual_review_reason") or ""
+        assert "Stripe Dashboard" in runbook, (
+            f"manual_review_reason should reference Stripe Dashboard lookup, got: {runbook!r}"
+        )
+        assert f"hold-{checkout_id}" in runbook, (
+            "manual_review_reason should include the idempotency_key so the "
+            "operator can find the candidate hold quickly"
+        )
+        assert provider.calls["create_hold"] == 1
+        assert provider.calls["capture"] == 0
+        assert provider.calls["cancel"] == 0
+        print("OK: INITIATED -> MANUAL_REVIEW on bare Exception at hold (B30 customer-retry-loop guard)")
+    finally:
+        _teardown()
+
+
 async def test_order_fails_after_hold_to_compensated(tmpdir: Path):
     """Verifies: STRIPE_HELD -> COMPENSATED when LEGO order fails AND cancel succeeds."""
     provider, cstore, lego_client = await _setup(tmpdir)
@@ -510,6 +568,8 @@ async def amain() -> int:
         await test_hold_permanent_failure_to_failed(Path(td2))
     with tempfile.TemporaryDirectory() as td3:
         await test_hold_transient_failure_to_failed(Path(td3))
+    with tempfile.TemporaryDirectory() as td3b:
+        await test_hold_unexpected_failure_to_manual_review(Path(td3b))
     with tempfile.TemporaryDirectory() as td4:
         await test_order_fails_after_hold_to_compensated(Path(td4))
     with tempfile.TemporaryDirectory() as td5:

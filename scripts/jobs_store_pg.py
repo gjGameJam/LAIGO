@@ -498,6 +498,107 @@ async def cleanup_expired() -> list[str]:
     return deleted
 
 
+async def cleanup_terminal_sagas(retention_days: int = 90) -> list[str]:
+    """DELETE jobs whose sagas are ALL terminal AND completed > retention_days ago.
+
+    Companion to `cleanup_expired` — closes B59. `cleanup_expired` handles
+    jobs that never had a `/confirm` (no saga row, FK is empty). This
+    handles the inverse: jobs whose `sagas.job_id` FK blocks deletion even
+    after the saga reached a terminal status. Without it, every confirmed
+    job retains its `outputs/{job_id}/` directory forever — monotonic disk
+    growth.
+
+    Eligibility criteria (all must hold for a job to be deleted):
+      * `jobs.status` is terminal AND `ttl_expires_at` has passed (same
+        gate as `cleanup_expired`).
+      * The job has at least one saga (otherwise `cleanup_expired` already
+        handled it).
+      * EVERY saga referencing this job is in a terminal saga status,
+        has `completed_at` set, AND `completed_at < NOW() - retention_days`.
+        A single non-terminal saga, or one whose `completed_at` is NULL,
+        keeps the job alive. (NULL `completed_at` on a nominally-terminal
+        saga can happen if an operator manually edited `saga_status`
+        without timestamping — treat as still-in-progress, don't auto-clean.)
+
+    Retention default is 90 days — past the typical 60-day chargeback
+    dispute window, with a buffer.
+
+    Deletion order (FK-safe, atomic per job):
+      1. `audit_events WHERE job_id = $1` — no FK, standalone delete.
+      2. `payment_holds WHERE checkout_id IN (SELECT checkout_id FROM
+         checkouts WHERE job_id = $1)` — RESTRICT from checkouts.
+      3. `sagas WHERE job_id = $1` — RESTRICT on both jobs and checkouts.
+      4. `jobs WHERE job_id = $1` — CASCADE to checkouts (no separate
+         step needed).
+
+    Each job is processed in its own transaction so a per-row failure
+    (e.g., a saga just transitioned out of terminal between SELECT and
+    DELETE — won't happen pre-launch but defensive) doesn't poison the
+    batch. Returns the list of successfully-deleted job_ids; caller
+    `rmtree`s the corresponding `outputs/{job_id}/` directories OUTSIDE
+    the transaction.
+
+    Performance note: the eligibility query does a NOT EXISTS subquery
+    against `sagas`. Pre-launch traffic keeps this cheap (sagas table is
+    small). If sagas grows large, add a covering index on
+    `(job_id, saga_status, completed_at)`.
+    """
+    pool = get_pool()
+    candidate_rows = await pool.fetch(
+        """
+        SELECT j.job_id
+        FROM jobs j
+        WHERE j.status IN ('complete', 'failed', 'timed_out')
+          AND j.ttl_expires_at < NOW()
+          AND EXISTS (SELECT 1 FROM sagas s WHERE s.job_id = j.job_id)
+          AND NOT EXISTS (
+            SELECT 1 FROM sagas s
+            WHERE s.job_id = j.job_id
+              AND (
+                s.saga_status NOT IN (
+                  'payment_captured', 'compensated', 'failed', 'manual_review'
+                )
+                OR s.completed_at IS NULL
+                OR s.completed_at > NOW() - make_interval(days => $1)
+              )
+          )
+        """,
+        retention_days,
+    )
+    deleted: list[str] = []
+    for row in candidate_rows:
+        jid = row["job_id"]
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "DELETE FROM audit_events WHERE job_id = $1", jid
+                    )
+                    await conn.execute(
+                        """
+                        DELETE FROM payment_holds
+                        WHERE checkout_id IN (
+                            SELECT checkout_id FROM checkouts WHERE job_id = $1
+                        )
+                        """,
+                        jid,
+                    )
+                    await conn.execute("DELETE FROM sagas WHERE job_id = $1", jid)
+                    await conn.execute("DELETE FROM jobs WHERE job_id = $1", jid)
+            deleted.append(jid)
+        except Exception as exc:
+            logger.error(
+                f"[jobs_store_pg] cleanup_terminal_sagas failed for {jid}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    if deleted:
+        logger.info(
+            f"[jobs_store_pg] cleanup_terminal_sagas reaped {len(deleted)} "
+            f"job(s) past {retention_days}-day retention"
+        )
+    return deleted
+
+
 # ─── Lifecycle: SELECT ───────────────────────────────────────────────────────
 
 

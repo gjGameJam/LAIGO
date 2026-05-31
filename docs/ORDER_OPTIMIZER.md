@@ -206,21 +206,27 @@ async def get_all_listings(
 
 **Seller ID:** `"lego_official"`
 
-**Pricing and availability:** Uses LEGO.com's internal search API (derived from browser network traffic — not a public API):
+**Pricing and availability:** Uses LEGO.com's internal Pick-a-Brick GraphQL endpoint (derived from browser network traffic — not a public API):
 
 ```
-GET https://www.lego.com/api/product/search/en-US
-    ?q={element_id}&page=1&pageSize=10&searchTypes=PickABrick
+POST https://www.lego.com/api/graphql/PickABrickQuery
+Content-Type: application/json
+Body: {"operationName":"PickABrickQuery", "variables":{"input":{"query":"{element_id}", ...}}, "query":"<full GraphQL>"}
 ```
 
-The response is parsed by `_parse_availability()` and `_parse_price_cents()`. If `price_per_cent` comes back as `0` in the debug endpoint, the price field name has changed. To re-derive it:
+Anonymous calls work — no Bearer JWT, no session cookie — but the request must carry browser-realistic headers (`Origin`, `User-Agent`, `x-locale`) and the EXACT GraphQL query string LEGO's frontend emits. Simplifying the query (removing `__typename` selections or fragments) returns HTTP 400 "Validation error". The query string lives in `_LEGO_GRAPHQL_QUERY` in `clients/lego_client.py`.
+
+LEGO retired the legacy REST search (`api/product/search/en-US`) in 2026-05; the silent symptom was every quote routing to unsourceable (B64). The `marketplace.endpoint_unavailable` audit event (alerts P0) now fires on the next such outage.
+
+To re-derive if the endpoint moves again:
 1. Open browser DevTools → Network on `lego.com/en-us/pick-and-build/pick-a-brick`
 2. Search for any element ID
-3. Find the XHR request to the search URL
-4. Locate the price field in the response JSON
-5. Update `_parse_price_cents()` in `clients/lego_client.py`
+3. Find the `PickABrickQuery` POST → Payload → copy the JSON body verbatim
+4. Update `_LEGO_SEARCH_URL`, `_LEGO_GRAPHQL_QUERY`, and the `data.searchElements.results` navigation inside `_search()`
 
-**Availability statuses treated as available:** `instock`, `available`, `limitedavailability`, `available for sale`. All other statuses (including API errors) treat the piece as unavailable — conservative by design to block uncertain orders.
+The response is parsed by `_parse_available()` and `_parse_price_cents()`. Price lives at `results[].price.centAmount`; availability at `results[].availability` (uppercase token, e.g. `"AVAILABLE"`, `"OUT_OF_STOCK"`).
+
+**Availability statuses treated as available:** `instock`, `available`, `limitedavailability`, `available for sale` — case-insensitive, underscores stripped, so the GraphQL token `"AVAILABLE"` matches. All other statuses (including API errors) treat the piece as unavailable — conservative by design to block uncertain orders.
 
 **Shipping:** One flat charge per order (`LEGO_SHIPPING_COST_CENTS`, default `$5.99`). Applied to the `SellerListing` for each element. Because all LEGO.com elements share `seller_id="lego_official"`, the optimizer counts shipping once for the combined LEGO.com allocation entry regardless of how many distinct elements come from LEGO.com.
 

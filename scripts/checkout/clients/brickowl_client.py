@@ -275,7 +275,18 @@ async def get_all_listings(
     """
     Fetch listings for all pieces concurrently, using the TTL cache.
     Returns {element_id: [SellerListing, ...]}.
+
+    Graceful degradation: if BRICKOWL_API_KEY is unset, returns {} so the
+    quote/optimize callers proceed with other sources. Matches the
+    module-level contract documented at the top of this file.
     """
+    if not os.environ.get("BRICKOWL_API_KEY", ""):
+        logger.warning(
+            "BRICKOWL_API_KEY is not set — skipping BrickOwl listings; "
+            "all pieces will fall through to other sources."
+        )
+        return {}
+
     results: dict[str, list[SellerListing]] = {}
     to_fetch: list[str] = []
 

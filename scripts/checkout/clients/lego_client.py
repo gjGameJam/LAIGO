@@ -6,12 +6,16 @@ Since all LEGO.com items go into one order (one Playwright session), the optimiz
 LEGO.com as a single seller and counts shipping once for the whole order.
 
 Pricing / availability:
-  Uses LEGO.com's internal search API derived from network traffic analysis of the
-  Pick-a-Brick page. Not a public API — may break if LEGO updates their frontend.
-  To re-derive the endpoint: open DevTools → Network on
+  Uses LEGO.com's internal Pick-a-Brick GraphQL endpoint (POST to
+  /api/graphql/PickABrickQuery). Derived from network traffic analysis — not
+  a public API. Anonymous calls work; LEGO previously ran a REST search
+  endpoint (api/product/search/en-US) which was retired in 2026-05.
+  To re-derive if it moves again: open DevTools → Network on
     https://www.lego.com/en-us/pick-and-build/pick-a-brick
-  search for any element ID, and find the XHR request returning product data.
-  Update _LEGO_SEARCH_URL and the field mappings in _parse_result() below.
+  search for any element ID, find the PickABrickQuery POST, copy the request
+  body verbatim (LEGO validates the exact GraphQL shape — simplification
+  trips a 400 "Validation error"). Update _LEGO_SEARCH_URL, _LEGO_GRAPHQL_QUERY,
+  and the field navigation inside _search() below.
 
 Shipping:
   LEGO.com charges flat shipping per order (LEGO_SHIPPING_COST_CENTS env var, default
@@ -40,6 +44,7 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 
 from ..models import SellerListing, StockoutError
 from ..cache import cache_get, cache_set, cache_delete
+from .. import audit
 
 logger = logging.getLogger("laigo")
 
@@ -51,13 +56,102 @@ SELLER_NAME = "LEGO.com"
 _SHIPPING_COST_CENTS = int(os.environ.get("LEGO_SHIPPING_COST_CENTS", "599"))
 _MAX_QTY_PER_ITEM = int(os.environ.get("LEGO_MAX_QTY_PER_ITEM", "9999"))
 
-# LEGO.com internal search endpoint (verify against live network traffic if broken)
-_LEGO_SEARCH_URL = "https://www.lego.com/api/product/search/en-US"
+# LEGO.com Pick-a-Brick GraphQL endpoint. As of 2026-05 the legacy REST search
+# (api/product/search/en-US) was retired and replaced by this Apollo-style
+# GraphQL POST. Anonymous calls work — no JWT, no session cookie — provided
+# Origin, User-Agent, x-locale, and the EXACT query string below are sent.
+# Simplifying the query (removing __typename or fragments) trips the server-side
+# validator with HTTP 400 "Validation error". Re-derive against live network
+# traffic if this breaks: DevTools → Network → PickABrickQuery → Payload.
+_LEGO_SEARCH_URL = "https://www.lego.com/api/graphql/PickABrickQuery"
 _SEARCH_TIMEOUT = 10.0
 _AVAIL_CACHE_TTL = 1800   # 30 minutes
 _PRICE_CACHE_TTL = 3600   # 1 hour
 
+# Headers must be browser-realistic — Cloudflare in front of LEGO.com challenges
+# default httpx UAs. The set below has been verified against the live endpoint.
+_LEGO_SEARCH_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Content-Type": "application/json",
+    "Origin": "https://www.lego.com",
+    "Referer": "https://www.lego.com/en-us/pick-and-build/pick-a-brick",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
+    ),
+    "x-locale": "en-US",
+}
+
+# Exact GraphQL query string LEGO's Pick-a-Brick frontend emits. Whitespace
+# doesn't matter to GraphQL validators, but field selections and fragments do —
+# leave this alone unless re-deriving from a fresh DevTools capture.
+_LEGO_GRAPHQL_QUERY = (
+    "query PickABrickQuery($input: ElementQueryInput!, $sku: String) {\n"
+    "  searchElements(input: $input) {\n"
+    "    results { ...ElementLeaf __typename }\n"
+    "    facets { ...FacetData __typename }\n"
+    "    set {\n"
+    "      id type name imageUrl instructionsUrl pieces inStock\n"
+    "      price { formattedAmount __typename }\n"
+    "      __typename\n"
+    "    }\n"
+    "    total count __typename\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "fragment FacetData on Facet {\n"
+    "  id key name\n"
+    "  labels {\n"
+    "    count key name\n"
+    "    children {\n"
+    "      count key name\n"
+    "      ... on FacetValue { value __typename }\n"
+    "      __typename\n"
+    "    }\n"
+    "    ... on FacetValue { value __typename }\n"
+    "    ... on FacetRange { from to __typename }\n"
+    "    __typename\n"
+    "  }\n"
+    "  __typename\n"
+    "}\n"
+    "\n"
+    "fragment ElementLeaf on SearchResultElement {\n"
+    "  id designId collapseDesignId name imageUrl maxOrderQuantity deliveryChannel\n"
+    "  colorHex contrastColorHex\n"
+    "  price { centAmount formattedAmount currencyCode formattedValue __typename }\n"
+    "  quantityInSet(sku: $sku)\n"
+    "  facets {\n"
+    "    category { ...ElementFacetCategory __typename }\n"
+    "    subcategory { ...ElementFacetCategory __typename }\n"
+    "    color { ...ElementFacetCategory __typename }\n"
+    "    colorFamily { ...ElementFacetCategory __typename }\n"
+    "    system __typename\n"
+    "  }\n"
+    "  siblings {\n"
+    "    id colorHex contrastColorHex availability\n"
+    "    price { formattedAmount formattedValue __typename }\n"
+    "    __typename\n"
+    "  }\n"
+    "  availability __typename\n"
+    "}\n"
+    "\n"
+    "fragment ElementFacetCategory on ElementCategory { name key __typename }"
+)
+
+# `availability` is now a single uppercase token in the GraphQL response
+# ("AVAILABLE" / "OUT_OF_STOCK"). `_parse_available` lowercases + strips
+# underscores, so "AVAILABLE" → "available" → matches the set below.
+# Older legacy tokens kept for defensive parsing in case LEGO ships a mixed
+# response during catalog migrations.
 _AVAILABLE_STATUSES = {"instock", "available", "limitedavailability", "available for sale"}
+
+# Once-per-process dedup for endpoint-outage alerts. Key: (status_code, url).
+# Distinct outage classes still alert, but a single 50-element quote against
+# a dead endpoint produces one CRITICAL line + one audit row, not fifty. The
+# set is cleared by process restart (intentional — operator decides when to
+# re-arm by restarting after a fix).
+_OUTAGE_ALERTED: set[tuple[int, str]] = set()
 
 # Playwright config
 LEGO_EMAIL    = os.environ.get("LEGO_EMAIL", "")
@@ -81,39 +175,98 @@ async def _search(element_id: str) -> Optional[dict]:
     if cached is not None:
         return cached
 
+    body = {
+        "operationName": "PickABrickQuery",
+        "variables": {
+            "input": {
+                "page": 1,
+                "perPage": 50,
+                "sort": {"key": "RELEVANCE", "direction": "DESC"},
+                # Ask for both states so an out-of-stock element still returns
+                # one result with availability="OUT_OF_STOCK" (instead of zero
+                # results, which would conflate OOS with "not in catalog").
+                "availability": ["AVAILABLE", "OUT_OF_STOCK"],
+                "query": str(element_id),
+                "fetchSiblings": True,
+            }
+        },
+        "query": _LEGO_GRAPHQL_QUERY,
+    }
+
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            resp = await client.post(
                 _LEGO_SEARCH_URL,
-                params={
-                    "q": element_id,
-                    "page": 1,
-                    "pageSize": 10,
-                    "searchTypes": "PickABrick",
-                },
-                headers={
-                    "Accept": "application/json",
-                    "Accept-Language": "en-US",
-                    "User-Agent": "Mozilla/5.0 (compatible; LAIGO/1.0)",
-                },
+                json=body,
+                headers=_LEGO_SEARCH_HEADERS,
                 timeout=_SEARCH_TIMEOUT,
                 follow_redirects=True,
             )
             resp.raise_for_status()
             data = resp.json()
 
-        # Find the matching result
-        for item in data.get("results", []):
-            item_eid = str(item.get("elementId", item.get("id", "")))
-            if item_eid == str(element_id):
+        results = (
+            data.get("data", {}).get("searchElements", {}).get("results", [])
+        )
+        for item in results:
+            if str(item.get("id", "")) == str(element_id):
                 await cache_set(cache_key, item, _PRICE_CACHE_TTL)
                 return item
 
         await cache_set(cache_key, None, _AVAIL_CACHE_TTL)
         return None
 
+    except httpx.HTTPStatusError as exc:
+        # Marketplace endpoint returned a non-success status. 429 is transient
+        # (rate limit) — log, skip the alert, let the caller retry next quote.
+        # Everything else is an endpoint-down signal: route gone (404), auth
+        # broken (401/403), server down (5xx). Without the alert, the symptom
+        # presents as "every quote is 100% unsourceable" with no P0 signal —
+        # the exact failure mode that lost LEGO sourcing in 2026-05.
+        status = exc.response.status_code
+        if status == 429:
+            logger.warning(
+                f"LEGO.com search rate-limited (HTTP 429) for element {element_id}"
+            )
+            return None
+
+        key = (status, _LEGO_SEARCH_URL)
+        if key not in _OUTAGE_ALERTED:
+            _OUTAGE_ALERTED.add(key)
+            logger.critical(
+                f"[outage] LEGO.com search endpoint returned HTTP {status} at "
+                f"{_LEGO_SEARCH_URL!r} — every quote will route to unsourceable "
+                f"until the endpoint is restored or _LEGO_SEARCH_URL is "
+                f"re-derived against live Pick-a-Brick traffic. First element "
+                f"that hit this: {element_id}."
+            )
+            await audit.emit(
+                "marketplace.endpoint_unavailable",
+                data={
+                    "seller_id": SELLER_ID,
+                    "endpoint": "search",
+                    "status_code": status,
+                    "url": _LEGO_SEARCH_URL,
+                    "triggered_by_element": element_id,
+                },
+            )
+        return None
+
+    except httpx.RequestError as exc:
+        # Network-class error (timeout, DNS, connection reset). Element-scope
+        # rather than endpoint-down. Log per element; do not alert.
+        logger.warning(
+            f"LEGO.com search network error for element {element_id}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+
     except Exception as exc:
-        logger.warning(f"LEGO.com search failed for element {element_id}: {exc}")
+        # JSON parse / unexpected shape / programmer error. Element-scope.
+        logger.warning(
+            f"LEGO.com search failed for element {element_id}: "
+            f"{type(exc).__name__}: {exc}"
+        )
         return None
 
 

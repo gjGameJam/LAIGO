@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import uuid
 import os
+import secrets
 import shutil
 import time
 import threading
@@ -59,6 +60,10 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 600))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", 1800))
+# Retention for jobs with terminal sagas (B59). Default 90d is past the
+# 60d chargeback dispute window, with a buffer. Set to a smaller value
+# (e.g. 7) in staging if testing the cleanup path.
+JOB_SAGA_RETENTION_DAYS = int(os.getenv("JOB_SAGA_RETENTION_DAYS", 90))
 # Keep single-worker behavior for now; queueing controls waiting jobs.
 MAX_WORKERS = 1
 MAX_QUEUE_SIZE = 20
@@ -97,6 +102,7 @@ log.info(f"MAX_QUEUE_SIZE:   {MAX_QUEUE_SIZE}")
 log.info(f"JOB_TTL_SECONDS:  {JOB_TTL_SECONDS}")
 log.info(f"CLEANUP_INTERVAL: {CLEANUP_INTERVAL}")
 log.info(f"JOB_TIMEOUT:      {JOB_TIMEOUT_SECONDS}s")
+log.info(f"JOB_SAGA_RETENTION_DAYS: {JOB_SAGA_RETENTION_DAYS}")
 log.info(f"MAX_UPLOAD_MB:    {upload_mbs}")
 log.info(f"STUDS_PER_BLOCK:  {STUDS_PER_BLOCK}")
 
@@ -456,20 +462,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# -----------------------------
+# X-FORWARDED-FOR MIDDLEWARE (B60)
+# -----------------------------
+# Resolves the real customer IP from `X-Forwarded-For` and stashes it on
+# `request.state.real_ip`. Read by checkout/dependencies.py for audit
+# actor.ip; intended as the single source of truth for any future
+# request-scope IP need (rate limiting, abuse detection, request logging).
+#
+# Trust model — single proxy: Render is the ONLY trusted hop in front of this
+# app. Render appends the immediate client IP as the leftmost XFF entry, so
+# XFF[0] is the real customer. We take it unconditionally.
+#
+# DO NOT extend this to skip multiple hops or accept untrusted XFF without
+# also adding an explicit allowlist of trusted proxy IPs — otherwise any
+# client can spoof their source IP by sending their own XFF header.
+@app.middleware("http")
+async def real_ip_middleware(request: Request, call_next):
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # "client, proxy1, proxy2, ..." — leftmost is the original client.
+        first = xff.split(",", 1)[0].strip()
+        request.state.real_ip = first or (request.client.host if request.client else None)
+    else:
+        request.state.real_ip = request.client.host if request.client else None
+    return await call_next(request)
+
+
 # -----------------------------
 # GLOBAL EXCEPTION HANDLER
 # Catches any unhandled exception in a route so it never fails silently
 # -----------------------------
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    # B58: do NOT echo exception class/message to the client (info disclosure).
+    # Operator greps laigo.log for request_id to find the full traceback.
+    request_id = secrets.token_hex(8)
     log.error(
-        f"Unhandled exception on {request.method} {request.url}: "
+        f"Unhandled exception [request_id={request_id}] on {request.method} {request.url}: "
         f"{type(exc).__name__}: {exc}",
         exc_info=True
     )
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"}
+        content={"detail": "Internal server error", "request_id": request_id}
     )
 
 
@@ -1440,20 +1477,35 @@ async def download(job_id: str):
 def cleanup_loop(app: FastAPI):
     """Periodically reap expired terminal jobs.
 
-    Phase D step 2 S7 — delegates the "find expired terminals" scan to
-    `jobs_store.cleanup_expired()`, which returns the list of deleted
-    job_ids. We then rmtree each output directory and drop any leftover
-    runtime side-table entries (defensive: terminal transitions already
-    clean these, but a server restart that interrupted a terminal path
-    could leave stragglers).
+    Two passes per tick:
+      1. `cleanup_expired` — jobs that never had a /confirm (sagas FK
+         empty). Original Phase D step 2 S7 behavior.
+      2. `cleanup_terminal_sagas` — jobs whose sagas are ALL terminal and
+         past the retention window (B59). Without this pass, every
+         confirmed job retains its outputs/{job_id}/ directory forever
+         because `sagas.job_id REFERENCES jobs ON DELETE RESTRICT`.
+
+    Both return the list of deleted job_ids so we can rmtree the output
+    directories and drop any leftover runtime side-table entries
+    (defensive: terminal transitions already clean these, but a server
+    restart that interrupted a terminal path could leave stragglers).
     """
     clog = logging.getLogger("laigo.cleanup")
     while True:
         try:
-            deleted_ids = _run_coro_blocking(
+            deleted_ids: list[str] = _run_coro_blocking(
                 jobs_store.cleanup_expired(),
                 app.state.event_loop,
                 timeout=30.0,
+            )
+            # B59 second pass — confirmed jobs past saga retention window.
+            # No-op on the JSON backend; cheap NOT EXISTS query on PG.
+            deleted_ids.extend(
+                _run_coro_blocking(
+                    jobs_store.cleanup_terminal_sagas(JOB_SAGA_RETENTION_DAYS),
+                    app.state.event_loop,
+                    timeout=30.0,
+                )
             )
             for jid in deleted_ids:
                 try:

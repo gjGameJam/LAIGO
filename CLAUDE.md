@@ -114,6 +114,7 @@ All runtime knobs live in `.env` (committed — no secrets):
 | `JOB_TTL_SECONDS` | 600 | 3600 | Seconds before completed jobs are purged |
 | `JOB_TIMEOUT_SECONDS` | 1800 | — (not set, uses code default) | Max seconds a running job may take before forced failure |
 | `CLEANUP_INTERVAL` | 300 | — (not set, uses code default) | How often the cleanup thread runs (seconds) |
+| `JOB_SAGA_RETENTION_DAYS` | 90 | — (not set, uses code default) | B59: jobs with terminal sagas are reaped when `sagas.completed_at` is older than this many days. 90d is past the 60d chargeback dispute window. |
 | `MAX_UPLOAD_SIZE_MB` | 250 | 250 | Max upload file size |
 | `DEBUG` | False | True | Enables debug-level logging |
 | `FRONTEND_ORIGIN` | — | set but **unused** | CORS origins are hardcoded in `Main.py`, not read from env |
@@ -149,7 +150,7 @@ All runtime knobs live in `.env` (committed — no secrets):
 - `ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1)` — single worker, respawned after every job to release numpy/mediapipe/PIL memory back to the OS
 - A Python `queue.Queue(maxsize=20)` decouples HTTP intake from the executor; a scheduler thread drains it
 - Progress is tracked by writing a percentage to a small `.progress` file in `inputs/` rather than a multiprocessing Manager
-- A cleanup thread (`CLEANUP_INTERVAL` seconds) evicts finished jobs older than `JOB_TTL_SECONDS` and deletes their output dirs
+- A cleanup thread (`CLEANUP_INTERVAL` seconds) runs two passes per tick: (1) `cleanup_expired` evicts finished jobs older than `JOB_TTL_SECONDS` whose FK is empty (no /confirm); (2) `cleanup_terminal_sagas` reaps jobs with terminal sagas past `JOB_SAGA_RETENTION_DAYS`. Both delete their output dirs.
 
 ### Mosaic types
 

@@ -315,8 +315,12 @@ async def _l3_test_disabled():
     reg._reset_for_tests()
     try:
         # Build a minimal Request-shaped stub. The dependency reads:
-        #   request.client.host, request.headers.get(...), request.path_params.get(...)
+        #   request.state.real_ip, request.client.host, request.headers.get(...),
+        #   request.path_params.get(...)
+        # state.real_ip is populated by real_ip_middleware (B60) in prod; the
+        # stub sets it explicitly to mirror the post-middleware shape.
         fake_request = SimpleNamespace(
+            state=SimpleNamespace(real_ip="127.0.0.1"),
             client=SimpleNamespace(host="127.0.0.1"),
             headers={"user-agent": "test-suite"},
             path_params={"job_id": "test-job-1"},

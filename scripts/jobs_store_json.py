@@ -405,6 +405,21 @@ async def cleanup_expired() -> list[str]:
     return to_delete
 
 
+async def cleanup_terminal_sagas(retention_days: int = 90) -> list[str]:
+    """No-op on the JSON backend.
+
+    The PG-side companion (`jobs_store_pg.cleanup_terminal_sagas`) reaps
+    jobs whose `sagas.job_id` FK had been blocking deletion via
+    `cleanup_expired`. The JSON backend has no `sagas` table — the saga
+    state lives in `outputs/{job_id}/checkout_state.json` and is unlinked
+    from `jobs_store_json`. There is no FK to walk and no equivalent
+    cleanup to perform here.
+
+    Disappears with the JSON backend post-Phase-F.
+    """
+    return []
+
+
 # ─── Lifecycle: SELECT ───────────────────────────────────────────────────────
 
 

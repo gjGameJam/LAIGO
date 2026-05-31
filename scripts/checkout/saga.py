@@ -987,25 +987,47 @@ async def _execute_checkout_saga_inner(
         )
         return
     except Exception as exc:
-        # Unexpected non-provider error — bug in our code or in the SDK.
-        # Treat as transient from the customer's perspective: don't blame the
-        # card (this might not even be card-related); they should retry.
+        # B30: unexpected non-provider error — almost certainly a bug in our
+        # code or the provider SDK (genuine Stripe errors arrive as
+        # PaymentRetryableError / PaymentPermanentError per the provider
+        # contract in payment/base.py). Routing this to FAILED with a
+        # "transient — retry shortly" message creates an infinite retry loop
+        # against a broken path and never escalates to an operator. Route to
+        # MANUAL_REVIEW instead so the customer is told someone is looking
+        # at it AND the operator gets a row to investigate.
+        #
+        # Hold state at this point is ambiguous: the exception may have
+        # raised before any Stripe API call (no hold) or mid-flight (hold
+        # may or may not exist at Stripe). The runbook below tells the
+        # operator to verify via the Stripe Dashboard.
+        runbook = (
+            "Unexpected exception during create_hold. Provider contract "
+            "was bypassed (non-PaymentError class). Check Stripe Dashboard "
+            "for any hold with idempotency_key='hold-" + checkout_id + "'; "
+            "if present and authorized, cancel manually. Then investigate "
+            "the originating exception in laigo.log via the saga audit "
+            "trail. Customer was told their order is under review."
+        )
         await checkout_store.update(job_id, {
-            "saga_status": SagaStatus.FAILED,
+            "saga_status": SagaStatus.MANUAL_REVIEW,
             "error": f"Payment hold failed unexpectedly: {exc}",
-            "customer_message": ERROR_MESSAGES["payment_transient"],
+            "customer_message": ERROR_MESSAGES["manual_review"],
+            "manual_review_reason": runbook,
         })
         await audit.emit(
-            "saga.failed",
+            "saga.manual_review",
             subject={"job_id": job_id, "checkout_id": checkout_id},
             data={
                 "reason": "hold_unexpected",
-                "error_message": str(exc),
+                "hold_id": None,
+                "authorized_cents": None,
+                "last_error": str(exc),
                 "error_class": type(exc).__name__,
             },
         )
         logger.error(
-            f"[saga] [{checkout_id}] Hold failed unexpectedly", exc_info=True
+            f"[saga] [{checkout_id}] Hold failed unexpectedly — routed to MANUAL_REVIEW",
+            exc_info=True,
         )
         return
 
