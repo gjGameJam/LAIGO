@@ -53,7 +53,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .models import AllocationResult, ERROR_MESSAGES, HoldDisposition, SagaStatus, StockoutError
+from .models import AllocationResult, ERROR_MESSAGES, HoldDisposition, LegoSessionExpiredError, SagaStatus, StockoutError
 from . import audit
 from ._cancel_helpers import cancel_hold_with_retry
 from . import checkout_store_dispatch as checkout_store
@@ -1376,6 +1376,64 @@ async def _execute_checkout_saga_inner(
                     job_id,
                     original_error=f"LEGO.com stockout (no retry path): {exc}",
                     extra_brickowl_orders=placed_brickowl_ids,
+                )
+                return
+            except LegoSessionExpiredError as exc:
+                # LEGO Playwright session is missing or no longer valid.
+                # Distinct from generic Exception below because the recovery
+                # path is operator-led, not automated: an operator runs
+                # `python -m scripts.seed_lego_session` to refresh the cached
+                # storage_state, then completes this order out-of-band.
+                #
+                # Hold-the-position semantics (vs. _compensate's clean rollback):
+                #   - DO NOT cancel BrickOwl orders. They're already real;
+                #     cancelling them only to potentially re-place them when
+                #     the operator finishes is wasted shipping + restocking
+                #     friction at the seller.
+                #   - DO NOT cancel the Stripe hold. The operator captures it
+                #     once the LEGO order is placed out-of-band, OR cancels
+                #     it if they decide to refund. hold_disposition=
+                #     OPERATOR_DECIDES tells the orphan-hold reconciler to
+                #     keep its hands off (B55).
+                #   - Customer sees the deliberately vague "finalizing"
+                #     message; we do not surface "our automation broke."
+                #   - Audit event 'lego.session_expired' is the operator
+                #     signal — should page on first occurrence in prod.
+                logger.critical(
+                    f"[saga] [{checkout_id}] LEGO session unavailable "
+                    f"(reason={exc.reason!r}); routing to MANUAL_REVIEW. "
+                    f"BrickOwl orders placed this run: {list(placed_brickowl_ids)}. "
+                    f"Operator: (1) python -m scripts.seed_lego_session; "
+                    f"(2) place LEGO order out-of-band; "
+                    f"(3) capture or release Stripe hold."
+                )
+                await checkout_store.update(
+                    job_id,
+                    {
+                        "saga_status": SagaStatus.MANUAL_REVIEW,
+                        "manual_review_reason": (
+                            f"LEGO Playwright session unavailable ({exc.reason}). "
+                            f"BrickOwl orders placed: {list(placed_brickowl_ids)}. "
+                            f"LEGO order NOT placed. Stripe hold still authorized. "
+                            f"Runbook: (1) python -m scripts.seed_lego_session; "
+                            f"(2) place LEGO order at lego.com/profile/orders "
+                            f"using the same item list; "
+                            f"(3) capture or release the Stripe hold in dashboard; "
+                            f"(4) notify the customer."
+                        ),
+                        "error": f"LegoSessionExpiredError: {exc.reason}",
+                        "customer_message": ERROR_MESSAGES["lego_session_expired"],
+                        "hold_disposition": HoldDisposition.OPERATOR_DECIDES,
+                    },
+                )
+                await audit.emit(
+                    "lego.session_expired",
+                    subject={"job_id": job_id, "checkout_id": checkout_id},
+                    data={
+                        "reason": exc.reason,
+                        "brickowl_orders_placed": list(placed_brickowl_ids),
+                        "runbook": "python -m scripts.seed_lego_session",
+                    },
                 )
                 return
             except Exception as exc:

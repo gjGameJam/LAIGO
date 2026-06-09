@@ -23,13 +23,33 @@ Shipping:
   of how many elements are sourced from LEGO.com.
 
 Ordering:
-  Uses Playwright Chromium automation. Requires:
-    - LEGO_EMAIL and LEGO_PASSWORD set in .env.secrets
-    - A saved payment method on LAIGO's LEGO.com account
+  Uses Playwright Chromium automation with a cached `storage_state` JSON
+  loaded from the Neon-backed `external_sessions` table (provider='lego').
+  LEGO.com 2FA is email-only — see project memory [[project_lego_2fa]] —
+  so headless login is impossible. Instead the operator seeds the session
+  once via `python -m scripts.seed_lego_session` (headed Playwright, manual
+  Google SSO + email verification) and `order_from_lego` reuses the cached
+  cookies/localStorage on every order.
+
+  When the cached state expires (LEGO rotates session cookies, or the row
+  is missing on a fresh deploy), `order_from_lego` raises
+  `LegoSessionExpiredError` and the saga writes MANUAL_REVIEW with
+  reason='lego_session_expired'. The operator re-runs the seed script to
+  restore service — no redeploy needed.
+
+  Requires:
+    - migration 0003 applied (external_sessions table exists)
+    - a seeded row in external_sessions for provider='lego'
+    - a saved payment method on LAIGO's LEGO.com account
     - `playwright install chromium` run once after pip install
+
   Screenshots are saved to outputs/lego_debug/ on every step and on failure.
   SELECTOR FRAGILITY: LEGO.com is a React SPA. If selectors break, inspect the
   current DOM and update _run_checkout() accordingly.
+
+  DEPRECATED env vars: LEGO_EMAIL / LEGO_PASSWORD are no longer used by the
+  ordering flow (storage_state replaced the headless login). Kept readable
+  for now in case a future fallback path needs them; do not rely on them.
 """
 
 import asyncio
@@ -42,9 +62,10 @@ from typing import Optional
 import httpx
 from playwright.async_api import async_playwright, BrowserContext, Page
 
-from ..models import SellerListing, StockoutError
+from ..models import SellerListing, StockoutError, LegoSessionExpiredError
 from ..cache import cache_get, cache_set, cache_delete
 from .. import audit
+from .. import lego_session_store
 
 logger = logging.getLogger("laigo")
 
@@ -154,12 +175,16 @@ _AVAILABLE_STATUSES = {"instock", "available", "limitedavailability", "available
 _OUTAGE_ALERTED: set[tuple[int, str]] = set()
 
 # Playwright config
+# LEGO_EMAIL / LEGO_PASSWORD are deprecated — replaced by storage_state caching
+# via lego_session_store (see module docstring). Kept readable so a future
+# fallback path can re-use them without re-adding env var plumbing.
 LEGO_EMAIL    = os.environ.get("LEGO_EMAIL", "")
 LEGO_PASSWORD = os.environ.get("LEGO_PASSWORD", "")
 _TIMEOUT_MS   = int(os.environ.get("LEGO_FALLBACK_TIMEOUT_SECONDS", "90")) * 1000
 _DEBUG_DIR    = Path(os.environ.get("OUTPUT_DIR", "./outputs")).resolve() / "lego_debug"
 _LEGO_BASE    = "https://www.lego.com/en-us"
 _LOGIN_URL    = f"{_LEGO_BASE}/profile/login"
+_PROFILE_URL  = f"{_LEGO_BASE}/profile"
 _PAB_URL      = f"{_LEGO_BASE}/pick-and-build/pick-a-brick"
 
 
@@ -430,31 +455,48 @@ async def order_from_lego(
     job_id: str,
 ) -> str:
     """
-    Log into LEGO.com with LAIGO's account, upload items to Pick-a-Brick,
+    Load the cached LEGO.com session, upload items to Pick-a-Brick,
     and complete checkout. Returns the LEGO.com order confirmation number.
 
     Requires:
-      - LEGO_EMAIL and LEGO_PASSWORD set in .env.secrets
-      - A saved payment method on LAIGO's LEGO.com account
+      - migration 0003 applied (external_sessions table exists)
+      - a seeded row in external_sessions for provider='lego' (run
+        `python -m scripts.seed_lego_session` locally to seed)
+      - a saved payment method on LAIGO's LEGO.com account
       - `playwright install chromium` run once after pip install
 
-    Raises RuntimeError on any step failure (screenshots saved first).
+    Raises:
+      LegoSessionExpiredError - cached session is missing ('not_seeded') OR
+        no longer accepted by LEGO.com ('cookie_expired'). Saga catches this
+        and writes MANUAL_REVIEW with reason='lego_session_expired'.
+      StockoutError - LEGO flagged a piece as out of stock at order time.
+        Saga catches this and writes COMPENSATED (no retry — see B8/H9).
+      RuntimeError - any other failure (DOM selector change, network, etc.).
+        Saga catches this generically and routes to _compensate.
     """
-    if not LEGO_EMAIL or not LEGO_PASSWORD:
-        raise RuntimeError(
-            "LEGO_EMAIL and LEGO_PASSWORD must be set in .env.secrets "
-            "for LEGO.com ordering."
-        )
+    storage_state = await lego_session_store.load_storage_state()
+    if storage_state is None:
+        # Fail loud BEFORE launching the browser. Saving the browser-start
+        # cost on a known-broken path also keeps the failure mode crisp:
+        # MANUAL_REVIEW with reason='lego_session_expired' / detail='not_seeded'.
+        raise LegoSessionExpiredError("not_seeded")
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         context: BrowserContext = await browser.new_context(
             viewport={"width": 1280, "height": 800},
             locale="en-US",
+            storage_state=storage_state,
         )
         page: Page = await context.new_page()
         try:
             return await _run_checkout(page, items, job_id)
+        except LegoSessionExpiredError:
+            # Cached state loaded but LEGO bounced us to /profile/login on
+            # the session-probe step. Screenshot for operator diagnosis;
+            # saga writes MANUAL_REVIEW; operator re-seeds.
+            await _screenshot(page, job_id, "ERROR_lego_session_expired")
+            raise
         except StockoutError:
             # B33: preserve StockoutError so saga's B8/H9 branch can match.
             # Wrapping as RuntimeError silently defeats the documented contract
@@ -470,15 +512,23 @@ async def order_from_lego(
 
 
 async def _run_checkout(page: Page, items: list[dict], job_id: str) -> str:
-    # ── Step A: Log in ────────────────────────────────────────────────────────
-    logger.info(f"[lego_client] [{job_id}] navigating to login")
-    await page.goto(_LOGIN_URL, timeout=_TIMEOUT_MS)
+    # ── Step A: Verify cached session still works ────────────────────────────
+    # Navigate to /profile (a logged-in-only page). If LEGO accepted the cached
+    # cookies, we stay on /profile/<something>. If they're expired, LEGO
+    # redirects us to /profile/login and we fail loud with cookie_expired.
+    # This probe is cheap (~1 navigation) and isolates "session dead" from
+    # "DOM selector changed" — without it, an expired session presents as a
+    # generic selector-not-found error and routes through the wrong saga branch.
+    logger.info(f"[lego_client] [{job_id}] verifying cached session")
+    await page.goto(_PROFILE_URL, timeout=_TIMEOUT_MS)
     await page.wait_for_load_state("networkidle", timeout=_TIMEOUT_MS)
-    await page.fill("[data-test='email-input']", LEGO_EMAIL)
-    await page.fill("[data-test='password-input']", LEGO_PASSWORD)
-    await page.click("[data-test='login-button']")
-    await page.wait_for_url("**/profile/**", timeout=_TIMEOUT_MS)
-    await _screenshot(page, job_id, "01_logged_in")
+    if "/login" in page.url:
+        logger.warning(
+            f"[lego_client] [{job_id}] session probe redirected to "
+            f"{page.url!r} — cached storage_state is no longer valid."
+        )
+        raise LegoSessionExpiredError("cookie_expired")
+    await _screenshot(page, job_id, "01_session_ok")
 
     # ── Step B: Navigate to Pick-a-Brick ─────────────────────────────────────
     await page.goto(_PAB_URL, timeout=_TIMEOUT_MS)

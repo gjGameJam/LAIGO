@@ -173,6 +173,7 @@ Frozen schema. New events extend `data`; never rename top-level keys.
 | `payment.cancelled` | Cancel via provider | `{hold_id, reason?}` |
 | `payment.hold_orphan` | Hold authorized at Stripe but rollback could not release it (B56). Saga writes FAILED with no payment_holds row, so this event is the only persistent record. | `{hold_id, amount_authorized_cents, currency, reason, record_hold_error?, cancel_error?}` — **always alerts** |
 | `payment.skipped` | (LEGACY — must never appear in prod after L4) | `{reason}` |
+| `lego.session_expired` | `lego_client.order_from_lego` raised `LegoSessionExpiredError`. Cached Playwright `storage_state` was missing (`not_seeded`) or no longer accepted by LEGO.com (`cookie_expired`). Saga writes MANUAL_REVIEW with `hold_disposition=operator_decides` — hold + BrickOwl orders preserved. Refresh runbook: `python -m scripts.seed_lego_session`. See `docs/LEGO_SESSION.md`. | `{reason, brickowl_orders_placed, runbook}` — **always alerts** |
 
 A non-zero `payment.skipped` count in production is **a P0 page**. The event is wired only to detect a regression that would otherwise reintroduce RPN #1.
 
@@ -231,6 +232,7 @@ Keep existing `logger.warning/info` lines for one month after each call-site mig
 | Any `event="marketplace.cancel_failed"` | Manual review needed | Slack notify with order_id |
 | Any `event="marketplace.endpoint_unavailable"` | Sourcing for one marketplace is silently down — every quote routes affected pieces to unsourceable until restored. | **Page on-call** — re-derive endpoint URL/fields against live traffic (DevTools on the marketplace's purchase page), patch the client, restart to re-arm the dedup |
 | Any `event="saga.manual_review"` | Operator action required | Slack notify with reason |
+| Any `event="lego.session_expired"` | LEGO Playwright session needs refresh; every subsequent order will fail the same way until fixed. | **Page on-call** — run `python -m scripts.seed_lego_session` (see `docs/LEGO_SESSION.md`) |
 | `count(event="saga.failed") / count(event="saga.started") > 0.05 in 1h` | Reliability drop | Slack notify |
 
 ---

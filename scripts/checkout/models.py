@@ -152,6 +152,12 @@ ERROR_MESSAGES: dict[str, str] = {
     "drift_buffer":        "The price of your order changed. Please request a new quote.",
     "gate_closed":         "Checkout is temporarily unavailable. Please try again shortly.",
     "timeout":             "Your order took longer than expected. Our team is reviewing — no action required.",
+    # LEGO.com Playwright session expired or never seeded. Saga routes to
+    # MANUAL_REVIEW; an operator re-seeds via scripts/seed_lego_session.py.
+    # Customer-facing wording is intentionally vague — we don't want to expose
+    # "our automation broke" to the customer; the order WILL ship, just on a
+    # slightly delayed manual track.
+    "lego_session_expired": "Finalizing your order. You will get an email soon.",
 }
 
 
@@ -163,6 +169,28 @@ class StockoutError(Exception):
     def __init__(self, element_id: str):
         self.element_id = element_id
         super().__init__(f"Stockout: element {element_id} is no longer available")
+
+
+class LegoSessionExpiredError(Exception):
+    """Raised by lego_client.order_from_lego when the cached Playwright
+    storage_state is missing or no longer valid for LAIGO's LEGO.com account.
+
+    Caught by the saga's LEGO ordering section and routed to MANUAL_REVIEW
+    with manual_review_reason='lego_session_expired'. An operator then
+    re-seeds the session by running `python -m scripts.seed_lego_session`
+    locally and completing Google SSO in the headed browser.
+
+    `reason` is one of:
+      'not_seeded'     — no row exists in external_sessions for provider='lego'
+                         (initial deploy, or someone deleted the row)
+      'cookie_expired' — Playwright loaded the cached state but the LEGO.com
+                         redirected us to /profile/login on the first
+                         logged-in-only navigation, meaning the cookies are
+                         no longer accepted
+    """
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"LEGO session unavailable: {reason}")
 
 
 # ── Status response ───────────────────────────────────────────────────────────

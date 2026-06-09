@@ -99,7 +99,9 @@ GET /jobs/{id}/checkout/{co_id}/status
 |---|---|---|
 | LEGO.com pricing via search API | ✅ Implemented | Field names unverified — test `GET /checkout-debug/lego/element/{id}/listing` |
 | LEGO.com availability check | ✅ Implemented | Endpoint unverified against live traffic |
-| LEGO.com Playwright ordering | ✅ Implemented | Selectors unverified; test with `headless=False` before prod |
+| LEGO.com Playwright login | 🟡 Verified up to password screen (2026-06-03) | Real flow is 3-step OAuth via `identity.lego.com`, not the single-form scaffold in `_run_checkout()`. Verified selectors live in `scripts/checkout/manual_lego_test.py`; need to be ported back into `lego_client.py`. |
+| LEGO.com Playwright cart upload + checkout | ❌ Unverified | All selectors in `_run_checkout()` Steps C–E are scaffold guesses. Continue verification via `manual_lego_test.py` Step 2 onward. |
+| LEGO.com Playwright place-order click | ⛔ Gated | Per [payment architecture decision](../scripts/checkout/manual_lego_test.py) 2026-05-31 LAIGO uses its own saved card and accepts chargeback liability — but the click that places a real order is intentionally not wired until end-to-end test strategy is finalized (sandbox? throwaway low-$ orders cancelled via lego.com/profile/orders?). |
 | BrickOwl BOID lookup | ✅ Working | — |
 | BrickOwl catalog/availability | ❌ Blocked | Must contact BrickOwl at brickowl.com/contact to request access |
 | BrickOwl order placement | ❌ No API | BrickOwl is a seller API; no buyer order/create endpoint exists |
@@ -239,14 +241,30 @@ The response is parsed by `_parse_available()` and `_parse_price_cents()`. Price
 - Availability: piggybacked on raw result cache
 
 **Playwright ordering** (`order_from_lego`):
-1. Launches headless Chromium
-2. Logs in at `lego.com/en-us/profile/login`
-3. Navigates to Pick-a-Brick
-4. Uploads item list as JSON via file input
-5. Clicks "Add to Cart" → proceeds to checkout → clicks "Place Order"
-6. Extracts and returns the confirmation number
 
-Debug screenshots saved after every step (numbered `01_logged_in` → `05_confirmed`) and as `ERROR_final_state` on any failure. Location: `outputs/lego_debug/{job_id}_{label}.png`.
+⚠️ **The flow encoded in `_run_checkout()` today is partially wrong** and partially unverified. Verification work began 2026-06-02 against live LEGO.com; the real flow and verified selectors are tracked incrementally in `scripts/checkout/manual_lego_test.py` (a throwaway harness — verified selectors get ported back into `_run_checkout()` only after each step is confirmed end-to-end).
+
+**Real flow (as discovered against live site, 2026-06-02 → 2026-06-03):**
+
+| Step | What happens | Verified? | Selector(s) |
+|---|---|---|---|
+| 0 | Land on any lego.com URL → fresh-session popups appear (age gate + cookie banner). They are scoped to the first navigation only; cookies persist across redirects within the session, so they do NOT re-appear on identity.lego.com or post-login. | ✅ 2026-06-03 | Age gate: `[data-test='age-gate-grown-up-cta']`. Cookie accept: `[data-test='cookie-accept-all']`. (LEGO defers popup JS until after `networkidle` fires — wait per-locator, not for networkidle.) |
+| 1a | Click header "Sign In" → opens auth dialog on the same page | ✅ 2026-06-03 | `[data-test='header-account-cta']` |
+| 1b | Click dialog "Sign In" link → redirects to `identity.lego.com/connect/authorize` | ✅ 2026-06-03 | `[data-test='legoid-login-button']` |
+| 1c | On identity.lego.com, fill username, click Continue → renders password screen | ✅ 2026-06-03 | Username: `[data-testid='usernameField']`. Continue: `[data-testid='loginBtn']`. **Note: identity.lego.com uses `data-testid` (no dash); lego.com uses `data-test` (with dash). Same attribute family, different spelling.** |
+| 1d | Fill password, click "Sign in" (same `loginBtn` selector — LEGO reuses the form, only the label changes) → redirects back to `www.lego.com` | 🟡 Selectors known, end-to-end verification pending | Password: `[data-testid='passwordField']`. Submit: `[data-testid='loginBtn']`. |
+| 2 | Navigate to Pick-a-Brick (auto if start URL was PaB) | ❌ Unverified | — |
+| 3 | Upload `order_list.json` via file input | ❌ Unverified | Current scaffold uses `input[type='file']` + `[data-test='add-to-cart-button']` — both guesses. |
+| 4 | Click "Checkout" → wait for `/checkout/**` URL | ❌ Unverified | Current scaffold uses `[data-test='checkout-button']` — guess. |
+| 5 | Verify payment screen renders (saved card already on account) | ❌ Unverified | — |
+| 6 | Click "Place Order" → wait for `[data-test='order-confirmation-number']` | ⛔ **Gated — DO NOT WIRE** | Per payment-architecture decision 2026-05-31, this is a real charge to LAIGO's saved card. Not wired until end-to-end test strategy is finalized. |
+
+**Things that surprised us during verification (worth knowing if this drifts again):**
+- `/profile/login` is NOT a login form — it's a landing page with a "Sign In" header button that opens a modal. Login itself happens on identity.lego.com via OAuth-style redirect.
+- `data-test` vs `data-testid` differ by domain. Easy to mix up; don't try to consolidate.
+- The age gate + cookie banner are rendered by JS that fires AFTER Playwright's `networkidle` event. Use per-locator `wait_for(state="visible")` instead of relying on networkidle.
+
+**Debug screenshots:** dropped at `outputs/lego_debug/` by both `order_from_lego` (numbered `01_logged_in` → `05_confirmed`, `ERROR_final_state`) and the verification harness (numbered `step1_00_pab_loaded` → `step1_06_post_login`).
 
 **LEGO.com order cancellation:** There is no API for this. If the Saga fails after a LEGO.com order is placed, the `_compensate()` function logs a warning with the order ID and instructs manual cancellation at `lego.com/profile/orders`.
 
@@ -775,7 +793,7 @@ Listed in priority order:
 |---|---|---|
 | 1 | Verify LEGO.com pricing field names in `_parse_price_cents()` | Test `GET /checkout-debug/lego/element/{id}/listing` |
 | 2 | Verify LEGO.com availability field names in `_parse_availability()` | Test `GET /checkout-debug/lego/element/{id}` |
-| 3 | Test LEGO.com Playwright ordering with `headless=False` | LEGO.com account with saved payment method |
+| 3 | Finish LEGO.com Playwright verification via `scripts/checkout/manual_lego_test.py` | In progress 2026-06-02 →. Login flow verified through username/password fill (see §6.1 table). Remaining: end-to-end login success, then Steps 2–5 (PaB → cart upload → checkout → payment screen). Step 6 (place-order click) gated on test-strategy decision. After all steps verified, port working selectors back into `lego_client.py::_run_checkout()`. |
 | 4 | Contact BrickOwl for `catalog/availability` API access | See Section 6.2 |
 | 5 | Decide BrickOwl ordering strategy | See Section 17 (BrickOwl Ordering TODO) |
 | 6 | Implement BrickOwl order placement once strategy decided | BrickOwl API access + strategy decision |

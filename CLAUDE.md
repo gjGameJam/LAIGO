@@ -356,6 +356,15 @@ GET /checkout/gate
 - `mark_status` validates against `_ALLOWED_STATUSES = {"requires_capture", "succeeded", "canceled", "unknown"}` regardless of backend; no-op on JSON.
 - Called by `saga.py` after `create_hold` (INSERT), capture (UPDATE → succeeded), cancel (UPDATE → canceled).
 
+#### `checkout/lego_session_store.py` — Playwright `storage_state` cache for LEGO.com
+
+- Public: `async load_storage_state() -> dict | None`, `async save_storage_state(state: dict, notes: str | None = None) -> None`.
+- Backed by the `external_sessions` table (migration `0003`, keyed by `provider`). One row today: `provider='lego'`.
+- `load` returns `None` if the row is absent OR `DB_BACKEND != postgres` (logs WARN); `lego_client.order_from_lego` translates `None` to `LegoSessionExpiredError('not_seeded')`.
+- `save` UPSERTs (ON CONFLICT (provider) DO UPDATE). Raises `RuntimeError` when `DB_BACKEND != postgres` — seeding requires Neon by design.
+- JSONB codec encodes the dict transparently — do NOT `json.dumps` at call sites.
+- Seeded once via `python -m scripts.seed_lego_session` (headed Playwright + manual Google SSO). See `docs/LEGO_SESSION.md` for the refresh runbook.
+
 #### `checkout/saga_resume.py` — boot-time saga recovery (Phase E step 1)
 
 - Public: `resume_in_flight_sagas()` — called once during lifespan, AFTER payment-registry registration, BEFORE scheduler.
@@ -456,10 +465,11 @@ GET /checkout/gate
 
 #### `checkout/clients/lego_client.py` (345 LOC) — LEGO.com search + Playwright order
 
-- Imports: `..models.SellerListing`, `..cache.{cache_get, cache_set}`. Lazy-imports `playwright.async_api` inside `order_from_lego`.
-- Public: `SELLER_ID = "lego_official"`, `SELLER_NAME`, `check_element_available(eid)`, `check_elements_available(eids)`, `get_listing_for_element(eid, country)`, `get_all_listings(order_items, country, zip, cache_ttl=3600) → {eid: [SellerListing]}`, `order_from_lego(items, job_id) → confirmation_number`.
-- Reads env: `LEGO_SHIPPING_COST_CENTS` (599), `LEGO_MAX_QTY_PER_ITEM` (9999), `LEGO_EMAIL`, `LEGO_PASSWORD`, `LEGO_FALLBACK_TIMEOUT_SECONDS` (90), `OUTPUT_DIR`.
-- Playwright screenshots dropped at `{OUTPUT_DIR}/lego_debug/{job_id}_{label}.png` at every step + on failure.
+- Imports: `..models.{SellerListing, StockoutError, LegoSessionExpiredError}`, `..cache.{cache_get, cache_set, cache_delete}`, `..lego_session_store`, `.. import audit`. Lazy-imports `playwright.async_api` inside `order_from_lego`.
+- Public: `SELLER_ID = "lego_official"`, `SELLER_NAME`, `check_element_available(eid)`, `check_elements_available(eids)`, `get_listing_for_element(eid, country)`, `get_all_listings(order_items, country, zip, cache_ttl=3600) → {eid: [SellerListing]}`, `order_from_lego(items, job_id) → confirmation_number`, `invalidate_listing(eid)`.
+- Reads env: `LEGO_SHIPPING_COST_CENTS` (599), `LEGO_MAX_QTY_PER_ITEM` (9999), `LEGO_FALLBACK_TIMEOUT_SECONDS` (90), `OUTPUT_DIR`. **Deprecated:** `LEGO_EMAIL`, `LEGO_PASSWORD` are still read into module globals but no longer used by the ordering flow — replaced by `storage_state` caching via `lego_session_store`. Kept readable for future fallback paths; do not rely on them.
+- `order_from_lego` loads `storage_state` from `lego_session_store.load_storage_state()` and passes it into `browser.new_context(storage_state=...)`. `_run_checkout` Step A is a session probe: navigates to `/profile` and raises `LegoSessionExpiredError('cookie_expired')` if LEGO bounces to `/profile/login`. Saga catches `LegoSessionExpiredError` in a dedicated branch (between `StockoutError` and `Exception`) and writes MANUAL_REVIEW with `hold_disposition=OPERATOR_DECIDES` + `lego.session_expired` audit. Refresh runbook: `python -m scripts.seed_lego_session`. See `docs/LEGO_SESSION.md`.
+- Playwright screenshots dropped at `{OUTPUT_DIR}/lego_debug/{job_id}_{label}.png` at every step + on failure (including `ERROR_lego_session_expired` for the expiry case).
 
 #### `checkout/clients/brickowl_client.py` (341 LOC) — BrickOwl API wrapper
 
@@ -477,34 +487,57 @@ GET /checkout/gate
 
 The only path-based handoff between the two trees is `outputs/{job_id}/order_list.json`. `Main.py.run_job` copies the workspace's `order_list.json` to this stable location before deleting the workspace; `checkout_store.read_order_list(job_id)` reads it for the quote flow. Apart from this file and the shared FastAPI app registration in `Main.py` lifespan, the mosaic pipeline does not know the checkout pipeline exists, and vice versa.
 
-## Known bugs (mosaic pipeline)
+## Known defects (mosaic pipeline)
 
-For checkout-pipeline defects, see `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §4`.
+Full per-defect documentation — root cause, reproduction, fix sketch,
+verification, and cross-references — lives in
+`docs/MOSAIC_DEFECTS.md`. The table below is the index only; click an
+ID to jump to the entry.
 
-### `remove_background` channel swap (`picToMosiac.py:124`)
-PIL gives an RGB numpy array but `cv2.cvtColor(img, cv2.COLOR_BGR2RGB)` treats it as BGR, swapping R and B before passing to MediaPipe. Segmentation is shape-based so the mask is still usable, but the channel order fed to the model is wrong. Should be `cv2.COLOR_RGB2BGR` or pass the PIL array directly.
+For checkout-pipeline defects see `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §4`.
 
-### `background_color_percent` `k` miscalculation (`picToMosiac.py:268`)
-`fg_mask_np==255` selects **foreground** pixels but is being used as the bin for background-color-count estimation. The simplification loop itself uses the correct mask, so only background pixels are recolored — but the target color count `k` may be under- or over-estimated. Should use `fg_mask_np==0`.
+| ID | Severity | Title | File |
+|----|----------|-------|------|
+| [D-001](docs/MOSAIC_DEFECTS.md#d-001) | **P0** | `background_color_percent` slider is non-functional in 3D mosaics | picToMosiac.py |
+| [D-002](docs/MOSAIC_DEFECTS.md#d-002) | **P1** | Duplicate stdout from `laigoLOG` propagating to root | logger.py + Main.py |
+| [D-003](docs/MOSAIC_DEFECTS.md#d-003) | **P1** | `_grid_to_python_ints` uses Python loop on 640×640 grid | preview_builder.py |
+| [D-004](docs/MOSAIC_DEFECTS.md#d-004) | **P1** | `log_info(fg_colors)` / `log_info(bg_colors)` dump full sets at INFO | MosiacToInstruction.py |
+| [D-005](docs/MOSAIC_DEFECTS.md#d-005) | **P1** | Triple recomputation of fg/bg unique colors | MosiacToInstruction.py |
+| [D-006](docs/MOSAIC_DEFECTS.md#d-006) | **P1** | `Image.verify()` is a header sniff, not a decode | Main.py |
+| [D-007](docs/MOSAIC_DEFECTS.md#d-007) | **P2** | `cv2.cvtColor(img, COLOR_BGR2RGB)` feeds wrong colorspace to MediaPipe | picToMosiac.py |
+| [D-008](docs/MOSAIC_DEFECTS.md#d-008) | **P2** | `GenerateOrderList` silently drops pieces on `KeyError` | MosiacToOrder.py |
+| [D-009](docs/MOSAIC_DEFECTS.md#d-009) | **P2** | `RotatingFileHandler` opened by every worker subprocess | logger.py |
+| [D-010](docs/MOSAIC_DEFECTS.md#d-010) | **P2** | Worker subprocess re-imports the FastAPI + checkout tree | Main.py |
+| [D-011](docs/MOSAIC_DEFECTS.md#d-011) | **P2** | MediaPipe `SelfieSegmentation` never closed | picToMosiac.py |
+| [D-012](docs/MOSAIC_DEFECTS.md#d-012) | **P2** | `adjust_lightness_lab` runs at full input resolution | picToMosiac.py |
+| [D-013](docs/MOSAIC_DEFECTS.md#d-013) | **P2** | CLI / API duality in shared utility modules | cross-cutting |
+| [D-014](docs/MOSAIC_DEFECTS.md#d-014) | **P2** | Logging architecture: per-process file handler + duplicate propagation | cross-cutting |
+| [D-015](docs/MOSAIC_DEFECTS.md#d-015) | **P3** | `make_difference_transparent` doc string and name describe the inverse of the code | picToMosiac.py |
+| [D-016](docs/MOSAIC_DEFECTS.md#d-016) | **P3** | `mask > 0.51` magic threshold | picToMosiac.py |
+| [D-017](docs/MOSAIC_DEFECTS.md#d-017) | **P3** | `pic_to_mosaic` returns `None`; caller masks with `or workspace` | picToMosiac.py / Main.py |
+| [D-018](docs/MOSAIC_DEFECTS.md#d-018) | **P3** | `give_exception_message` is in-band log-and-reraise | picToMosiac.py |
+| [D-019](docs/MOSAIC_DEFECTS.md#d-019) | **P3** | Bare `from Util import …` | MosiacToOrder.py |
+| [D-020](docs/MOSAIC_DEFECTS.md#d-020) | **P3** | Bare `from logger import logger` | Util.py |
+| [D-021](docs/MOSAIC_DEFECTS.md#d-021) | **P3** | Two PNG sort strategies, one dead | MosiacToInstruction.py |
+| [D-022](docs/MOSAIC_DEFECTS.md#d-022) | **P3** | `empty_instructions_folder` raises when folder is missing | MosiacToInstruction.py |
+| [D-023](docs/MOSAIC_DEFECTS.md#d-023) | **P3** | `assert` used for runtime invariants | MosiacToInstruction.py |
+| [D-024](docs/MOSAIC_DEFECTS.md#d-024) | **P3** | Inconsistent `step` return shape across instruction helpers | MosiacToInstruction.py + VisualMaker.py |
+| [D-025](docs/MOSAIC_DEFECTS.md#d-025) | **P3** | `step` counter threaded through every function as a return value | MosiacToInstruction.py + VisualMaker.py |
+| [D-026](docs/MOSAIC_DEFECTS.md#d-026) | **P3** | `_mark_submission_failed` does a redundant `rmtree(job_root)` | Main.py |
+| [D-027](docs/MOSAIC_DEFECTS.md#d-027) | **P3** | `mp.set_start_method("spawn", force=True)` at module import | Main.py |
+| [D-028](docs/MOSAIC_DEFECTS.md#d-028) | **P3** | `MAX_WORKERS` and `MAX_QUEUE_SIZE` env vars documented but ignored | Main.py |
+| [D-029](docs/MOSAIC_DEFECTS.md#d-029) | **P3** | `FRONTEND_ORIGIN` env var set but never read | Main.py |
+| [D-030](docs/MOSAIC_DEFECTS.md#d-030) | **P3** | `max_tasks_per_child=1` requires Python 3.12+, unenforced | Main.py / requirements.txt |
+| [D-031](docs/MOSAIC_DEFECTS.md#d-031) | **P3** | `DEBUG = bool(os.getenv("DEBUG"))` is the D1 typo bug, latent | Util.py |
+| [D-032](docs/MOSAIC_DEFECTS.md#d-032) | **P3** | `preview_builder` accepts string literals instead of `MosaicType` enum | preview_builder.py |
+| [D-033](docs/MOSAIC_DEFECTS.md#d-033) | **P3** | Preview palette index 0 reserved but not enforced | preview_builder.py |
 
-### Two conflicting PNG sort strategies (`MosiacToInstruction.py:30-42` vs `:179-182`)
-`_get_ordered_pngs` sorts by `re.search(r'(\d+)', path.stem)`; the call site in `GenerateInstructions` sorts by `int(p.stem.split("_")[-1]) if "_" in p.stem else 0`. Different orderings when filenames have underscores or leading digits.
+### Adding a defect
 
-### `pic_to_mosaic` returns `None`; caller falls back via `or workspace` (`Main.py`)
-`pic_to_mosaic` never returns a path. `run_job` handles this with `result_dir = pic_to_mosaic(...) or workspace`. If someone adds a return value with a falsy result, the fallback silently activates.
-
-### `max_tasks_per_child=1` requires Python 3.12+ (unenforced)
-`ProcessPoolExecutor.__init__` did not accept `max_tasks_per_child` before Python 3.12. Server fails to start with `TypeError` on earlier versions. Not documented in `requirements.txt`.
-
----
-
-## Image quality / detail preservation
-
-### `adjust_lightness_lab` runs at full input resolution (`picToMosiac.py:138–168`)
-Called on the full-res image before `image_to_lego_mosaic` resizes. Does a full RGB→LAB→RGB round-trip on megapixel data just to add +5 to the L channel. Folding the L* shift into the post-LANCZOS LAB array would be cheaper. Previously attempted; reverted on visual-regression concerns. Re-examine.
-
-### `remove_background` channel swap corrupts background colors in 3D mode (`picToMosiac.py:124`)
-Same root cause as the Known-bugs entry above. The background image returned to the pipeline has R and B channels swapped, so palette matching maps reds to blue LEGO colors in the background layer.
+Use the template at the bottom of `docs/MOSAIC_DEFECTS.md`. Required:
+ID, severity, location, symptom, root cause, impact, fix sketch,
+verification, and cross-references. After adding, mirror the row in
+this table.
 
 ---
 
@@ -516,22 +549,24 @@ Current single-job CPU load on Render: **~70% of 1 vCPU**. Goal: ≤50% per job 
 
 | Priority | Location | Operation | Why expensive |
 |---|---|---|---|
-| 1 | `picToMosiac.py` Floyd-Steinberg loop | Pure Python O(W×H), sequential by design |
+| 1 | `picToMosiac.py` Floyd-Steinberg loop | Pure Python O(W×H), sequential by design; inner loop allocates a tiny numpy array per pixel via `np.clip(err[y,x+1]+e*7/16,-128,128)` × 4 neighbors |
 | 2 | `picToMosiac.py:nearest_palette_index_lab` | Called per pixel; full `deltaE_ciede2000` against all 43 palette entries |
 | 3 | `picToMosiac.py:adjust_lightness_lab` | Full-res RGB→LAB→RGB round-trip before resize |
 | 4 | `picToMosiac.py:remove_background` | MediaPipe SelfieSegmentation on megapixel image; mask only needs mosaic resolution |
 | 5 | `MosiacToInstruction.py` instruction loop | Each column drawn TWICE (unhighlighted + highlighted) |
-| 6 | `Main.py` `max_tasks_per_child=1` | Worker cold-starts every job; 3–5s import overhead |
+| 6 | `Main.py` `max_tasks_per_child=1` | Worker cold-starts every job; 3–5s import overhead (FastAPI + checkout + asyncpg all re-imported, see "Worker module owns the FastAPI / checkout import surface" antipattern) |
 | 7 | `Main.py` `MAX_WORKERS=1` | No concurrency; second job waits |
+| 8 | `preview_builder.py:_grid_to_python_ints` | Python list-comprehension over numpy 2D array; `[[int(v) for v in row] for row in remapped]` for 640×640 = 409,600 Python `int()` calls per layer (×2 for 3D) |
 
 ### Open items — fixes + estimated impact
 
-- **#1 Floyd-Steinberg:** KDTree over palette LAB (Euclidean ≈ deltaE76) → 25–35% total. Numba JIT → 50–60% total (200 MB dep). KDTree first; Numba only if insufficient.
+- **#1 Floyd-Steinberg:** KDTree over palette LAB (Euclidean ≈ deltaE76) → 25–35% total. Numba JIT → 50–60% total (200 MB dep). KDTree first; Numba only if insufficient. Cheap micro-optimization available before either: hoist the inner-loop error diffusion to plain Python floats and only `np.clip` in chunks — `np.clip` on a 1-element scalar is dominated by numpy's per-call overhead.
 - **#2 `adjust_lightness_lab`:** Add `delta_L=0` param to `image_to_lego_mosaic`, fold into post-resize LAB. → 8–12% total. Risk: prior attempt caused visual regression; re-test.
 - **#3 MediaPipe:** Downscale input to ~2× mosaic resolution before segmentation, upscale mask back. → 10–20% total.
 - **#4 Double `draw_plate_column`:** Draw once, copy, apply only highlight outline to the copy via a new `draw_highlight_column` helper. → 12–18% total.
-- **#5 Worker cold-start:** Raise `max_tasks_per_child` to 3–5. Memory bounded by `MAX_WORKERS × peak-RSS`. Requires Python 3.12+ (already true).
-- **#6 Single-worker concurrency:** Raise `MAX_WORKERS=2`. Memory ≈ 1.15 GB peak. Requires Render Standard tier (2 GB).
+- **#5 Worker cold-start:** Two compounding levers. (a) Raise `max_tasks_per_child` to 3–5 (memory bounded by `MAX_WORKERS × peak-RSS`; requires Python 3.12+ already). (b) STRUCTURAL: move `run_job` out of `Main.py` into a leaf `scripts/worker.py` that only imports `picToMosiac` + stdlib. Today every spawn re-imports the whole FastAPI + checkout + asyncpg tree — see the "Worker module owns the FastAPI / checkout import surface" antipattern. The leaf-module fix is the right one to land before raising `max_tasks_per_child`, otherwise each chained job still pays the worker-side `Main` import. Prerequisite for raising either lever: `RotatingFileHandler` is not process-safe (see Known bugs); fix logging first.
+- **#6 Single-worker concurrency:** Raise `MAX_WORKERS=2`. Memory ≈ 1.15 GB peak. Requires Render Standard tier (2 GB). Same logging prerequisite as #5.
+- **#8 preview_builder grid materialization:** Replace `_grid_to_python_ints(remapped)` with `remapped.tolist()` (a single C-level call). 10–50× faster on 640×640 grids; estimated 200–500 ms saved on the largest mosaic. Two call sites (`background_grid` + `foreground_grid`).
 
 ### CPU reduction estimates (cumulative)
 
@@ -551,14 +586,60 @@ Current single-job CPU load on Render: **~70% of 1 vCPU**. Goal: ≤50% per job 
 ### `step` counter threaded as a return value through every function
 Every instruction function takes `step: int`, returns `step + N`, and the caller must capture it. Any refactor that adds or reorders steps silently produces wrong step numbers. A stateful counter object would make this contract explicit.
 
+### Inconsistent return shape across instruction helpers (`VisualMaker.py`, `MosiacToInstruction.py`)
+Related but distinct from the `step` antipattern: `generate_baseplate_setup` returns `(step, img)` but `draw_grid_setup_instruction`, `draw_frame_instructions`, and `draw_final_view` return only `step`. Every caller has to remember which functions return what. A stateful counter object (or a small mutable wrapper passed by reference) would unify the shape and close the original antipattern.
+
 ### `FRONTEND_ORIGIN` env var set but never read (`Main.py`)
 CORS origins are hardcoded in `app.add_middleware(...)`. Either wire the env var or remove it from `.env`.
+
+### `MAX_WORKERS` / `MAX_QUEUE_SIZE` env vars documented but ignored (`Main.py:68-69`, `.env`)
+Both are listed in the configuration table at the top of this doc, both are present in `.env` — and both are hardcoded in `Main.py` (`MAX_WORKERS = 1`, `MAX_QUEUE_SIZE = 20`). An operator who sets `MAX_QUEUE_SIZE=50` in `.env` sees no effect and no warning. Either wire the env vars or delete them from `.env` and the table.
 
 ### `log_info` used for full data structures at INFO level (`MosiacToInstruction.py`, `Util.py`)
 `log_info(fg_colors)`, `log_info(bg_colors)`, and `log_info(order_dict)` emit full Python set/dict reprs at INFO level. In production this fills the rotating log with noise. These should be `log_debug`.
 
+### Triple recomputation of fg/bg color sets purely for logging (`MosiacToInstruction.py:101-121`)
+`GenerateInstructions` builds `fg_colors` and `bg_colors` via `set(map(tuple, ...))` (full materialization of every unique RGB), then immediately calls `count_colors(...)` which does `np.unique` independently. Three different ways of computing the same thing, all O(H·W·log(H·W)), all just for log lines. Nothing downstream uses these values. Delete the whole block (paired with the `log_info`-of-data antipattern fix above).
+
 ### Bare imports alongside relative imports (`MosiacToOrder.py:9`, `Util.py:8`)
 `from Util import GetPaletteDict` and `from logger import logger` are bare imports that only resolve because `picToMosiac.py` appends `scripts/` to `sys.path` at module load time. If either module is ever imported without going through `picToMosiac` first, both fail with `ModuleNotFoundError`. All imports in the package should be relative.
+
+### `give_exception_message` is an in-band log-and-reraise (`picToMosiac.py:218-226`)
+```python
+def give_exception_message(e):
+    tb = traceback.extract_tb(e.__traceback__)[-1]
+    log_error(f"[ERROR] {type(e).__name__}: {e}")
+    log_error(f"File: {tb.filename}")
+    ...
+    raise
+```
+The bare `raise` re-raises the current exception of the calling frame, which works only because every call site is inside an `except` block — fragile contract. Also formats only the last frame instead of the full traceback. `logger.exception(...)` already emits class + message + full traceback in one call. Replace with `log.exception("pic_to_mosaic failed"); raise` at each call site and delete this helper.
+
+### `mp.set_start_method("spawn", force=True)` at module import (`Main.py:3-4`)
+Runs at module top level, with `force=True`, on every `import scripts.Main`. Any test that imports `Main` resets the multiprocessing context globally — bad for testability and easy to break in CI. Wrap in `if __name__ == "__main__":`, or use the non-force form with a try/except (raising `RuntimeError` if already set is the safer signal). On Windows "spawn" is already the default so the call is mostly a no-op there; the real risk is the side effect on test runners and on Linux/macOS imports.
+
+### `preview_builder.py` uses string literals instead of `MosaicType` enum (`preview_builder.py:88`)
+```python
+if mosaic_type not in ("2d", "3d"):
+```
+`MosaicType.TWO_D.value == "2d"` exists; the caller in `picToMosiac.py:278-322` passes literal `"3d"`/`"2d"`. Stringly typed contract that silently rejects any future `MosaicType` addition. Either accept `MosaicType` directly (`mosaic_type: MosaicType`) or validate against `{m.value for m in MosaicType}`.
+
+### `assert` used for runtime invariants (`MosiacToInstruction.py:82-83, 112-114`)
+`assert isinstance(bg_rgba, Image.Image)`, `assert bg_rgba.mode == "RGBA"`, `assert C == 4`, `assert W % 16 == 0` — all vanish under `python -O`. Convert to explicit `if … raise ValueError(...)` if they're load-bearing. If they're not, delete them.
+
+### CLI/API duality decaying in shared utility modules
+`MosiacToOrder.py`, `MosiacToInstruction.py`, `VisualMaker.py` all carry an `output_dir is None` branch that falls back to `GetOutputPathDir()` (legacy CLI) plus an explicit-path branch (API). The CLI path is no longer hooked into Main, runs against hard-coded image paths in each `__main__`, and has bit-rot (`empty_instructions_folder` raises on missing folder; see Known bugs). Two control flows in shared utility functions tax every future edit. Pick one: either delete the CLI path entirely or wrap it in a single CLI module that calls the API code path with a temp `output_dir`.
+
+### Worker module owns the FastAPI / checkout import surface (`Main.py`)
+`run_job` lives in `Main.py`. Because `spawn`-mode subprocesses re-import the function's defining module, every job spawn re-runs all of `Main.py`'s module-level code: `fastapi`, `uvicorn` deps, `checkout.router/debug_router/gate_router/cache/gate`, `jobs_store_dispatch` (which fans into postgres/asyncpg), the env-load and `mkdir`/`write_probe` block (Main.py:82-96), and 9 module-level `log.info(...)` lines (Main.py:98-107) — all of which print to stdout once per spawn. This is the structural cause of the 3-5 s cold start logged as CPU hotspot #6. Fix: move `run_job` (and `_write_error_manifest`) into a leaf module like `scripts/worker.py` whose only imports are `picToMosiac`, `pathlib`, `shutil`, `time`, `json`.
+
+### Logging fan-out is mis-configured across processes
+Three problems compound here:
+1. `RotatingFileHandler` is opened by every worker subprocess against the same file (race-prone — see Known bugs C2).
+2. The `"laigoLOG"` named logger propagates to root, which has its own `StreamHandler` from `Main.py`'s `basicConfig` (duplicate stdout — see Known bugs C3).
+3. `Util.log_info` / `log_debug` / `log_error` resolve to the `"laigoLOG"` logger, so every pipeline log line traverses both handler chains.
+
+The right architecture: parent process owns the file (use a `QueueHandler` from workers), workers stream to stdout only, one root-level formatter. Do C2 + C3 first; this is the cleanup that lands on top.
 
 ---
 
@@ -625,6 +706,7 @@ playwright install chromium
 - Two drift checks: B5 pre-placement (top of `while True:`) refuses to place orders if re-optimized total exceeds the authorized hold (clean COMPENSATED). Post-placement check at capture time is defense-in-depth — if it ever fires after B5 should have caught it, MANUAL_REVIEW is the only safe state.
 - `_handle_saga_timeout` MUST always write a terminal state. The load-failure arm writes best-effort MANUAL_REVIEW with runbook.
 - LEGO ordering has an `except StockoutError: ...` branch BEFORE the generic `except Exception`. `lego_client.order_from_lego` propagates `StockoutError` unwrapped (do NOT consolidate). Today the branch is unreachable (B29 — `order_from_lego` doesn't detect stockouts yet); becomes live when DOM detection ships.
+- LEGO ordering ALSO has an `except LegoSessionExpiredError: ...` branch (between `StockoutError` and `Exception`). `order_from_lego` raises this when the cached Playwright `storage_state` is missing or LEGO bounces to `/profile/login`. The branch writes MANUAL_REVIEW with `hold_disposition=OPERATOR_DECIDES` — hold + already-placed BrickOwl orders are intentionally preserved, NOT compensated, so the operator can complete the order out-of-band after re-seeding via `python -m scripts.seed_lego_session`. Emits `lego.session_expired` audit (P0-paging per PRE_RELEASE §2.7). Do NOT consolidate with the generic `Exception` branch — the silent-compensate path is the wrong outcome here. See `docs/LEGO_SESSION.md`.
 
 **Provider-state safety:**
 
@@ -677,3 +759,5 @@ ALL boot refusals raise `RuntimeError` after `log.critical(...)`. Fail loud, fai
 - **Checkout module reference:** `docs/ORDER_OPTIMIZER.md`.
 - **3D preview API + payload schema (frontend-facing):** `docs/PREVIEW_API.md`.
 - **DB operations + debug playbook (Neon):** `docs/DATABASE_OPS.md` — connection model, migration workflow, operator queries, debug playbook, the diagnose_db.py tool.
+- **Mosaic pipeline defects ledger:** `docs/MOSAIC_DEFECTS.md` — per-defect root cause, reproduction, fix sketch, verification. Index mirrored in `## Known defects (mosaic pipeline)` above.
+- **LEGO.com Playwright session operator reference:** `docs/LEGO_SESSION.md` — schema (`external_sessions`, migration `0003`), initial seeding via `python -m scripts.seed_lego_session`, refresh runbook when `lego.session_expired` fires, branch-mismatch debugging.
