@@ -64,6 +64,7 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 
 from ..models import SellerListing, StockoutError, LegoSessionExpiredError
 from ..cache import cache_get, cache_set, cache_delete
+from .._env import is_truthy
 from .. import audit
 from .. import lego_session_store
 
@@ -442,6 +443,27 @@ async def get_all_listings(
 
 # ── Playwright ordering ───────────────────────────────────────────────────────
 
+async def _maybe_confirm_overwrite(page: Page, job_id: str) -> None:
+    """Confirm the PaB 'Overwrite pieces?' modal if it appears, else no-op.
+
+    Shown only when the LAIGO bag already holds picked pieces and a new list is
+    uploaded ([data-test='pab-overwrite-pieces']). Confirming replaces the bag
+    with the uploaded list — which is exactly what we want, since each order
+    uploads a complete list. Tolerant: short wait, click if present, never fatal.
+    """
+    btn = page.locator("[data-test='overwrite-pieces-modal-overwrite-button']")
+    try:
+        await btn.wait_for(state="visible", timeout=4000)
+    except Exception:
+        return
+    try:
+        await btn.click()
+        logger.info(f"[lego_client] [{job_id}] confirmed 'Overwrite pieces?' modal")
+        await page.wait_for_timeout(1000)
+    except Exception as exc:
+        logger.warning(f"[lego_client] [{job_id}] overwrite-modal click failed: {exc}")
+
+
 async def _screenshot(page: Page, job_id: str, label: str) -> None:
     try:
         _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
@@ -482,7 +504,23 @@ async def order_from_lego(
         raise LegoSessionExpiredError("not_seeded")
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        # Cloudflare on lego.com hard-blocks HEADLESS Chromium (verified
+        # 2026-06-11: bundled/real-Chrome/patchright all fail headless from a
+        # residential IP; only a real headed browser passes). Two deploy paths,
+        # both env-driven so the code is deployment-agnostic:
+        #   • LEGO_BROWSER_CDP_URL — connect to a remote/hosted browser
+        #     (Browserless/Browserbase, etc.) that handles Cloudflare off-box.
+        #     NOTE: this ships the LEGO storage_state cookies to that provider —
+        #     treat the URL + provider as security-sensitive.
+        #   • else launch locally; headless is env-gated. On Render the prod
+        #     path must run headed under a virtual display (Xvfb), i.e.
+        #     LEGO_PLAYWRIGHT_HEADLESS=false. Default stays True for back-compat.
+        cdp_url = os.environ.get("LEGO_BROWSER_CDP_URL", "").strip()
+        if cdp_url:
+            browser = await pw.chromium.connect_over_cdp(cdp_url)
+        else:
+            headless = is_truthy(os.environ.get("LEGO_PLAYWRIGHT_HEADLESS", "true"))
+            browser = await pw.chromium.launch(headless=headless)
         context: BrowserContext = await browser.new_context(
             viewport={"width": 1280, "height": 800},
             locale="en-US",
@@ -535,33 +573,96 @@ async def _run_checkout(page: Page, items: list[dict], job_id: str) -> str:
     await page.wait_for_load_state("networkidle", timeout=_TIMEOUT_MS)
     await _screenshot(page, job_id, "02_pick_a_brick")
 
-    # ── Step C: Upload JSON cart ──────────────────────────────────────────────
-    # LEGO.com Pick-a-Brick accepts a JSON file upload via an "Import" button.
-    # If this selector breaks, look for: button with text "Import"/"Upload",
-    # or a data-test attribute near the search bar.
-    upload_input = page.locator("input[type='file']").first
+    # ── Step C: Upload JSON cart via Pick-a-Brick "Upload List" ───────────────
+    # Selectors verified against live PaB 2026-06-10 (see docs/ORDER_OPTIMIZER
+    # §6.1). The "Upload List" control opens a modal whose (hidden) file input
+    # accepts .csv/.json/.lxfml. PaB's own downloadable JSON template confirms
+    # the expected shape is exactly [{"elementId","quantity"}, ...] — identical
+    # to the `items` we build, so no payload transform is needed.
+    # Full upload→bag sequence (each selector verified against live PaB
+    # 2026-06-10):
+    #   1. open modal:    [data-test='pab-listUploader-open-modal-desktop-button']
+    #   2. file input:    [data-test='pab-listUploader-input'] (id=list-upload)
+    #   3. view pieces:   [data-test='pab-listUploader-viewPieces-button'] — shown
+    #                     once the list parses; closes the upload modal.
+    #   4. pick pieces:   [data-test='pab-listupload-button-addRemove'] ("Pick
+    #                     selected pieces") — adds all parsed pieces to the cart
+    #                     and opens the cart modal.
+    #   5. add to bag:    [data-test='pab-cart-add-to-main-cart-button'] in the
+    #                     cart modal — commits the bag and STARTS CHECKOUT.
+    # set_input_files works on the (dialog-nested) file input directly, but we
+    # open the modal first to match real interaction on a fresh page load.
+    await page.click("[data-test='pab-listUploader-open-modal-desktop-button']")
+    upload_input = page.locator("[data-test='pab-listUploader-input']")
+    await upload_input.wait_for(state="attached", timeout=_TIMEOUT_MS)
     json_bytes = json.dumps(items).encode("utf-8")
     await upload_input.set_input_files(files=[{
         "name": "order_list.json",
         "mimeType": "application/json",
         "buffer": json_bytes,
     }])
-    await page.wait_for_selector("[data-test='add-to-cart-button']", timeout=_TIMEOUT_MS)
-    await page.click("[data-test='add-to-cart-button']")
-    await page.wait_for_selector("[data-test='cart-count']", timeout=_TIMEOUT_MS)
+    # If the LAIGO bag already had pieces, an "Overwrite pieces?" modal blocks
+    # here — confirm it (replacing the bag is the intended behaviour).
+    await _maybe_confirm_overwrite(page, job_id)
+    # After parsing, the modal surfaces "View All Pieces" which closes it and
+    # shows the parsed pieces.
+    view_pieces = page.locator("[data-test='pab-listUploader-viewPieces-button']")
+    await view_pieces.wait_for(state="visible", timeout=_TIMEOUT_MS)
+    await view_pieces.click()
+    # "Pick selected pieces" adds every parsed piece to the cart and opens the
+    # cart modal.
+    pick_pieces = page.locator("[data-test='pab-listupload-button-addRemove']")
+    await pick_pieces.wait_for(state="visible", timeout=_TIMEOUT_MS)
+    await pick_pieces.click()
+    await _maybe_confirm_overwrite(page, job_id)
+    # The cart-modal "Add to Bag" is disabled until the cart settles. Poll
+    # aria-disabled rather than racing the click.
+    add_to_bag = page.locator("[data-test='pab-cart-add-to-main-cart-button']")
+    await add_to_bag.wait_for(state="visible", timeout=_TIMEOUT_MS)
+    for _ in range(60):
+        if (await add_to_bag.get_attribute("aria-disabled")) != "true":
+            break
+        await page.wait_for_timeout(500)
+    else:
+        raise RuntimeError(
+            "LEGO.com cart 'Add to Bag' stayed disabled after upload — the list "
+            "may have failed to parse (check uploaded shape) or a piece is "
+            "unavailable. See screenshot 03_cart_loaded."
+        )
     await _screenshot(page, job_id, "03_cart_loaded")
     logger.info(f"[lego_client] [{job_id}] cart populated with {len(items)} items")
+    # Clicking "Add to Bag" starts checkout — see Step D.
+    await add_to_bag.click()
 
-    # ── Step D: Proceed to checkout ───────────────────────────────────────────
-    await page.click("[data-test='checkout-button']")
-    await page.wait_for_url("**/checkout/**", timeout=_TIMEOUT_MS)
+    # ── Step D: Confirmation modal → cart → "Checkout Securely" ───────────────
+    # Selectors verified against live PaB 2026-06-10/11 (see docs/ORDER_OPTIMIZER
+    # §6.1 Step 4). Clicking "Add to Bag" surfaces an "Updated My Bag" modal;
+    # "View My Bag" navigates to /en-us/cart, where "Checkout Securely" enters
+    # the payment flow.
+    #   - confirmation: [data-test='pab-add-to-bag-confirmation']
+    #   - view bag:     [data-test='pab-add-to-bag-confirmation-button-cart']
+    #   - checkout:     [data-test='checkout-securely-button-desktop'] (role=link;
+    #                   mobile twin: checkout-securely-button-mobile)
+    await page.wait_for_selector("[data-test='pab-add-to-bag-confirmation']", timeout=_TIMEOUT_MS)
+    await page.click("[data-test='pab-add-to-bag-confirmation-button-cart']")
+    await page.wait_for_url("**/cart", timeout=_TIMEOUT_MS)
     await page.wait_for_load_state("networkidle", timeout=_TIMEOUT_MS)
-    await _screenshot(page, job_id, "04_checkout")
+    await _screenshot(page, job_id, "04_cart")
+    checkout_btn = page.locator("[data-test='checkout-securely-button-desktop']")
+    await checkout_btn.wait_for(state="visible", timeout=_TIMEOUT_MS)
+    await checkout_btn.click()
+    await page.wait_for_load_state("networkidle", timeout=_TIMEOUT_MS)
+    await _screenshot(page, job_id, "05_checkout")
 
     # ── Step E: Place order (uses saved payment method on LAIGO's account) ────
+    # ⛔ GATED + UNVERIFIED: this click places a REAL charge on LAIGO's saved
+    # card (payment-architecture decision 2026-05-31). The checkout/payment page
+    # selectors below have NOT been captured (verification deliberately stops
+    # before Place Order). Must NOT be wired until the end-to-end test strategy
+    # is finalized. See docs/ORDER_OPTIMIZER §6.1 Step 6.
     await page.click("[data-test='place-order-button']")
     await page.wait_for_selector("[data-test='order-confirmation-number']", timeout=_TIMEOUT_MS)
-    await _screenshot(page, job_id, "05_confirmed")
+    await _screenshot(page, job_id, "06_confirmed")
 
     confirmation = (await page.inner_text("[data-test='order-confirmation-number']")).strip()
     logger.info(f"[lego_client] [{job_id}] order confirmed: {confirmation}")
