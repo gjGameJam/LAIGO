@@ -1,5 +1,11 @@
 # LEGO Browser Host — VPS + Residential Proxy (Cloudflare bypass)
 
+> **Status (2026-06-11):** This approach is **selected** (chosen over self-host,
+> managed browser, and bare VPS). Nothing is provisioned yet. **Next action:**
+> make the `§7` provider decisions, then stand up the VPS per `§6`. The
+> `order_from_lego` code side (`LEGO_BROWSER_CDP_URL` / `LEGO_PLAYWRIGHT_HEADLESS`)
+> is already in place — see `scripts/checkout/clients/lego_client.py`.
+
 ## 1. Why this exists
 
 LEGO.com (Pick-a-Brick) is fronted by **Cloudflare**, which hard-blocks

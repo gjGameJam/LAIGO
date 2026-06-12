@@ -146,6 +146,10 @@ async def main() -> int:
     from dotenv import load_dotenv
     load_dotenv(".env.secrets"); load_dotenv(".env")
 
+    # Prefer DEV_DATABASE_URL; refuse if the result is prod. See _pg_test_guard.
+    from scripts._pg_test_guard import prepare_test_db
+    prepare_test_db()
+
     from scripts.db import init_pool, get_pool, close_pool
     from scripts.checkout import audit, payment_holds_store, saga_resume
     from scripts.checkout import checkout_store_dispatch as checkout_store

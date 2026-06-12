@@ -33,6 +33,10 @@ async def main() -> int:
     load_dotenv(project_root / ".env.secrets")
     load_dotenv(project_root / ".env")
 
+    # Prefer DEV_DATABASE_URL; refuse if the result is prod. See _pg_test_guard.
+    from scripts._pg_test_guard import prepare_test_db
+    prepare_test_db()
+
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         print("FAIL: DATABASE_URL not set")

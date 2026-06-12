@@ -53,6 +53,7 @@ from typing import Optional
 
 from . import audit
 from . import checkout_store_dispatch as checkout_store
+from . import notifications
 from . import payment_holds_store
 from .models import ERROR_MESSAGES, HoldDisposition, SagaStatus
 from .payment import registry as payment_registry
@@ -183,6 +184,32 @@ async def reconcile_orphan_holds(
     return histogram
 
 
+async def _notify_manual_review(job_id: Optional[str]) -> None:
+    """Best-effort customer email when the RECONCILER escalates a saga to
+    MANUAL_REVIEW.
+
+    Why the reconciler (not the saga) sends it: these escalations happen
+    because the saga's asyncio task already died (out-of-band cancel, or a
+    stuck saga past the timeout). The saga's own terminal-email choke point in
+    execute_checkout_saga therefore never ran, so without this the customer is
+    never told their order is delayed. Idempotent via the emails_sent ledger
+    (so if the saga DID already email, this is a no-op). notifications.* never
+    raises; the surrounding try is belt-and-suspenders for the load().
+    """
+    if not job_id:
+        return
+    try:
+        state = await checkout_store.load(job_id) or {}
+        email = state.get("customer_email") or ""
+        if not email:
+            return
+        await notifications.send_manual_review_notice(
+            job_id, email, customer_message=state.get("customer_message"),
+        )
+    except Exception as exc:
+        logger.error("[reconcile] manual-review email failed job=%s: %s", job_id, exc)
+
+
 async def _reconcile_one(row: dict, provider: PaymentProvider) -> str:
     """Process a single candidate row. Returns the histogram outcome key.
 
@@ -289,6 +316,9 @@ async def _reconcile_one(row: dict, provider: PaymentProvider) -> str:
                 "[reconcile] %s: Stripe says canceled; escalated saga %s to MANUAL_REVIEW",
                 hold_id, checkout_id,
             )
+            # Notify the customer their order is delayed — the saga task is gone,
+            # so its own choke-point email can't fire. Idempotent + never raises.
+            await _notify_manual_review(job_id)
             return "saga_escalated_oob_cancel"
 
         await audit.emit(
@@ -444,6 +474,9 @@ async def _reconcile_one(row: dict, provider: PaymentProvider) -> str:
                 "[reconcile] %s: stuck saga %s at %r for %s — escalated",
                 hold_id, checkout_id, saga_status, stale_for,
             )
+            # Same rationale as the oob-cancel branch: the saga task is dead,
+            # so the reconciler is the only place the delay email can originate.
+            await _notify_manual_review(job_id)
             return "stuck_saga_marked_review"
 
         # In-flight — saga is healthy. Bump reconciled_at so we don't pick

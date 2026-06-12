@@ -766,6 +766,18 @@ def run_job(job_id: str,
         except Exception as e:
             wlog.warning(f"Job {job_id} could not copy preview.json: {e}")
 
+    # Workstream D: copy the building instructions PDF to a stable location
+    # before workspace deletion so the checkout email layer can attach it to
+    # the "kit on the way" message. Mirrors the order_list/preview handoffs.
+    # The PDF also remains inside artifact.zip; this is the loose copy the
+    # notifications module reads (outputs/{job_id}/instructions.pdf).
+    _instructions_src = workspace / "Instructions" / "instructions.pdf"
+    if _instructions_src.exists():
+        try:
+            shutil.copy2(_instructions_src, job_root / "instructions.pdf")
+        except Exception as e:
+            wlog.warning(f"Job {job_id} could not copy instructions.pdf: {e}")
+
     # --- Success cleanup ---
     shutil.rmtree(workspace, ignore_errors=True)
 

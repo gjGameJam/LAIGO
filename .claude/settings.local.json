@@ -136,7 +136,26 @@
       "Bash(./.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('scripts/checkout/clients/lego_client.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -m py_compile scripts/checkout/clients/lego_client.py scripts/checkout/_cf_probe.py)",
       "Bash(./.venv/Scripts/python.exe -m pip uninstall -y patchright)",
-      "Bash(./.venv/Scripts/python.exe -c \"import ast; t=ast.parse\\(open\\('scripts/checkout/clients/lego_client.py'\\).read\\(\\)\\); print\\('lego_client parses OK'\\)\")"
+      "Bash(./.venv/Scripts/python.exe -c \"import ast; t=ast.parse\\(open\\('scripts/checkout/clients/lego_client.py'\\).read\\(\\)\\); print\\('lego_client parses OK'\\)\")",
+      "Bash(git --no-pager status)",
+      "Bash(git --no-pager diff --stat)",
+      "Bash(git --no-pager status --untracked-files=all --short)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile scripts/db.py scripts/checkout/models.py scripts/checkout/checkout_store_pg.py scripts/checkout/router.py scripts/checkout/saga.py scripts/checkout/clients/lego_client.py scripts/migrations/versions/0004_shipping_address_and_email.py)",
+      "Bash(./.venv/Scripts/python.exe -m scripts.test_saga_state_machine)",
+      "Bash(./.venv/Scripts/python.exe -m scripts.test_gate_bypass)",
+      "Bash(./.venv/Scripts/python.exe -)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile scripts/Main.py scripts/checkout/notifications.py scripts/checkout/saga.py)",
+      "Bash(./.venv/Scripts/python.exe -c \"import sys; sys.path.insert\\(0,'scripts'\\); import checkout.notifications as n; print\\('notifications import OK; is_enabled=', n.is_enabled\\(\\)\\)\")",
+      "Bash(DB_BACKEND=json ./.venv/Scripts/python.exe -c ' *)",
+      "Bash(./.venv/Scripts/python.exe -c \"import alembic; print\\('alembic', alembic.__version__\\)\")",
+      "Bash(./.venv/Scripts/python.exe -m alembic heads)",
+      "Bash(./.venv/Scripts/python.exe -m alembic history)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile scripts/checkout/optimizer.py scripts/checkout/router.py scripts/checkout/saga.py scripts/checkout/reconcile.py scripts/checkout/clients/lego_client.py)",
+      "Bash(./.venv/Scripts/python.exe -c \"import scripts.checkout.reconcile, scripts.checkout.router, scripts.checkout.saga; print\\('imports OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe -m scripts.test_optimizer)",
+      "Bash(grep -nE 'load_dotenv|__name__|asyncio.run|^def main|^async def main|DB_BACKEND|get_pool|init_pool' scripts/__TRACKED_VAR__.py)",
+      "Bash(./.venv/Scripts/python.exe -m scripts.test_phase_e_pg)",
+      "Bash(echo \"EXIT CODE: $?\")"
     ]
   },
   "enabledPlugins": {}

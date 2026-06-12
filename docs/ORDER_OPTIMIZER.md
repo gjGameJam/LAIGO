@@ -102,8 +102,8 @@ GET /jobs/{id}/checkout/{co_id}/status
 | LEGO.com Playwright login | ✅ Superseded by `storage_state` seeding | Headless login is impossible (email-only 2FA). Production loads a cached session from Neon (`external_sessions`), seeded once via `python -m scripts.seed_lego_session`. `_run_checkout` Step A only probes `/profile`. |
 | LEGO.com Playwright cart upload (Step C) | ✅ Verified + ported 2026-06-10 | "Upload List" → file input → "Add to Bag" selectors confirmed against live PaB and ported into `_run_checkout`. See §6.1 Step 3. |
 | LEGO.com Playwright checkout (Step D) | ✅ Verified + ported 2026-06-11 | Add to Bag → "Updated My Bag" modal → View My Bag → `/cart` → `checkout-securely-button-desktop`. See §6.1 Step 4. Step E (payment/place-order) deliberately not captured — gated. |
-| LEGO.com Playwright — headless Cloudflare wall | ⛔ **Prod blocker (2026-06-10)** | `order_from_lego` runs `headless=True`; Cloudflare hard-blocks headless on `pick-a-brick`. Headed works. Needs Xvfb/stealth before Render ordering functions. See §6.1 callout. |
-| LEGO.com Playwright place-order click | ⛔ Gated | Per [payment architecture decision](../scripts/checkout/manual_lego_test.py) 2026-05-31 LAIGO uses its own saved card and accepts chargeback liability — but the click that places a real order is intentionally not wired until end-to-end test strategy is finalized (sandbox? throwaway low-$ orders cancelled via lego.com/profile/orders?). |
+| LEGO.com Playwright — headless Cloudflare wall | ⛔ **Prod blocker (2026-06-11)** | Cloudflare hard-blocks **headless** on `pick-a-brick`; only **headed** passes (stealth drivers incl. patchright all fail — see §6.1 probe matrix). **Chosen fix: VPS + residential-proxy headed browser reached over CDP** (`LEGO_BROWSER_CDP_URL`). Design + runbook: `docs/LEGO_BROWSER_HOST.md`. Provisioning is the next step; `§7` lists the decisions needed. |
+| LEGO.com Playwright place-order click | ⛔ Gated | Payment-architecture decision 2026-05-31: LAIGO uses its own saved card and accepts chargeback liability — but the click that places a real order is intentionally not wired until the end-to-end test strategy is finalized (sandbox? throwaway low-$ orders cancelled via lego.com/profile/orders?). |
 | BrickOwl BOID lookup | ✅ Working | — |
 | BrickOwl catalog/availability | ❌ Blocked | Must contact BrickOwl at brickowl.com/contact to request access |
 | BrickOwl order placement | ❌ No API | BrickOwl is a seller API; no buyer order/create endpoint exists |
@@ -126,6 +126,9 @@ GET /jobs/{id}/checkout/{co_id}/status
 BRICKOWL_API_KEY=<from brickowl.com/developer>
 STRIPE_SECRET_KEY=sk_test_...
 STRIPE_PUBLISHABLE_KEY=pk_test_...
+# DEPRECATED for ordering — login is now via storage_state seeding
+# (docs/LEGO_SESSION.md). Still read by gate.compute_decision() for the
+# marketplaces_live check, so keep them set until the gate is refactored.
 LEGO_EMAIL=<LAIGO LEGO.com account email>
 LEGO_PASSWORD=<LAIGO LEGO.com account password>
 ```
@@ -169,8 +172,10 @@ Start the server (`uvicorn Main:app --reload` from `scripts/`) and hit these deb
 | `STRIPE_SECRET_KEY` | `.env.secrets` | YES | — | Stripe key (`sk_test_...` or `sk_live_...`) |
 | `STRIPE_PUBLISHABLE_KEY` | `.env.secrets` | YES | — | Frontend Stripe.js key (not used server-side) |
 | `STRIPE_WEBHOOK_SECRET` | `.env.secrets` | YES | — | Webhook signature validation (optional) |
-| `LEGO_EMAIL` | `.env.secrets` | YES | — | LAIGO's LEGO.com account email |
-| `LEGO_PASSWORD` | `.env.secrets` | YES | — | LAIGO's LEGO.com account password |
+| `LEGO_EMAIL` | `.env.secrets` | YES | — | **Deprecated for ordering** (storage_state seeding replaced it). Still read by `gate.compute_decision()`. |
+| `LEGO_PASSWORD` | `.env.secrets` | YES | — | **Deprecated for ordering** (see `LEGO_EMAIL`). |
+| `LEGO_BROWSER_CDP_URL` | Render env | — (URL embeds token) | — (unset) | If set, `order_from_lego` connects to a remote headed browser over CDP instead of launching locally — the Cloudflare-bypass path. See `docs/LEGO_BROWSER_HOST.md`. ⚠️ embeds the browserless token; treat as sensitive. |
+| `LEGO_PLAYWRIGHT_HEADLESS` | `.env` / Render env | no | `true` | Local-launch headless toggle (ignored when `LEGO_BROWSER_CDP_URL` is set). Must be `false` for a headed Xvfb deploy. |
 | `BRICKLINK_CONSUMER_KEY` | `.env.secrets` | YES | — | BrickLink OAuth consumer key (not yet used) |
 | `BRICKLINK_CONSUMER_SECRET` | `.env.secrets` | YES | — | BrickLink OAuth consumer secret (not yet used) |
 | `BRICKLINK_TOKEN` | `.env.secrets` | YES | — | BrickLink OAuth token (not yet used) |
@@ -244,17 +249,26 @@ The response is parsed by `_parse_available()` and `_parse_price_cents()`. Price
 
 **Playwright ordering** (`order_from_lego`):
 
-⚠️ **The flow encoded in `_run_checkout()` today is partially wrong** and partially unverified. Verification work began 2026-06-02 against live LEGO.com; the real flow and verified selectors are tracked incrementally in `scripts/checkout/manual_lego_test.py` (a throwaway harness — verified selectors get ported back into `_run_checkout()` only after each step is confirmed end-to-end).
+The full upload→cart→checkout flow (Steps 2–4 below) is **verified against live
+PaB and ported into `_run_checkout`** (2026-06-10/11). **Login is NOT part of
+this flow** — it is handled by Google-SSO `storage_state` seeding (see
+`docs/LEGO_SESSION.md`); `_run_checkout` Step A only probes `/profile`. Steps
+5–6 (payment / place-order) are **gated** — deliberately not captured.
 
-**Real flow (as discovered against live site, 2026-06-02 → 2026-06-03):**
+> **The production blocker is Cloudflare-blocks-headless** (callout below).
+> The chosen fix is a VPS + residential-proxy **headed** browser the saga
+> reaches over CDP — full design + runbook in **`docs/LEGO_BROWSER_HOST.md`**.
+> Selectors are correct; nothing ships to Render ordering until the browser
+> host exists.
+
+Re-verify selectors against the live DOM with `scripts/checkout/_inspect_pab.py`
+(headed; dumps to `outputs/lego_debug/selectors_dump.txt`) if LEGO's SPA drifts.
+
+**Verified flow (live, 2026-06-10 → 2026-06-11):**
 
 | Step | What happens | Verified? | Selector(s) |
 |---|---|---|---|
-| 0 | Land on any lego.com URL → fresh-session popups appear (age gate + cookie banner). They are scoped to the first navigation only; cookies persist across redirects within the session, so they do NOT re-appear on identity.lego.com or post-login. | ✅ 2026-06-03 | Age gate: `[data-test='age-gate-grown-up-cta']`. Cookie accept: `[data-test='cookie-accept-all']`. (LEGO defers popup JS until after `networkidle` fires — wait per-locator, not for networkidle.) |
-| 1a | Click header "Sign In" → opens auth dialog on the same page | ✅ 2026-06-03 | `[data-test='header-account-cta']` |
-| 1b | Click dialog "Sign In" link → redirects to `identity.lego.com/connect/authorize` | ✅ 2026-06-03 | `[data-test='legoid-login-button']` |
-| 1c | On identity.lego.com, fill username, click Continue → renders password screen | ✅ 2026-06-03 | Username: `[data-testid='usernameField']`. Continue: `[data-testid='loginBtn']`. **Note: identity.lego.com uses `data-testid` (no dash); lego.com uses `data-test` (with dash). Same attribute family, different spelling.** |
-| 1d | Fill password, click "Sign in" (same `loginBtn` selector — LEGO reuses the form, only the label changes) → redirects back to `www.lego.com` | 🟡 Selectors known, end-to-end verification pending | Password: `[data-testid='passwordField']`. Submit: `[data-testid='loginBtn']`. |
+| — | (Login) Handled out-of-band by `storage_state` seeding — see `docs/LEGO_SESSION.md`. On a *fresh* (unseeded) session, lego.com shows age-gate + cookie-banner popups (`[data-test='age-gate-grown-up-cta']`, `[data-test='cookie-accept-all']`); the seeded session carries cookies so they don't reappear in `_run_checkout`. LEGO defers popup JS until after `networkidle` — wait per-locator. | ✅ | (seeding only) |
 | 2 | Navigate to Pick-a-Brick | ✅ 2026-06-10 | Logged-in PaB at `_PAB_URL` renders correctly with the cached `storage_state`. |
 | 3 | Upload list → View All Pieces → Pick selected pieces → cart drawer | ✅ 2026-06-10 (full sequence verified end-to-end; cart shows the exact uploaded items + prices) | Open modal: `[data-test='pab-listUploader-open-modal-desktop-button']` (mobile twin: `…-mobile-button`). File input: `[data-test='pab-listUploader-input']` (`id=list-upload`, `accept=".csv,.json,.lxfml"`). **JSON shape confirmed by PaB's own template (`pab-listUploader-download-json-template`): `[{"elementId","quantity"}, …]` — identical to what `_run_checkout` builds.** After parse: `[data-test='pab-listUploader-viewPieces-button']` ("View All Pieces") closes the upload modal; `[data-test='pab-listupload-button-addRemove']` ("Pick selected pieces") adds all parsed pieces to the cart and opens the cart drawer. **Conditional:** if the bag already held pieces, an "Overwrite pieces?" modal (`[data-test='pab-overwrite-pieces']`) appears — confirm with `[data-test='overwrite-pieces-modal-overwrite-button']` ("Yes, overwrite"). Cart drawer: `[data-test='pick-a-brick-cart']`; items `[data-test='element-cart-item']`; tabs `[data-test='element-cart-tabs-child']`. Bottom bar: `[data-test='pab-cart-bar-open-cart-button']`; header cart link `[data-test='util-bar-cart']` (`href=/en-us/cart`). Ported to `_run_checkout` Step C 2026-06-10. |
 | 4 | Add to Bag → "Updated My Bag" modal → View My Bag → /cart → Checkout Securely | ✅ 2026-06-11 | The cart drawer has NO separate checkout button — `[data-test='pab-cart-add-to-main-cart-button']` ("Add to Bag", `type=submit`) commits the PaB cart and opens the "Updated My Bag" confirmation modal (`[data-test='pab-add-to-bag-confirmation']`). Its "View My Bag" button (`[data-test='pab-add-to-bag-confirmation-button-cart']`) navigates to `https://www.lego.com/en-us/cart` ("My Cart \| LEGO Shop"). There the checkout CTA is `[data-test='checkout-securely-button-desktop']` (role=link; mobile twin `checkout-securely-button-mobile`, `id=mobileCheckoutButton`). Order total: `[data-test='cart-order-total']`. Ported to `_run_checkout` Step D 2026-06-11. Clicking Checkout Securely enters the payment flow (Step 5/6, gated — not captured). |
@@ -275,18 +289,16 @@ The response is parsed by `_parse_available()` and `_parse_price_cents()`. Price
 > | patchright + real Chrome, headless | ❌ Blocked |
 > | **Headed** (any driver) | ✅ Passes |
 >
-> **Conclusion: no headless approach works; production must run a real headed browser.** The launch is now env-driven (deployment-agnostic):
-> - `LEGO_BROWSER_CDP_URL` — if set, `connect_over_cdp` to a remote/hosted browser (Browserless/Browserbase) that handles Cloudflare off-box. ⚠️ ships the LEGO `storage_state` cookies to that provider — security-sensitive.
-> - else local launch with `LEGO_PLAYWRIGHT_HEADLESS` (default `true`). On Render the prod path must set `LEGO_PLAYWRIGHT_HEADLESS=false` and run **headed under Xvfb** — which requires a **Docker-based** Render service (the native Python runtime can't `apt install xvfb`).
+> **Conclusion: no headless approach works; production must run a real headed browser.** The launch is env-driven (deployment-agnostic): `LEGO_BROWSER_CDP_URL` → `connect_over_cdp` to a remote headed browser; else local launch gated by `LEGO_PLAYWRIGHT_HEADLESS` (default `true`).
 >
-> **Open unknown:** whether Render's **datacenter egress IP** passes Cloudflare even headed (locally it's a residential IP). If the datacenter IP is challenged regardless, headed-Xvfb alone won't suffice and we'll need a residential proxy or a hosted-browser service. Must be tested on Render before relying on it.
+> **Chosen fix (2026-06-11): VPS + residential-proxy headed browser over CDP** — `browserless/chromium` on a VPS, routed through a residential proxy (IP-whitelist auth) so the exit IP is residential, reached from Render via `LEGO_BROWSER_CDP_URL`. This keeps the LEGO `storage_state` cookies on infra you control and sidesteps both the headless block and the datacenter-IP question. Full design, security model, docker-compose, and setup runbook: **`docs/LEGO_BROWSER_HOST.md`** (`§7` lists the provider decisions still open). Render's native runtime can't run Xvfb itself (no root), which is why the browser is hosted off-Render.
 
-**Things that surprised us during verification (worth knowing if this drifts again):**
-- `/profile/login` is NOT a login form — it's a landing page with a "Sign In" header button that opens a modal. Login itself happens on identity.lego.com via OAuth-style redirect.
-- `data-test` vs `data-testid` differ by domain. Easy to mix up; don't try to consolidate.
-- The age gate + cookie banner are rendered by JS that fires AFTER Playwright's `networkidle` event. Use per-locator `wait_for(state="visible")` instead of relying on networkidle.
+**Things worth knowing if the DOM drifts (re-verify with `scripts/checkout/_inspect_pab.py`):**
+- `data-test` (lego.com) vs `data-testid` (identity.lego.com) differ by domain. Easy to mix up; don't consolidate.
+- The age-gate + cookie-banner popups render via JS that fires AFTER `networkidle`; use per-locator `wait_for(state="visible")`. (Only appear on a fresh/unseeded session — the seeded `storage_state` carries the dismissal cookies, so `_run_checkout` doesn't hit them.)
+- The PaB file uploader is a multi-step modal flow, not a single input: Upload List → file input → View All Pieces → Pick selected pieces → (Overwrite? → Yes) → cart drawer → Add to Bag → Updated-My-Bag modal → View My Bag → `/cart` → Checkout Securely. See §6.1 Steps 3–4 for every selector.
 
-**Debug screenshots:** dropped at `outputs/lego_debug/` by both `order_from_lego` (numbered `01_logged_in` → `05_confirmed`, `ERROR_final_state`) and the verification harness (numbered `step1_00_pab_loaded` → `step1_06_post_login`).
+**Debug screenshots:** dropped at `outputs/lego_debug/` by `order_from_lego` (`01_session_ok` → `06_confirmed`, plus `ERROR_*`) and by `_inspect_pab.py` (`step2_*`, `step3_*`, `exercise_*`, `checkout_*`).
 
 **LEGO.com order cancellation:** There is no API for this. If the Saga fails after a LEGO.com order is placed, the `_compensate()` function logs a warning with the order ID and instructs manual cancellation at `lego.com/profile/orders`.
 

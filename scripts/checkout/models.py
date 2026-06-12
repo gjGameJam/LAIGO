@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
 
@@ -13,10 +15,83 @@ class QuoteRequest(BaseModel):
     customer_email: str = Field(..., description="Used for order confirmation emails")
 
 
+# US states + DC + the territories LEGO ships to. v1 is US-only (decision
+# 2026-06-11 in docs/CHECKOUT_COMPLETION_PLAN.md §10); this set is the
+# allowlist the ShippingAddress validator enforces. Expanding ship-to is a
+# coordinated change (validation + LEGO storefront/locale + possibly 3DS).
+_US_STATE_CODES: frozenset[str] = frozenset({
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+    "DC", "PR", "VI", "GU", "AS", "MP",
+})
+
+_US_ZIP_RE = re.compile(r"^\d{5}(-\d{4})?$")
+
+
+class ShippingAddress(BaseModel):
+    """Full drop-ship address for the customer's LEGO order.
+
+    Collected at /confirm (not /quote) and persisted to
+    checkouts.shipping_address (JSONB). The saga reads it from state and
+    passes it into lego_client.order_from_lego(...) so LEGO ships the loose
+    bricks directly to the customer (LAIGO is merchant of record).
+
+    v1 is US-only: country must be "US", state must be a known US/territory
+    code, postal_code must be a US ZIP (5 or ZIP+4). Validation failures
+    surface as FastAPI 422 at /confirm (Pydantic), matching the documented
+    {detail: ...} error contract.
+    """
+    full_name: str = Field(..., min_length=1, max_length=100)
+    line1: str = Field(..., min_length=1, max_length=200)
+    line2: Optional[str] = Field(None, max_length=200)
+    city: str = Field(..., min_length=1, max_length=100)
+    state: str = Field(..., min_length=2, max_length=2,
+                       description="Two-letter US state/territory code")
+    postal_code: str = Field(..., min_length=5, max_length=10,
+                             description="US ZIP (5-digit) or ZIP+4")
+    country: str = Field("US", min_length=2, max_length=2,
+                         description="ISO 3166-1 alpha-2; v1 accepts 'US' only")
+    phone: Optional[str] = Field(None, max_length=30,
+                                 description="Optional; some carriers require it for delivery")
+
+    @field_validator("country")
+    @classmethod
+    def _country_us_only(cls, v: str) -> str:
+        v = v.strip().upper()
+        if v != "US":
+            raise ValueError("v1 ships to US addresses only (country must be 'US')")
+        return v
+
+    @field_validator("state")
+    @classmethod
+    def _state_must_be_us(cls, v: str) -> str:
+        v = v.strip().upper()
+        if v not in _US_STATE_CODES:
+            raise ValueError(f"unrecognized US state/territory code: {v!r}")
+        return v
+
+    @field_validator("postal_code")
+    @classmethod
+    def _postal_must_be_us_zip(cls, v: str) -> str:
+        v = v.strip()
+        if not _US_ZIP_RE.match(v):
+            raise ValueError("postal_code must be a US ZIP (12345 or 12345-6789)")
+        return v
+
+
 class ConfirmRequest(BaseModel):
     checkout_id: str = Field(..., description="checkout_id returned by /quote")
     stripe_payment_method_id: str = Field(
         ..., description="pm_... token produced by Stripe.js on the frontend"
+    )
+    # Workstream A: full drop-ship address collected here (not at /quote).
+    # Persisted to checkout state and threaded into order_from_lego for the
+    # LEGO Step E address form (drop-ship to the customer).
+    shipping_address: ShippingAddress = Field(
+        ..., description="Customer's full US shipping address for the LEGO drop-ship"
     )
 
 

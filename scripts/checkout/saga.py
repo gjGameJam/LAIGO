@@ -50,11 +50,13 @@ import asyncio
 import logging
 import math
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .models import AllocationResult, ERROR_MESSAGES, HoldDisposition, LegoSessionExpiredError, SagaStatus, StockoutError
 from . import audit
+from . import notifications
 from ._cancel_helpers import cancel_hold_with_retry
 from . import checkout_store_dispatch as checkout_store
 from . import payment_holds_store
@@ -801,7 +803,29 @@ async def execute_checkout_saga(
     Do not call _execute_checkout_saga_inner() directly — bypassing this
     wrapper means an unbounded Saga lifetime, which can pin _running_sagas
     forever and hold customer money for up to 7 days.
+
+    Workstream D: this wrapper is also the single choke point for customer
+    lifecycle email. The "order received" email fires at the top (before the
+    hold); the terminal email (kit-on-the-way / manual-review / not-charged)
+    fires once after the inner saga settles, branching on the final
+    saga_status. Centralizing here avoids touching the saga's many internal
+    return branches. notifications.* never raises and is idempotent, so these
+    calls are safe to await unguarded.
     """
+    # Order-received email (idempotent; no-op if email is unconfigured).
+    try:
+        start_state = await checkout_store.load(job_id) or {}
+        await notifications.send_order_confirmation(
+            job_id,
+            start_state.get("customer_email") or "",
+            customer_total_cents=allocation.customer_total_cents,
+            checkout_id=checkout_id,
+        )
+    except Exception:
+        # notifications.* never raises, but a load() failure could — emails are
+        # best-effort and must never abort the saga.
+        logger.exception(f"[saga] [{checkout_id}] order-confirmation email errored")
+
     try:
         await asyncio.wait_for(
             _execute_checkout_saga_inner(
@@ -817,6 +841,51 @@ async def execute_checkout_saga(
         # Inner coroutine was cancelled at the await it was blocked on.
         # The handler reads checkpointed state to decide recovery.
         await _handle_saga_timeout(job_id, checkout_id)
+
+    # Terminal lifecycle email, dispatched on the settled saga_status.
+    try:
+        await _emit_terminal_email(job_id, checkout_id)
+    except Exception:
+        logger.exception(f"[saga] [{checkout_id}] terminal email errored")
+
+
+async def _emit_terminal_email(job_id: str, checkout_id: str) -> None:
+    """Send the one terminal customer email based on the saga's final status.
+
+    Idempotent via notifications.* (emails_sent ledger). Called once after the
+    inner saga settles. Non-terminal statuses (shouldn't occur here) send
+    nothing. Never raises into the caller — notifications.* swallow their own
+    errors; this only adds a load().
+    """
+    state = await checkout_store.load(job_id) or {}
+    status = state.get("saga_status")
+    to_email = state.get("customer_email") or ""
+
+    if status == SagaStatus.PAYMENT_CAPTURED.value:
+        pdf_path = (
+            Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
+            / job_id / "instructions.pdf"
+        )
+        await notifications.send_kit_on_the_way(
+            job_id, to_email,
+            lego_order_id=state.get("lego_order_id"),
+            instructions_pdf_path=pdf_path,
+        )
+    elif status == SagaStatus.MANUAL_REVIEW.value:
+        await notifications.send_manual_review_notice(
+            job_id, to_email,
+            customer_message=state.get("customer_message"),
+        )
+    elif status in (SagaStatus.COMPENSATED.value, SagaStatus.FAILED.value):
+        await notifications.send_not_charged_notice(
+            job_id, to_email,
+            customer_message=state.get("customer_message"),
+        )
+    else:
+        logger.warning(
+            "[saga] [%s] terminal email: non-terminal status %r — no email sent",
+            checkout_id, status,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1142,6 +1211,14 @@ async def _execute_checkout_saga_inner(
     current_allocation = allocation
     retries_left = max_stockout_retries
 
+    # Workstream A — load the customer's drop-ship address ONCE before the
+    # placement loop. It's written at /confirm and never mutated during the
+    # saga, so a single read here avoids a per-iteration DB round-trip and the
+    # `state`-undefined-on-first-pass bug (state is otherwise only set inside
+    # the stockout-retry branch). None for pre-0004 checkouts; Step E guards.
+    _addr_state = await checkout_store.load(job_id) or {}
+    shipping_address = _addr_state.get("shipping_address")
+
     while True:
         # ── B5: pre-placement allocation-drift check ─────────────────────────
         # Stockout retries can re-optimize `current_allocation` to a higher
@@ -1316,7 +1393,7 @@ async def _execute_checkout_saga_inner(
             state = await checkout_store.load(job_id) or {}
             order_items = checkout_store.read_order_list(job_id)
 
-            from .optimizer import merge_listings, apply_free_shipping_thresholds
+            from .optimizer import merge_listings, apply_free_shipping_thresholds, apply_lego_service_fee
             country = state.get("shipping_country", "US")
             zipp = state.get("shipping_zip", "")
             bo_listings, lego_listings, bl_listings = await asyncio.gather(
@@ -1324,8 +1401,13 @@ async def _execute_checkout_saga_inner(
                 lego_client.get_all_listings(order_items, country, zipp),
                 bricklink_client.get_all_listings(order_items, country, zipp),
             )
-            current_allocation = apply_free_shipping_thresholds(
-                optimize(order_items, merge_listings(lego_listings, bo_listings, bl_listings))
+            # Mirror the router's quote pipeline (free-shipping then service fee)
+            # so a stockout re-optimization keeps the same pricing basis the
+            # customer was quoted — the capture amount derives from this.
+            current_allocation = apply_lego_service_fee(
+                apply_free_shipping_thresholds(
+                    optimize(order_items, merge_listings(lego_listings, bo_listings, bl_listings))
+                )
             )
             retries_left -= 1
             logger.info(
@@ -1354,6 +1436,11 @@ async def _execute_checkout_saga_inner(
                 lego_order_id = await lego_client.order_from_lego(
                     items=[{"elementId": eid, "quantity": qty} for eid, qty in lego_items.items()],
                     job_id=job_id,
+                    # Workstream A — drop-ship to the customer's address (persisted
+                    # at /confirm to checkouts.shipping_address; loaded once into
+                    # `shipping_address` before the loop). None for pre-0004
+                    # checkouts; Step E guards on it before placing the order.
+                    shipping_address=shipping_address,
                 )
             except StockoutError as exc:
                 # B8/H9 (Option B — documented asymmetry):

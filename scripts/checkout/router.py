@@ -42,7 +42,7 @@ from .models import (
 from . import checkout_store_dispatch as checkout_store, saga as saga_module
 from .checkout_store_dispatch import ActiveCheckoutExistsError
 from .clients import lego_client, brickowl_client, bricklink_client
-from .optimizer import optimize, merge_listings, apply_free_shipping_thresholds
+from .optimizer import optimize, merge_listings, apply_free_shipping_thresholds, apply_lego_service_fee
 from .cache import cache_get, cache_set
 from .dependencies import require_checkout_gate_open
 from .gate import GateDecision
@@ -114,6 +114,9 @@ async def get_quote(job_id: str, body: QuoteRequest):
     all_listings = merge_listings(lego_listings, brickowl_listings, bricklink_listings)
     allocation = optimize(order_items, all_listings)
     allocation = apply_free_shipping_thresholds(allocation)
+    # §8 pricing: add LEGO's order-level service fee (no-op unless configured)
+    # AFTER free-shipping zeroing so the handling fee isn't accidentally zeroed.
+    allocation = apply_lego_service_fee(allocation)
 
     # Items the optimizer couldn't fill from any source are unsourceable.
     # In MVP (LEGO.com only), these are pieces not on LEGO.com Pick-a-Brick.
@@ -240,6 +243,11 @@ async def confirm_checkout(
             "shipping_country": cached["shipping_country"],
             "shipping_zip": cached["shipping_zip"],
             "customer_email": cached["customer_email"],
+            # Workstream A — full drop-ship address (US-only, Pydantic-validated
+            # on ConfirmRequest). Persisted as a dict to checkouts.shipping_address
+            # (JSONB); the saga reads it back from state and passes it into
+            # order_from_lego for the LEGO Step E address form.
+            "shipping_address": body.shipping_address.model_dump(),
             # Phase C: allocation persisted to checkouts.allocation (JSONB).
             # The JSON backend stores it in the state file alongside everything
             # else; both backends preserve the quote-time allocation snapshot

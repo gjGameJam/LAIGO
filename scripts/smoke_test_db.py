@@ -40,6 +40,10 @@ async def main() -> int:
     load_dotenv(project_root / ".env.secrets")
     load_dotenv(project_root / ".env")
 
+    # Prefer DEV_DATABASE_URL; refuse if the result is prod. See _pg_test_guard.
+    from scripts._pg_test_guard import prepare_test_db
+    prepare_test_db()
+
     # B50 — verify alembic's sync driver is installed BEFORE touching the DB.
     # Phase A's original smoke test only used asyncpg; psycopg2-binary was
     # missing from requirements.txt and the gap stayed invisible until Phase B

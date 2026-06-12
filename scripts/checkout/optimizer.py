@@ -251,3 +251,77 @@ def apply_free_shipping_thresholds(allocation: AllocationResult) -> AllocationRe
         "laigo_fee_cents": new_laigo_fee,
         "customer_total_cents": new_grand_total + new_laigo_fee,
     })
+
+
+def apply_lego_service_fee(allocation: AllocationResult) -> AllocationResult:
+    """Add LEGO.com's order-level service/handling fee to the LEGO seller line.
+
+    Why this exists (CHECKOUT_COMPLETION_PLAN.md §8 pricing concern): LEGO
+    Pick-a-Brick charges an order-level **service fee** on small orders (a
+    $7.00 fee was observed on a $0.54 order during verification). Our LEGO
+    listings model pieces + flat shipping only — without this, the customer
+    quote under-charges and LAIGO eats the gap when LEGO bills LAIGO's card.
+
+    Model (both env-tunable; the EXACT rule must be confirmed against a real
+    LEGO cart total during C2 / Step E verification — see lego_client Step E):
+      LEGO_SERVICE_FEE_CENTS                  (default 0) — the fee amount.
+      LEGO_SERVICE_FEE_WAIVER_THRESHOLD_CENTS (default 0) — LEGO piece subtotal
+          at/above which the fee is WAIVED. 0 means "never waive" (fee always
+          applies when > 0). Set this to LEGO's real waiver threshold once known.
+
+    Decision rule: the fee applies to the LEGO order when
+      fee > 0 AND (threshold <= 0 OR lego_piece_cost < threshold).
+
+    DEFAULT IS A NO-OP: with LEGO_SERVICE_FEE_CENTS=0 (the default), this
+    returns the allocation unchanged — so prod behavior is identical until an
+    operator sets a C2-confirmed value. This avoids over-charging customers
+    with a guessed fee while making the mechanism ready.
+
+    The fee is folded into the LEGO entry's shipping_cost_cents line (i.e.
+    "shipping + handling") to preserve the piece+shipping=subtotal invariant
+    without a model/response/frontend change. Apply AFTER
+    apply_free_shipping_thresholds so the free-shipping zeroing (large orders)
+    doesn't also zero the handling fee (small orders) — the two target
+    opposite order-size regimes.
+    """
+    from .clients.lego_client import SELLER_ID as _LEGO_ID
+
+    fee = int(os.environ.get("LEGO_SERVICE_FEE_CENTS", "0"))
+    if fee <= 0:
+        return allocation  # default no-op — fee not configured
+
+    threshold = int(os.environ.get("LEGO_SERVICE_FEE_WAIVER_THRESHOLD_CENTS", "0"))
+
+    new_entries = list(allocation.seller_allocations)
+    fee_added = 0
+    for i, entry in enumerate(new_entries):
+        if entry.seller_id != _LEGO_ID:
+            continue
+        # Waive on large orders (piece subtotal >= threshold). threshold<=0
+        # disables the waiver entirely (fee always applies to the LEGO order).
+        if threshold > 0 and entry.piece_cost_cents >= threshold:
+            continue
+        fee_added += fee
+        new_entries[i] = AllocationEntry(
+            seller_id=entry.seller_id,
+            seller_name=entry.seller_name,
+            items=entry.items,
+            piece_cost_cents=entry.piece_cost_cents,
+            shipping_cost_cents=entry.shipping_cost_cents + fee,  # shipping + handling
+            subtotal_cents=entry.subtotal_cents + fee,
+        )
+
+    if fee_added == 0:
+        return allocation
+
+    new_total_shipping = allocation.total_shipping_cents + fee_added
+    new_grand_total = allocation.grand_total_cents + fee_added
+    new_laigo_fee = compute_laigo_fee(new_grand_total)
+
+    return allocation.model_copy(update={
+        "seller_allocations": new_entries,
+        "total_shipping_cents": new_total_shipping,
+        "grand_total_cents": new_grand_total,
+        "laigo_fee_cents": new_laigo_fee,
+        "customer_total_cents": new_grand_total + new_laigo_fee,
+    })

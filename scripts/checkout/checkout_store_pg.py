@@ -111,6 +111,9 @@ _CHECKOUT_COLS: dict[str, str] = {
     "shipping_zip":     "shipping_zip",
     "customer_email":   "customer_email",
     "allocation":       "allocation",
+    # Workstream A — full drop-ship address (JSONB), collected at /confirm.
+    # NULL for quote-only / pre-0004 rows. See ShippingAddress in models.py.
+    "shipping_address": "shipping_address",
 }
 
 # State keys that map to columns on the `sagas` table.
@@ -133,6 +136,11 @@ _SAGA_COLS: dict[str, str] = {
     # for any non-MANUAL_REVIEW state OR for MANUAL_REVIEW with no hold to
     # dispose. See HoldDisposition in models.py.
     "hold_disposition":         "hold_disposition",
+    # Workstream D — idempotency ledger for the customer email layer. JSON
+    # array of event keys already sent (e.g. ["order_confirmation"]). The
+    # notification helpers check membership before sending so saga retries /
+    # reconciler passes never double-send. NOT NULL DEFAULT '[]' in the schema.
+    "emails_sent":              "emails_sent",
     "completed_at":             "completed_at",
 }
 
@@ -258,13 +266,15 @@ async def load(job_id: str) -> Optional[dict]:
             s.customer_message,
             s.manual_review_reason,
             s.hold_disposition,
+            s.emails_sent,
             s.initiated_at,
             s.last_transition_at,
             s.completed_at,
             c.shipping_country,
             c.shipping_zip,
             c.customer_email,
-            c.allocation
+            c.allocation,
+            c.shipping_address
         FROM sagas s
         JOIN checkouts c ON s.checkout_id = c.checkout_id
         WHERE s.job_id = $1
@@ -354,10 +364,11 @@ async def _insert_checkouts(conn: asyncpg.Connection, job_id: str, state: dict) 
             customer_email,
             allocation,
             unsourceable_items,
+            shipping_address,
             created_at,
             expires_at
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7,
+            $1, $2, $3, $4, $5, $6, $7, $8,
             NOW(),
             NOW() + make_interval(secs => 600)
         )
@@ -369,6 +380,9 @@ async def _insert_checkouts(conn: asyncpg.Connection, job_id: str, state: dict) 
         state.get("customer_email", ""),
         state.get("allocation", {}),
         state.get("unsourceable_items", []),
+        # JSONB; the codec encodes a Python dict transparently. NULL when the
+        # caller didn't supply an address (quote-only paths never call save()).
+        state.get("shipping_address"),
     )
 
 
@@ -402,14 +416,15 @@ async def _insert_sagas(conn: asyncpg.Connection, job_id: str, state: dict) -> N
             customer_message,
             manual_review_reason,
             hold_disposition,
+            emails_sent,
             initiated_at,
             last_transition_at,
             completed_at
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
             NOW(),
             NOW(),
-            $15
+            $16
         )
         """,
         state["checkout_id"],
@@ -429,6 +444,9 @@ async def _insert_sagas(conn: asyncpg.Connection, job_id: str, state: dict) -> N
         # saves never set it (no MANUAL_REVIEW at /confirm). saga.py +
         # saga_resume.py set it via update() at MANUAL_REVIEW transitions.
         _coerce_for_db("hold_disposition", state.get("hold_disposition")),
+        # Workstream D — email idempotency ledger. Default empty list at insert;
+        # notification helpers append keys via update() as emails go out.
+        state.get("emails_sent", []),
         _coerce_for_db("completed_at", state.get("completed_at")),
     )
 

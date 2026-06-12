@@ -475,10 +475,18 @@ async def _screenshot(page: Page, job_id: str, label: str) -> None:
 async def order_from_lego(
     items: list[dict],   # [{elementId: str, quantity: int}]
     job_id: str,
+    shipping_address: dict | None = None,
 ) -> str:
     """
     Load the cached LEGO.com session, upload items to Pick-a-Brick,
     and complete checkout. Returns the LEGO.com order confirmation number.
+
+    `shipping_address` (Workstream A) is the customer's drop-ship address
+    (the dict shape of models.ShippingAddress). It is threaded to Step E's
+    address form so LEGO ships the bricks directly to the customer. Optional
+    (defaults None) so search/availability callers and tests don't have to
+    supply it; Step E (gated) raises if it's missing when actually placing
+    an order.
 
     Requires:
       - migration 0003 applied (external_sessions table exists)
@@ -528,7 +536,7 @@ async def order_from_lego(
         )
         page: Page = await context.new_page()
         try:
-            return await _run_checkout(page, items, job_id)
+            return await _run_checkout(page, items, job_id, shipping_address)
         except LegoSessionExpiredError:
             # Cached state loaded but LEGO bounced us to /profile/login on
             # the session-probe step. Screenshot for operator diagnosis;
@@ -549,7 +557,12 @@ async def order_from_lego(
             await browser.close()
 
 
-async def _run_checkout(page: Page, items: list[dict], job_id: str) -> str:
+async def _run_checkout(
+    page: Page,
+    items: list[dict],
+    job_id: str,
+    shipping_address: dict | None = None,
+) -> str:
     # ── Step A: Verify cached session still works ────────────────────────────
     # Navigate to /profile (a logged-in-only page). If LEGO accepted the cached
     # cookies, we stay on /profile/<something>. If they're expired, LEGO
@@ -654,12 +667,24 @@ async def _run_checkout(page: Page, items: list[dict], job_id: str) -> str:
     await page.wait_for_load_state("networkidle", timeout=_TIMEOUT_MS)
     await _screenshot(page, job_id, "05_checkout")
 
-    # ── Step E: Place order (uses saved payment method on LAIGO's account) ────
-    # ⛔ GATED + UNVERIFIED: this click places a REAL charge on LAIGO's saved
-    # card (payment-architecture decision 2026-05-31). The checkout/payment page
-    # selectors below have NOT been captured (verification deliberately stops
-    # before Place Order). Must NOT be wired until the end-to-end test strategy
-    # is finalized. See docs/ORDER_OPTIMIZER §6.1 Step 6.
+    # ── Step E: Address form → delivery → place order ─────────────────────────
+    # ⛔ GATED + UNVERIFIED. Two uncaptured sub-steps live here (C2 in
+    # docs/CHECKOUT_COMPLETION_PLAN.md), to be filled once selectors are
+    # captured with a HEADED browser (Cloudflare blocks headless):
+    #   E1. Drop-ship address form — set the delivery address to `shipping_address`
+    #       (the CUSTOMER's, not LAIGO's saved address). Guard before filling:
+    #         if shipping_address is None: raise RuntimeError("no drop-ship address")
+    #   E2. Delivery-method selection + confirm LAIGO's saved card is used.
+    #       §8 PRICING: capture LEGO's REAL order total here (pieces + shipping +
+    #       any service/handling fee) and confirm it's <= the authorized Stripe
+    #       hold before placing. This is also how we confirm the real values for
+    #       LEGO_SERVICE_FEE_CENTS / _WAIVER_THRESHOLD_CENTS (optimizer.py
+    #       apply_lego_service_fee) — the fee model is default-off until measured
+    #       against a real cart here.
+    # E3 (below) places a REAL charge on LAIGO's saved card (payment-architecture
+    # decision 2026-05-31). Selectors NOT captured (verification deliberately
+    # stops before Place Order). Must NOT be wired until the end-to-end test
+    # strategy is finalized. See docs/ORDER_OPTIMIZER §6.1 Step 6.
     await page.click("[data-test='place-order-button']")
     await page.wait_for_selector("[data-test='order-confirmation-number']", timeout=_TIMEOUT_MS)
     await _screenshot(page, job_id, "06_confirmed")

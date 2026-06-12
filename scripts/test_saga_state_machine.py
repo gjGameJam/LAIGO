@@ -178,7 +178,7 @@ async def test_happy_path_initiated_to_captured(tmpdir: Path):
     provider, cstore, lego_client = await _setup(tmpdir)
     try:
         # Monkey-patch LEGO order to succeed with a fake ID
-        async def fake_lego_order(items, job_id):
+        async def fake_lego_order(items, job_id, shipping_address=None):
             return "lego_test_order_001"
         original = lego_client.order_from_lego
         lego_client.order_from_lego = fake_lego_order
@@ -352,7 +352,7 @@ async def test_order_fails_after_hold_to_compensated(tmpdir: Path):
     """Verifies: STRIPE_HELD -> COMPENSATED when LEGO order fails AND cancel succeeds."""
     provider, cstore, lego_client = await _setup(tmpdir)
     try:
-        async def failing_lego_order(items, job_id):
+        async def failing_lego_order(items, job_id, shipping_address=None):
             raise RuntimeError("simulated playwright crash")
         original = lego_client.order_from_lego
         lego_client.order_from_lego = failing_lego_order
@@ -399,7 +399,7 @@ async def test_order_fails_then_cancel_also_fails_to_manual_review(tmpdir: Path)
     try:
         provider.cancel_behavior = "permanent"  # cancel itself fails
 
-        async def failing_lego_order(items, job_id):
+        async def failing_lego_order(items, job_id, shipping_address=None):
             raise RuntimeError("simulated playwright crash")
         original = lego_client.order_from_lego
         lego_client.order_from_lego = failing_lego_order
@@ -450,7 +450,7 @@ async def test_capture_permanent_failure_to_manual_review(tmpdir: Path):
     try:
         provider.capture_behavior = "permanent"
 
-        async def fake_lego_order(items, job_id):
+        async def fake_lego_order(items, job_id, shipping_address=None):
             return "lego_test_order_002"
         original = lego_client.order_from_lego
         lego_client.order_from_lego = fake_lego_order
@@ -511,7 +511,7 @@ async def test_capture_transient_exhausts_retries_to_manual_review(tmpdir: Path)
     try:
         provider.capture_behavior = "retryable"
 
-        async def fake_lego_order(items, job_id):
+        async def fake_lego_order(items, job_id, shipping_address=None):
             return "lego_test_order_003"
         original = lego_client.order_from_lego
         lego_client.order_from_lego = fake_lego_order
