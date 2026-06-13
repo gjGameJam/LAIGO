@@ -155,7 +155,18 @@
       "Bash(./.venv/Scripts/python.exe -m scripts.test_optimizer)",
       "Bash(grep -nE 'load_dotenv|__name__|asyncio.run|^def main|^async def main|DB_BACKEND|get_pool|init_pool' scripts/__TRACKED_VAR__.py)",
       "Bash(./.venv/Scripts/python.exe -m scripts.test_phase_e_pg)",
-      "Bash(echo \"EXIT CODE: $?\")"
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(DB_BACKEND=postgres ./.venv/Scripts/python.exe -)",
+      "Bash(./.venv/Scripts/python.exe -c ' *)",
+      "Bash(mkdir -p outputs/localtest-checkout)",
+      "Bash(./.venv/Scripts/python.exe -m pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org truststore)",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force; Write-Output \"stopped PID $\\($c.OwningProcess\\) on :8000\" } else { Write-Output \"nothing on :8000\" })",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force; Write-Output \"stopped :8000\" } else { Write-Output \"nothing on :8000\" })",
+      "Bash(./.venv/Scripts/python.exe -m py_compile scripts/checkout/payment/stripe_provider.py scripts/db.py)",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force; Write-Output \"stopped local server on :8000\" } else { Write-Output \"nothing on :8000\" })",
+      "Bash(ls requirements*.txt)",
+      "Bash(tail -15 requirements.txt)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile scripts/Main.py scripts/_local_tls.py)"
     ]
   },
   "enabledPlugins": {}
