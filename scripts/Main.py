@@ -24,8 +24,11 @@ import sys
 from PIL import Image
 from .picToMosiac import pic_to_mosaic, MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH
 from .Util import load_project_env
-from .checkout.router import checkout_router
-from .checkout.debug_router import debug_router
+# NOTE: the checkout saga pipeline (checkout.router / debug_router — quote /
+# confirm / status + marketplace ordering) is SHELVED. It stays on disk but is
+# no longer imported or mounted. The build pack is now a pay-what-you-want
+# digital product served by pay_router; see scripts/pay_router.py.
+from .pay_router import pay_router
 from .checkout.gate_router import checkout_gate_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
@@ -441,8 +444,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-app.include_router(checkout_router, prefix="/jobs")
-app.include_router(debug_router)
+app.include_router(pay_router, prefix="/jobs")
 app.include_router(checkout_gate_router)
 
 try:

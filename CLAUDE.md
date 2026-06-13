@@ -9,16 +9,31 @@ LAIGO converts photos into LEGO mosaic building kits. Given an image, it:
 2. Produces a LEGO brick purchase order list (JSON, uploadable to lego.com Pick-a-Brick)
 3. Generates step-by-step building instructions as a multi-page PDF
 
-## Active focus — Phase F shipped on Render 2026-05-22
+## Active focus — pay-what-you-want pivot (2026-06-13)
 
-`DB_BACKEND=postgres` is live on Render against Neon `main` at schema `0002`.
-Boot lifespan logs `DATABASE_URL host='...'` at every start — sanity-check
-this line first when something's off. For DB operations, debug playbook,
-operator queries, and the env-var-mismatch cutover lesson, read
-`docs/DATABASE_OPS.md`. Phase F Step 7 (delete the JSON code path +
-dispatchers) is **deferred** until ≥7 clean observation days pass — see
-`docs/PRE_RELEASE_PAYMENT_CHECKLIST.md §9.4 Step 7`. U5 (Neon Launch tier
-upgrade) is still open; pre-launch this is a deferrable cost decision.
+The build pack is now a **digital product sold pay-what-you-want**, not an
+automated physical-brick order. When the user clicks "Download build pack",
+the frontend modal asks them to name a price (≥ $0, zero allowed). The new
+endpoint `POST /jobs/{job_id}/pay` (see `scripts/pay_router.py`) charges that
+amount once via Stripe (immediate-capture PaymentIntent) and records it to
+`outputs/{job_id}/payment.json`. `GET /jobs/{job_id}/download` stays **ungated**
+— since $0 is allowed there is nothing to protect.
+
+The entire **checkout saga pipeline is SHELVED** (kept on disk, no longer
+imported or mounted): `checkout/saga.py`, `saga_resume.py`, `reconcile.py`,
+`optimizer.py`, `_cancel_helpers.py`, `payment_holds_store.py`,
+`lego_session_store.py`, `clients/`, `checkout/router.py`,
+`checkout/debug_router.py`, and the `StripeProvider` hold/capture/cancel
+methods. No automated marketplace ordering, no payment holds, no capture saga,
+no physical-goods chargeback liability. Re-enable by restoring the imports +
+router includes in `Main.py` and flipping `.env` back.
+
+`DB_BACKEND=json` and `CHECKOUT_ENABLED=false`. The Postgres/Neon path
+(`init_pool`, `verify_schema`, `resume_in_flight_sagas`, `start_reconcile_task`)
+all no-op under json. The JSON jobs store is in-memory (job metadata lost on
+restart; completed artifacts persist on disk). The Neon-era operator docs
+(`docs/DATABASE_OPS.md`, `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md`) describe the
+shelved system and are retained for reference / future re-enable.
 
 ## Running locally
 
@@ -118,8 +133,8 @@ All runtime knobs live in `.env` (committed — no secrets):
 | `MAX_UPLOAD_SIZE_MB` | 250 | 250 | Max upload file size |
 | `DEBUG` | False | True | Enables debug-level logging |
 | `FRONTEND_ORIGIN` | — | set but **unused** | CORS origins are hardcoded in `Main.py`, not read from env |
-| `DB_BACKEND` | `json` | `postgres` | `json` keeps legacy in-memory/file path; `postgres` activates Neon-backed `checkout_store` + job lifecycle (Phase F flip). `.env` switched to `postgres` 2026-05-19 (Action A) so local dev exercises the production code path against the Neon main branch. |
-| `CHECKOUT_ENABLED` | — | `true` | Master gate (L0). When false/unset, the gate is closed regardless of every other condition. Required `true` for `/confirm` to function. B47 boot invariant: must NOT be `true` while `DB_BACKEND=json` (Main.py refuses to boot). Set `true` 2026-05-19. |
+| `DB_BACKEND` | `json` | `json` | `json` keeps the in-memory jobs store + JSON checkout_store; `postgres` activates the (now-shelved) Neon-backed saga/holds/reconcile path. Reverted to `json` 2026-06-13 alongside the pay-what-you-want pivot. |
+| `CHECKOUT_ENABLED` | — | `false` | Master gate (L0) for the SHELVED checkout saga. The pay-what-you-want endpoint does NOT consult it (it checks the payment registry directly). Kept `false`; setting `true` while `DB_BACKEND=json` trips the B47 boot refusal. |
 | `DATABASE_URL` | — | (none in committed .env; belongs in `.env.secrets`) | Neon **pooler** DSN (host must contain `-pooler`). Read only when `DB_BACKEND=postgres`. Direct endpoint is reserved for `alembic upgrade head` + psql debugging. |
 
 ## Architecture

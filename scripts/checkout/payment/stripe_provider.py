@@ -319,6 +319,71 @@ class StripeProvider:
             raise
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Charge (immediate capture) — pay-what-you-want digital build pack.
+    #
+    # Unlike create_hold (capture_method="manual"), this captures in a single
+    # call. There is no marketplace fulfillment behind it, so there is nothing
+    # to compensate — the charge either succeeds, needs 3DS, or fails. Used by
+    # scripts/pay_router.py; NOT part of the (shelved) hold→capture saga.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def charge(
+        self,
+        *,
+        amount_cents: int,
+        payment_method_id: str,
+        idempotency_key: str,
+    ) -> dict:
+        """Create + confirm an immediate-capture PaymentIntent.
+
+        Returns a dict:
+          {"status": "succeeded" | "requires_action",
+           "payment_intent_id": str,
+           "amount_cents": int,
+           "client_secret": str | None}
+
+        `requires_action` means the card needs 3DS/SCA — the caller returns
+        `client_secret` to the frontend to finish authentication. Any other
+        non-succeeded status is treated as a permanent failure.
+
+        Raises PaymentRetryableError / PaymentPermanentError (classified from
+        Stripe's error types by `_raise_classified`).
+        """
+        try:
+            intent = await asyncio.to_thread(
+                self._stripe.PaymentIntent.create,
+                amount=amount_cents,
+                currency=self.currency,
+                payment_method=payment_method_id,
+                capture_method="automatic",
+                confirm=True,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as exc:
+            self._raise_classified(exc, op="charge")
+            raise  # _raise_classified always raises; keeps type checkers happy
+
+        if intent.status == "succeeded":
+            return {
+                "status": "succeeded",
+                "payment_intent_id": intent.id,
+                "amount_cents": int(intent.amount),
+                "client_secret": None,
+            }
+        if intent.status == "requires_action":
+            return {
+                "status": "requires_action",
+                "payment_intent_id": intent.id,
+                "amount_cents": int(intent.amount),
+                "client_secret": intent.client_secret,
+            }
+        raise PaymentPermanentError(
+            f"Stripe charge returned unexpected status '{intent.status}' "
+            f"(expected 'succeeded' or 'requires_action'). "
+            f"PaymentIntent ID: {intent.id}"
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Status read (used by reconcile_orphan_holds)
     # ─────────────────────────────────────────────────────────────────────────
 
