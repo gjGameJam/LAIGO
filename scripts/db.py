@@ -97,6 +97,23 @@ async def init_pool() -> None:
             return  # already initialized; lifespan re-run guard
 
         dsn = os.environ.get("DATABASE_URL")
+        # Local-dev safety net: when NOT running on Render (Render sets the
+        # RENDER env var in its runtime), prefer DEV_DATABASE_URL if present so a
+        # local `uvicorn` always targets the Neon DEV branch — never prod. This
+        # mirrors scripts/_pg_test_guard.py's DEV_DATABASE_URL preference and
+        # closes the same footgun for the running app (a local boot against the
+        # prod DATABASE_URL). On Render, RENDER is truthy, so DEV_DATABASE_URL is
+        # ignored even if it leaks into the environment, and prod DATABASE_URL is
+        # always used.
+        if not os.environ.get("RENDER"):
+            dev_dsn = (os.environ.get("DEV_DATABASE_URL") or "").strip()
+            if dev_dsn:
+                import logging as _logging
+                _logging.getLogger("laigo.db").info(
+                    "init_pool: RENDER unset and DEV_DATABASE_URL present — "
+                    "using DEV_DATABASE_URL (local dev targets the Neon dev branch)."
+                )
+                dsn = dev_dsn
         if not dsn:
             raise RuntimeError(
                 "DB_BACKEND=postgres but DATABASE_URL is not set. "

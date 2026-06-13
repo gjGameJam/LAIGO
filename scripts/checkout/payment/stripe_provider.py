@@ -222,6 +222,16 @@ class StripeProvider:
                 payment_method=payment_method_id,
                 capture_method="manual",
                 confirm=True,
+                # Pin to card-only. Without this, Stripe applies the account's
+                # "automatic payment methods" default, which can include
+                # redirect-based methods and then REQUIRES a `return_url` —
+                # making every server-side hold fail with InvalidRequestError
+                # (caught in local testing 2026-06-13). v1 is US card-only with
+                # no redirect/3DS handling (see CHECKOUT_COMPLETION_PLAN §8 SCA
+                # note); a card that demands 3DS returns requires_action, which
+                # the status check below treats as a permanent failure — the
+                # documented v1 limitation.
+                payment_method_types=["card"],
                 idempotency_key=idempotency_key,
             )
         except Exception as exc:

@@ -30,7 +30,14 @@ from .checkout.gate_router import checkout_gate_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
 from . import jobs_store_dispatch as jobs_store
+from ._local_tls import maybe_enable_os_trust
 import gc
+
+# Local-dev only (no-op on Render): make outbound HTTPS use the OS trust store
+# so a corporate TLS-interception proxy doesn't break httpx calls to LEGO /
+# BrickOwl / Stripe. Must run before any httpx client builds an SSL context.
+# See scripts/_local_tls.py.
+maybe_enable_os_trust()
 
 # -----------------------------
 # LOGGING SETUP

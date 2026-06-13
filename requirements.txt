@@ -24,3 +24,9 @@ alembic~=1.13
 # asyncpg is async-only and not usable by alembic's standard engine flow.
 # psycopg2-binary ships pre-built wheels — no compiler needed on Windows.
 psycopg2-binary~=2.9
+
+# Local-dev TLS: lets Python verify HTTPS against the OS trust store so a
+# corporate TLS-interception proxy doesn't break httpx (LEGO/BrickOwl/Stripe).
+# Activated only when RENDER is unset (see scripts/_local_tls.py); a no-op on
+# Render. Tiny pure-Python package — harmless where unused.
+truststore~=0.10
