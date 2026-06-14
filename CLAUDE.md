@@ -15,9 +15,21 @@ The build pack is now a **digital product sold pay-what-you-want**, not an
 automated physical-brick order. When the user clicks "Download build pack",
 the frontend modal asks them to name a price (≥ $0, zero allowed). The new
 endpoint `POST /jobs/{job_id}/pay` (see `scripts/pay_router.py`) charges that
-amount once via Stripe (immediate-capture PaymentIntent) and records it to
-`outputs/{job_id}/payment.json`. `GET /jobs/{job_id}/download` stays **ungated**
-— since $0 is allowed there is nothing to protect.
+amount once via Stripe (immediate-capture PaymentIntent, `job_id` in metadata)
+and records it to `outputs/{job_id}/payment.json`. `POST /webhooks/stripe`
+(signature-verified with `STRIPE_WEBHOOK_SECRET`) is the authoritative recorder
+— it catches 3DS completions and charges whose sync response was lost.
+`GET /jobs/{job_id}/download` stays **ungated** — since $0 is allowed there is
+nothing to protect. `pay`/`charge` are covered by `scripts/test_pay_router.py`.
+
+A second, simpler endpoint `POST /donate` (global, no job scope — `donate_router`
+in `scripts/pay_router.py`) uses the **client-confirm** Stripe pattern instead:
+it mints an *unconfirmed* PaymentIntent via `StripeProvider.create_payment_intent()`
+and returns just `{client_secret}` for the frontend's Stripe.js to confirm (3DS
+handled client-side). It writes no `payment.json` itself — pass an optional
+`job_id` in the body and the existing webhook records it. `metadata={"type":"tip"}`,
+`description="LAIGO tip"`. Covered by `scripts/test_donate_router.py`. Both
+endpoints coexist; the frontend uses one or the other, not both.
 
 The entire **checkout saga pipeline is SHELVED** (kept on disk, no longer
 imported or mounted): `checkout/saga.py`, `saga_resume.py`, `reconcile.py`,
@@ -678,7 +690,7 @@ Module layout per file is in the "Checkout pipeline" subsection of `## Module in
 
 ### Secrets
 
-All secrets in `.env.secrets` (gitignored): `BRICKOWL_API_KEY`, `STRIPE_SECRET_KEY`, `LEGO_EMAIL`, `LEGO_PASSWORD`. Never commit this file.
+All secrets in `.env.secrets` (gitignored): `BRICKOWL_API_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `LEGO_EMAIL`, `LEGO_PASSWORD`. Never commit this file. `STRIPE_WEBHOOK_SECRET` (the `whsec_…` signing secret) is required by `POST /webhooks/stripe`; get it from the Stripe dashboard webhook endpoint, or from `stripe listen` for local testing. The marketplace/LEGO secrets are unused while the saga is shelved.
 
 ### First-time setup
 

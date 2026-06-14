@@ -182,3 +182,12 @@ cython_debug/
 
 # LAIGO secrets — never commit
 .env.secrets
+
+# LAIGO runtime data — never commit. Contains customer-uploaded images, generated
+# build packs (artifact.zip / order_list.json / preview.json), pay-what-you-want
+# payment records (payment.json), and Playwright debug captures / storage_state
+# (which can hold session cookies). NOTE: some runtime files were committed before
+# this rule existed — remove them with `git rm --cached -r outputs/ inputs/` and
+# rotate any leaked LEGO session in outputs/lego_debug/_verify_storage_state.json.
+inputs/
+outputs/

@@ -124,6 +124,14 @@ class PaymentPermanentError(RuntimeError):
         self.underlying = underlying
 
 
+class WebhookVerificationError(RuntimeError):
+    """A provider webhook's payload or signature could not be verified.
+
+    Raised by the provider's webhook-parsing helper so the HTTP handler can
+    map it to a 400 without importing the provider SDK's error types. Keeps
+    `stripe` imports confined to the provider module."""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Protocol
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,4 +247,62 @@ class PaymentProvider(Protocol):
                 'unknown' and stops re-querying it. Operator investigation
                 needed.
         """
+        ...
+
+    async def charge(
+        self,
+        *,
+        amount_cents: int,
+        payment_method_id: str,
+        idempotency_key: str,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Create AND capture a charge in one call (no separate hold).
+
+        Used by the pay-what-you-want endpoint, which sells a digital build
+        pack — there is no marketplace fulfilment to gate a capture on, so the
+        money moves immediately. `metadata` is attached to the underlying
+        charge so an async success webhook can map it back to its job.
+
+        Returns a dict with keys:
+          - "status": "succeeded" | "requires_action"
+          - "payment_intent_id": str
+          - "amount_cents": int
+          - "client_secret": str | None  (set only on "requires_action", for
+                                           the frontend to complete 3DS/SCA)
+
+        Raises PaymentRetryableError (transient) / PaymentPermanentError
+        (declined / terminal), same taxonomy as create_hold."""
+        ...
+
+    async def create_payment_intent(
+        self,
+        *,
+        amount_cents: int,
+        metadata: dict | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Mint an UNCONFIRMED PaymentIntent and return its client_secret.
+
+        The client-confirm counterpart to charge(): the server only creates the
+        intent (no payment_method, no confirm). The frontend's SDK collects the
+        card and confirms client-side with the returned client_secret, handling
+        3DS natively. Used by the global /donate tip endpoint.
+
+        `metadata` is attached to the intent (string values only — e.g.
+        {"type": "tip"}); `description` shows on the charge in the provider
+        dashboard.
+
+        Returns a dict with keys:
+          - "payment_intent_id": str
+          - "client_secret": str   (handed to the frontend SDK to confirm)
+          - "amount_cents": int
+
+        Unlike the other mutating methods this takes NO idempotency key: a
+        duplicate call mints a second unconfirmed intent the client never
+        confirms (provider auto-expires it), so there is nothing to dedupe.
+
+        Raises PaymentRetryableError (transient) / PaymentPermanentError
+        (terminal). No card is touched at create time, so card declines surface
+        later at client-confirm, not here."""
         ...

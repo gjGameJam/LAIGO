@@ -25,11 +25,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .checkout.payment import registry as payment_registry
@@ -37,7 +38,9 @@ from .checkout.payment.base import (
     PaymentPermanentError,
     PaymentProviderUnavailable,
     PaymentRetryableError,
+    WebhookVerificationError,
 )
+from .checkout.payment.stripe_provider import construct_webhook_event
 
 logger = logging.getLogger("laigo")
 
@@ -49,12 +52,22 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
 # rejected with a clear message; 0 is free.
 _STRIPE_MIN_CHARGE_CENTS = 50
 
+# Upper bound = Stripe's documented max charge for USD ($999,999.99). Rejecting
+# above this returns a clean 422 instead of a Stripe round-trip, and caps
+# fat-finger / abusive amounts. Lower it if you want a tighter business limit.
+_MAX_CHARGE_CENTS = 99_999_999
+
+# Legit job ids are UUIDs from Main.py. Validate the charset before using
+# job_id in any filesystem path (payment.json write / artifact lookup) so a
+# crafted value (e.g. containing '..' or separators) can't escape OUTPUT_DIR.
+_SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
 pay_router = APIRouter()
 
 
 class PayRequest(BaseModel):
     amount_cents: int = Field(
-        ..., ge=0,
+        ..., ge=0, le=_MAX_CHARGE_CENTS,
         description="What the customer chooses to pay, in US cents. 0 = free.",
     )
     payment_method_id: Optional[str] = Field(
@@ -80,6 +93,16 @@ def _record_payment(
     try:
         job_dir = OUTPUT_DIR / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
+        record_path = job_dir / "payment.json"
+        # Never downgrade an authoritative paid record. Guards against a $0
+        # re-submit (or a stray sync/webhook ordering) clobbering a real charge.
+        if status != "paid" and record_path.exists():
+            try:
+                prior = json.loads(record_path.read_text(encoding="utf-8"))
+                if prior.get("status") == "paid":
+                    return
+            except Exception:
+                pass  # unreadable prior record — fall through and overwrite
         record = {
             "job_id": job_id,
             "amount_cents": amount_cents,
@@ -87,13 +110,32 @@ def _record_payment(
             "payment_intent_id": payment_intent_id,
             "recorded_at": time.time(),
         }
-        (job_dir / "payment.json").write_text(json.dumps(record, indent=2))
+        record_path.write_text(
+            json.dumps(record, indent=2), encoding="utf-8",
+        )
     except Exception as exc:  # pragma: no cover - logging only
         logger.warning("pay.record_failed job_id=%s err=%s", job_id, exc)
 
 
 @pay_router.post("/{job_id}/pay")
 async def pay(job_id: str, body: PayRequest):
+    # ── Validate job_id (path-traversal guard) ───────────────────────────────
+    if not _SAFE_JOB_ID.match(job_id):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid job id.", "code": "INVALID_JOB_ID"},
+        )
+
+    # ── Only accept payment for a real, completed build pack ─────────────────
+    # The artifact is the on-disk source of truth (restart-safe even though the
+    # JSON jobs store is in-memory). Mirrors GET /download's 404 behaviour.
+    if not (OUTPUT_DIR / job_id / "artifact.zip").exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Build pack not found for this job.",
+                    "code": "JOB_NOT_FOUND"},
+        )
+
     amount = body.amount_cents
 
     # ── Free download ────────────────────────────────────────────────────────
@@ -139,7 +181,15 @@ async def pay(job_id: str, body: PayRequest):
         result = await provider.charge(
             amount_cents=amount,
             payment_method_id=body.payment_method_id,
-            idempotency_key=f"charge-{job_id}",
+            # Idempotency keyed on (job_id, amount): a double-click / network
+            # retry of the SAME amount dedupes to a single charge (Stripe returns
+            # the original within its 24h window), while a deliberate later
+            # contribution of a DIFFERENT amount is allowed through as a new
+            # charge instead of failing with a confusing IdempotencyError.
+            idempotency_key=f"charge-{job_id}-{amount}",
+            # Carried on the PaymentIntent so the webhook can map a later
+            # payment_intent.succeeded back to this job.
+            metadata={"job_id": job_id, "source": "laigo_pay"},
         )
     except PaymentRetryableError as exc:
         logger.warning("pay.retryable job_id=%s err=%s", job_id, exc)
@@ -187,3 +237,163 @@ async def pay(job_id: str, body: PayRequest):
         "amount_cents": amount,
         "payment_intent_id": result["payment_intent_id"],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Donate — global, client-confirm tip endpoint.
+#
+# The simpler sibling of /pay. The server only MINTS an unconfirmed
+# PaymentIntent and returns its client_secret; the frontend's Stripe.js collects
+# the card and calls confirmPayment(secret), handling 3DS natively and
+# triggering the (ungated) download on success. The server never touches the
+# card. No job scope, no payment.json write here — the existing
+# POST /webhooks/stripe is the only authoritative recorder, and only when a
+# job_id rides along in metadata (optional). Mounted at the app root.
+# ─────────────────────────────────────────────────────────────────────────────
+
+donate_router = APIRouter()
+
+
+class DonateRequest(BaseModel):
+    amount_cents: int = Field(
+        ...,
+        description="Tip amount in US cents. Must be >= 50 (Stripe minimum).",
+    )
+    job_id: Optional[str] = Field(
+        None,
+        description="Optional job to attribute the tip to. When present and "
+                    "well-formed, it is added to the PaymentIntent metadata so "
+                    "the payment_intent.succeeded webhook records "
+                    "outputs/{job_id}/payment.json.",
+    )
+
+
+@donate_router.post("/donate")
+async def donate(body: DonateRequest):
+    amount = body.amount_cents
+
+    # ── Validate amount (explicit 400 to honour the documented contract) ─────
+    # Pydantic field constraints would surface as 422; an explicit check keeps
+    # the {detail:{error,code}} shape the frontend matches on and the 400 the
+    # endpoint spec promises. 0 is NOT free here (unlike /pay) — a tip of $0
+    # has nothing to charge; the frontend simply skips the call.
+    if amount < _STRIPE_MIN_CHARGE_CENTS or amount > _MAX_CHARGE_CENTS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Enter a tip of at least $0.50.",
+                "code": "INVALID_AMOUNT",
+                "min_cents": _STRIPE_MIN_CHARGE_CENTS,
+            },
+        )
+
+    try:
+        provider = payment_registry.get_active()
+    except PaymentProviderUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Payments are not configured right now.",
+                "code": "PAYMENTS_UNAVAILABLE",
+            },
+        )
+
+    metadata = {"type": "tip"}
+    if body.job_id and _SAFE_JOB_ID.match(body.job_id):
+        metadata["job_id"] = body.job_id
+
+    try:
+        result = await provider.create_payment_intent(
+            amount_cents=amount,
+            metadata=metadata,
+            description="LAIGO tip",
+        )
+    except PaymentRetryableError as exc:
+        logger.warning("donate.retryable err=%s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Payment is temporarily unavailable. Please try again.",
+                "code": "PAYMENT_RETRYABLE",
+            },
+        )
+    except PaymentPermanentError as exc:
+        logger.error("donate.error err=%s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Could not start the payment. Please try again later.",
+                "code": "PAYMENT_ERROR",
+            },
+        )
+
+    logger.info(
+        "donate.intent_created pi=%s amount=%d job_id=%s",
+        result["payment_intent_id"], amount, body.job_id or "-",
+    )
+    return {"client_secret": result["client_secret"]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stripe webhook — authoritative payment recording.
+#
+# Mounted at the app root (NOT under /jobs). Stripe POSTs payment_intent.*
+# events here; we record payment.json from the verified event. This is the
+# source of truth for revenue: it catches 3DS completions and any charge whose
+# synchronous /pay response was lost to a client disconnect. The signature is
+# verified with STRIPE_WEBHOOK_SECRET; unverified bodies are rejected 400.
+# ─────────────────────────────────────────────────────────────────────────────
+
+webhook_router = APIRouter()
+
+
+@webhook_router.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        logger.error("stripe webhook hit but STRIPE_WEBHOOK_SECRET is not set")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Webhook not configured.",
+                    "code": "WEBHOOK_NOT_CONFIGURED"},
+        )
+
+    # Raw body bytes — the signature is computed over exactly what Stripe sent.
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    try:
+        event = construct_webhook_event(payload, sig_header, secret)
+    except WebhookVerificationError as exc:
+        logger.warning("webhook.verification_failed err=%s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid signature.", "code": "INVALID_SIGNATURE"},
+        )
+
+    event_type = event.get("type")
+    if event_type == "payment_intent.succeeded":
+        # Defensive .get-chaining: a verified-but-oddly-shaped event must not
+        # 500 (Stripe would then retry the same event forever).
+        intent = (event.get("data") or {}).get("object") or {}
+        metadata = intent.get("metadata") or {}
+        job_id = metadata.get("job_id")
+        pi_id = intent.get("id")
+        amount = intent.get("amount_received") or intent.get("amount") or 0
+        if job_id and _SAFE_JOB_ID.match(job_id):
+            _record_payment(
+                job_id, amount_cents=int(amount), status="paid",
+                payment_intent_id=pi_id,
+            )
+            logger.info(
+                "webhook.recorded job_id=%s pi=%s amount=%s", job_id, pi_id, amount,
+            )
+        else:
+            logger.warning(
+                "webhook.payment_intent_succeeded missing/invalid job_id "
+                "metadata pi=%s metadata=%s", pi_id, metadata,
+            )
+    else:
+        logger.debug("webhook.ignored type=%s", event_type)
+
+    # Always 200 for a verified event so Stripe stops retrying.
+    return {"received": True}

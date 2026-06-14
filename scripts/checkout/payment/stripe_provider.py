@@ -68,6 +68,7 @@ from .base import (
     PaymentPermanentError,
     PaymentProviderUnavailable,
     PaymentRetryableError,
+    WebhookVerificationError,
 )
 
 logger = logging.getLogger("laigo")
@@ -333,8 +334,13 @@ class StripeProvider:
         amount_cents: int,
         payment_method_id: str,
         idempotency_key: str,
+        metadata: dict | None = None,
     ) -> dict:
         """Create + confirm an immediate-capture PaymentIntent.
+
+        `metadata` is attached to the PaymentIntent (e.g. {"job_id": ...}) so a
+        later `payment_intent.succeeded` webhook can map the charge back to the
+        job that produced it. Stripe metadata values must be strings.
 
         Returns a dict:
           {"status": "succeeded" | "requires_action",
@@ -355,9 +361,16 @@ class StripeProvider:
                 amount=amount_cents,
                 currency=self.currency,
                 payment_method=payment_method_id,
+                # Pin card-only. Without this, Stripe's automatic-payment-methods
+                # default requires a `return_url` for redirect-based methods and
+                # confirm=True fails with InvalidRequestError on EVERY charge.
+                # (Same bug previously found + fixed on create_hold.) Matches the
+                # US card-only product; no 3DS redirect handling needed.
+                payment_method_types=["card"],
                 capture_method="automatic",
                 confirm=True,
                 idempotency_key=idempotency_key,
+                metadata=metadata or {},
             )
         except Exception as exc:
             self._raise_classified(exc, op="charge")
@@ -382,6 +395,66 @@ class StripeProvider:
             f"(expected 'succeeded' or 'requires_action'). "
             f"PaymentIntent ID: {intent.id}"
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Create PaymentIntent (client-confirm) — the /donate tip endpoint.
+    #
+    # Unlike charge(), this does NOT confirm and carries no payment_method: the
+    # server only MINTS the intent and hands back its client_secret. The
+    # frontend's Stripe.js collects the card and calls confirmPayment(secret),
+    # which handles 3DS natively. The server never sees the card and learns of
+    # success only via the payment_intent.succeeded webhook (if wired). Used by
+    # scripts/pay_router.py::donate_router.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def create_payment_intent(
+        self,
+        *,
+        amount_cents: int,
+        metadata: dict | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Create an UNCONFIRMED card PaymentIntent and return its client_secret.
+
+        The client-confirm flow: the server mints the intent; the frontend's
+        Stripe.js collects the card and calls `stripe.confirmPayment(client_secret)`,
+        which handles 3DS/SCA natively. `metadata` is attached to the intent (e.g.
+        {"type": "tip"}); Stripe metadata values must be strings. `description`
+        shows on the charge in the Stripe dashboard.
+
+        Returns a dict:
+          {"payment_intent_id": str, "client_secret": str, "amount_cents": int}
+
+        Deliberately takes NO idempotency_key — unlike create_hold/capture/charge,
+        a duplicate POST here just mints a second unconfirmed intent that the
+        client never confirms and Stripe auto-expires. A duplicate tip is
+        harmless, so the deterministic-key contract doesn't apply.
+
+        Raises PaymentRetryableError / PaymentPermanentError (classified from
+        Stripe's error types by `_raise_classified`). No card is touched, so a
+        CardError cannot occur here — errors are API/auth/invalid-request class.
+        """
+        try:
+            intent = await asyncio.to_thread(
+                self._stripe.PaymentIntent.create,
+                amount=amount_cents,
+                currency=self.currency,
+                # Pin card-only for the same reason as charge(): Stripe's
+                # automatic-payment-methods default would require a return_url
+                # for redirect-based methods. Matches the US card-only product.
+                payment_method_types=["card"],
+                metadata=metadata or {},
+                description=description,
+            )
+        except Exception as exc:
+            self._raise_classified(exc, op="create_payment_intent")
+            raise  # _raise_classified always raises; keeps type checkers happy
+
+        return {
+            "payment_intent_id": intent.id,
+            "client_secret": intent.client_secret,
+            "amount_cents": int(intent.amount),
+        }
 
     # ─────────────────────────────────────────────────────────────────────────
     # Status read (used by reconcile_orphan_holds)
@@ -516,3 +589,29 @@ class StripeProvider:
             or "cannot cancel" in message
             or "has already been captured" in message
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Webhook signature verification (module-level — no provider instance needed).
+# Keeps the `stripe` SDK import confined to this module per the boundary rule.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def construct_webhook_event(payload: bytes, sig_header: str, secret: str):
+    """Verify a Stripe webhook signature and return the parsed Event object.
+
+    `payload` MUST be the raw request-body bytes (not re-serialized JSON) — the
+    signature is computed over the exact bytes Stripe sent. Returns a
+    `stripe.Event` (dict-like: supports `.get(...)` and `[...]`).
+
+    Raises WebhookVerificationError on a malformed payload or a bad/forged
+    signature so callers can map both to HTTP 400 without importing `stripe`.
+    """
+    import stripe
+    try:
+        return stripe.Webhook.construct_event(payload, sig_header, secret)
+    except ValueError as exc:
+        # Malformed JSON body.
+        raise WebhookVerificationError(f"Invalid webhook payload: {exc}") from exc
+    except stripe.error.SignatureVerificationError as exc:
+        raise WebhookVerificationError(f"Invalid webhook signature: {exc}") from exc

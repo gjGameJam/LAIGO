@@ -3,6 +3,25 @@
 import multiprocessing as mp
 mp.set_start_method("spawn", force=True)
 
+# ── Corporate TLS interception fix (local dev only) ───────────────────────────
+# On dev machines behind a TLS-intercepting corporate proxy, Python's certifi
+# bundle lacks the corp root CA, so outbound HTTPS (Stripe, etc.) fails with
+# CERTIFICATE_VERIFY_FAILED. truststore makes Python use the OS trust store
+# (which has the corp CA). Skipped on Render (RENDER set) — prod uses standard
+# CAs and we don't alter its TLS path. Must run before any SSL context is
+# created (stripe / httpx / asyncpg), hence this early placement.
+import os
+if not os.environ.get("RENDER"):
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception as _truststore_err:  # never block boot
+        import logging
+        logging.getLogger("laigo").warning(
+            "truststore injection skipped (%s); outbound HTTPS may fail behind "
+            "a TLS-intercepting proxy", _truststore_err,
+        )
+
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
@@ -28,7 +47,7 @@ from .Util import load_project_env
 # confirm / status + marketplace ordering) is SHELVED. It stays on disk but is
 # no longer imported or mounted. The build pack is now a pay-what-you-want
 # digital product served by pay_router; see scripts/pay_router.py.
-from .pay_router import pay_router
+from .pay_router import pay_router, webhook_router, donate_router
 from .checkout.gate_router import checkout_gate_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
@@ -445,6 +464,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(pay_router, prefix="/jobs")
+app.include_router(webhook_router)
+app.include_router(donate_router)  # global POST /donate (client-confirm tip)
 app.include_router(checkout_gate_router)
 
 try:
@@ -1423,6 +1444,19 @@ async def get_job(job_id: str):
     return response
 
 
+def _job_dir(job_id: str) -> Path:
+    """Resolve OUTPUT_DIR/job_id, refusing any value that escapes OUTPUT_DIR.
+
+    The job_id path param is attacker-controllable; without this a crafted
+    value (e.g. one containing '..') could read files outside the output tree.
+    OUTPUT_DIR is already resolved at module load. 404 on escape (non-revealing).
+    """
+    candidate = (OUTPUT_DIR / job_id).resolve()
+    if not candidate.is_relative_to(OUTPUT_DIR):
+        raise HTTPException(status_code=404, detail="Not found")
+    return candidate
+
+
 @app.get("/jobs/{job_id}/preview")
 async def get_job_preview(job_id: str):
     """Return the 3D-preview payload for a completed job.
@@ -1433,7 +1467,7 @@ async def get_job_preview(job_id: str):
     so the file descriptor closes immediately, avoiding races with cleanup_loop
     rmtreeing the job directory on Windows.
     """
-    preview_path = OUTPUT_DIR / job_id / "preview.json"
+    preview_path = _job_dir(job_id) / "preview.json"
     try:
         data = preview_path.read_bytes()
     except FileNotFoundError:
@@ -1459,7 +1493,7 @@ async def get_job_preview(job_id: str):
 
 @app.get("/jobs/{job_id}/download")
 async def download(job_id: str):
-    artifact = OUTPUT_DIR / job_id / "artifact.zip"
+    artifact = _job_dir(job_id) / "artifact.zip"
 
     if not artifact.exists():
         log.warning(f"Download requested for job {job_id} but artifact not found")
