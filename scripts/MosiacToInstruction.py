@@ -2,22 +2,21 @@ from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_c
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas as rl_canvas
 import numpy as np
-import shutil
 import re
 from pathlib import Path
 from typing import List
-from .Util import GetOutputPathDir, log_info, log_debug, log_error
+from .Util import log_info, log_debug
 
-
-def empty_instructions_folder():
-    folder = Path(f"{GetOutputPathDir()}/Instructions")
-    shutil.rmtree(folder)
-    folder.mkdir(parents=True, exist_ok=True)
+# D-013: the legacy CLI path (empty_instructions_folder + the
+# `if output_dir is None:` branches that fell back to GetOutputPathDir()) has
+# been removed. output_dir is now a required argument; the API worker is the
+# only caller. Dropped dead imports (GetOutputPathDir, shutil, log_error) too.
 
 
 def count_colors(img_rgba):
     arr = np.asarray(img_rgba, dtype=np.uint8)
-    assert arr.shape[2] == 4  # RGBA
+    if arr.shape[2] != 4:  # D-023: explicit raise, not assert (survives python -O)
+        raise ValueError(f"count_colors expects RGBA, got {arr.shape[2]} channels")
     rgb = arr[:, :, :3].reshape(-1, 3)
     return len(np.unique(rgb, axis=0))
 
@@ -79,11 +78,14 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
     def report(pct):
         if progress_callback:
             progress_callback(pct)
-    assert isinstance(bg_rgba, Image.Image)
-    assert bg_rgba.mode == "RGBA"
-    #set up by clearing previous instructions and starting from step 1
-    if output_dir is None: #only clear local folder if output_dir not provided
-        empty_instructions_folder()
+    # D-023: explicit raises (not assert — assert vanishes under python -O).
+    if not isinstance(bg_rgba, Image.Image):
+        raise TypeError(f"bg_rgba must be PIL.Image.Image, got {type(bg_rgba)}")
+    if bg_rgba.mode != "RGBA":
+        raise ValueError(f"bg_rgba must be RGBA, got {bg_rgba.mode!r}")
+    # D-013: output_dir is required (CLI fallback removed).
+    if output_dir is None:
+        raise ValueError("output_dir is required")
     step = 1
     bg_w, bg_h = bg_rgba.size
     blockWidth = (int)(bg_w / 16)
@@ -95,23 +97,20 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
         fg = np.asarray(fg_rgba, dtype=np.uint8)
     bg = np.asarray(bg_rgba, dtype=np.uint8)
 
-
-    # Extract RGB only, ignore alpha
-    if not fg_rgba is None:
-        fg_colors = set(map(tuple, fg[:, :, :3].reshape(-1, 3)))
-        log_debug(f"FG unique RGB colors ({len(fg_colors)}):")
-        log_info(fg_colors)
-
-    bg_colors = set(map(tuple, bg[:, :, :3].reshape(-1, 3)))
-
-    log_debug(f"\nBG unique RGB colors ({len(bg_colors)}):")
-    log_info(bg_colors)
+    # D-004/D-005: removed the set(map(tuple, ...)) materializations and their
+    # log_info(<full set>) dumps. They recomputed the unique-color sets a second
+    # way purely for log lines and flooded prod logs with RGB-tuple reprs. The
+    # cheap count_colors(...) summaries below are the single source of this info.
 
     H, W, C = bg.shape
     log_debug(f"height: {H}, width: {W}")
-    assert C == 4
-    assert W == bg_w and H == bg_h
-    assert W % 16 == 0 and H % 16 == 0
+    # D-023: explicit raises (not assert).
+    if C != 4:
+        raise ValueError(f"bg must have 4 channels (RGBA), got {C}")
+    if W != bg_w or H != bg_h:
+        raise ValueError(f"shape mismatch: numpy ({W},{H}) vs PIL ({bg_w},{bg_h})")
+    if W % 16 or H % 16:
+        raise ValueError(f"mosaic dims must be divisible by 16, got ({W},{H})")
 
     bg_color_count = count_colors(bg_rgba)
     log_info(f"BG unique RGB colors: {bg_color_count}")
@@ -173,13 +172,14 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
         step = draw_final_view(step, composite, False, output_dir)
 
     # Save PDF
-    instructions_dir = Path(output_dir) / "Instructions" if output_dir else Path(GetOutputPathDir()) / "Instructions"
+    instructions_dir = Path(output_dir) / "Instructions"
     pdf_path = instructions_dir / "instructions.pdf"
 
-    png_files = sorted(
-        instructions_dir.glob("*.png"),
-        key=lambda p: int(p.stem.split("_")[-1]) if "_" in p.stem else 0
-    )
+    # D-021: order is irrelevant here — this list only drives the post-PDF
+    # deletion loop. The PDF itself is assembled in step order by images_to_pdf
+    # via _get_ordered_pngs. The old underscore-keyed sort was dead (filenames
+    # are "1.png".."N.png", no underscores -> every key collapsed to 0).
+    png_files = list(instructions_dir.glob("*.png"))
 
     if not png_files:
         raise RuntimeError("No instruction PNGs found — aborting PDF generation.")

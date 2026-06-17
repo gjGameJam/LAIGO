@@ -1,14 +1,14 @@
 import numpy as np
-from pathlib import Path 
+from pathlib import Path
 from collections import defaultdict
 import json
 from math import ceil
 from dotenv import load_dotenv
-import os
-from logger import logger
+from .logger import logger  # D-020: relative import (was bare `from logger import logger`)
 
-#only print if environment variable DEBUG is set to true, otherwise be silent (for cleaner multiprocessing logs)
-DEBUG = bool(os.getenv("DEBUG"))
+# D-031: removed `DEBUG = bool(os.getenv("DEBUG"))`. It had no readers and was the
+# bool("False") is True trap (same class as D1 in CHECKOUT_AUDIT.md §10). `import
+# os` went with it (no other use here). logger.py sets the level unconditionally.
 
 def load_project_env():
     """

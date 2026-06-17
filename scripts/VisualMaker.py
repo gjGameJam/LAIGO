@@ -868,8 +868,12 @@ def draw_stud(draw, cx, cy, blockZ, color):
 #   "stepA"          — blank baseplate piece (case-independent)
 #   "stepB:{case}"   — positioned baseplate with connectors
 #   "stepC:{case}"   — top-of-baseplate view (also returned as foundation canvas)
-# Values are pristine PIL Images (no step number stamp). Cache lifetime = worker
-# process lifetime (max_tasks_per_child=1), so no cross-job leakage.
+# Values are pristine PIL Images (no step number stamp), keyed only by baseplate
+# geometry — job-independent templates, so reuse across jobs is always safe
+# (callers draw on img.copy() and never mutate the cached original). On 3.12+ the
+# worker respawns per job (max_tasks_per_child=1) so the cache is rebuilt fresh;
+# on ≤3.11 the worker persists and the cache is reused across jobs — still no
+# cross-job leakage, since the templates carry no per-job state. See D-030.
 # Memory cost: up to 9 entries × ~2 MB each = ~18 MB.
 _baseplate_setup_cache = {}
 

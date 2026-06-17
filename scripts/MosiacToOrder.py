@@ -1,41 +1,32 @@
 from collections import defaultdict
 import numpy as np
-import shutil
-import os
 from pathlib import Path
-from math import ceil
 
-# Assuming these are in your Util.py
-from Util import (
-    GetPaletteDict, 
-    GetOutputPathDir, 
-    SaveDictAsJsonsOptimized, 
-    log_info, 
-    log_debug, 
-    log_error
+# D-019: relative import. The bare `from Util import ...` only resolved because
+# picToMosiac.py appends scripts/ to sys.path at load time — fragile and breaks
+# any standalone import (tests, REPL). Dead imports (os, math.ceil, log_debug,
+# and — after D-013/D-008 — shutil, GetOutputPathDir, log_error) dropped too.
+from .Util import (
+    GetPaletteDict,
+    SaveDictAsJsonsOptimized,
+    log_info,
 )
 
 PALETTE_DICT = GetPaletteDict()
 
-def get_order_lists_file_path():
-    return GetOutputPathDir() / "OrderLists"
-
-def empty_order_list_folder():
-    folder = Path(get_order_lists_file_path())
-    # missing_ok=True is safer, but if using older Python:
-    if folder.exists():
-        shutil.rmtree(folder)
-    folder.mkdir(parents=True, exist_ok=True)
+# D-013: get_order_lists_file_path / empty_order_list_folder were the legacy CLI
+# path (output_dir is None -> write to the project-root scratch dir). Removed;
+# output_dir is now required and the API worker is the only caller.
 
 def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     """
     Analyzes images to produce a consolidated LEGO piece order.
     Optimized for CPU efficiency and minimal memory allocation.
     """
-    log_info("clearing previous order lists...")
+    # D-013: output_dir is required (CLI fallback removed).
     if output_dir is None:
-        empty_order_list_folder()
-    
+        raise ValueError("output_dir is required")
+
     log_info("creating order list...")
 
     # 1. Initialize with Baseplates
@@ -49,12 +40,20 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
     unique_rgb, counts = np.unique(bg_arr, axis=0, return_counts=True)
     
     for rgb_row, count in zip(unique_rgb, counts):
-        color_tuple = tuple(rgb_row)
+        color_tuple = tuple(int(c) for c in rgb_row)
         try:
             piece_id = PALETTE_DICT[color_tuple]
             order[piece_id] += int(count)
         except KeyError:
-            log_error(f"Background color {color_tuple} not found in LEGO palette")
+            # D-008: fail loud rather than silently dropping pieces. Every mosaic
+            # pixel is built FROM the palette, so an off-palette color is a
+            # pipeline-invariant violation. Dropping it would ship a kit missing
+            # bricks; raising fails the job into manifest_failed.json (no charge,
+            # since checkout reads order_list.json only after job completion).
+            raise RuntimeError(
+                f"Mosaic pixel color {color_tuple} (layer=background) is not in "
+                "LEGO_PALETTE_RGB_DICT. Refusing to ship a kit missing bricks."
+            ) from None
 
     # 3. Layer: Foreground
     if fg_out_rgba is not None:
@@ -65,12 +64,16 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
         
         unique_fg, fg_counts = np.unique(fg_rgb, axis=0, return_counts=True)
         for rgb_row, count in zip(unique_fg, fg_counts):
-            color_tuple = tuple(rgb_row)
+            color_tuple = tuple(int(c) for c in rgb_row)
             try:
                 piece_id = PALETTE_DICT[color_tuple]
                 order[piece_id] += int(count)
             except KeyError:
-                log_error(f"Foreground color {color_tuple} not found in LEGO palette")
+                # D-008: see background layer above — fail loud, never drop.
+                raise RuntimeError(
+                    f"Mosaic pixel color {color_tuple} (layer=foreground) is not "
+                    "in LEGO_PALETTE_RGB_DICT. Refusing to ship a kit missing bricks."
+                ) from None
 
     # 4. Layer: Frame
     if want_frame:
@@ -79,10 +82,7 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
             order[pid] += qty
 
     # 5. Save Output
-    if output_dir is not None:
-        output_json_path = output_dir / "OrderLists" / "order_list.json"
-    else:
-        output_json_path = get_order_lists_file_path() / "order_list.json"
+    output_json_path = Path(output_dir) / "OrderLists" / "order_list.json"
 
     # Pass the defaultdict directly to the utility
     SaveDictAsJsonsOptimized(order, output_json_path)

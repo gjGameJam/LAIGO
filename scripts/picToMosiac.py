@@ -2,14 +2,13 @@ import os
 from PIL import Image, ImageFilter
 import numpy as np
 from skimage import color
-import sys
 from pathlib import Path
-import cv2
 import mediapipe as mp
-import copy
-from enum import Enum
 import traceback
-sys.path.append(str(Path(__file__).resolve().parent)) #look in same folder for scripts
+# D-019/D-020: the sys.path.append hack that let MosiacToOrder/Util use bare
+# imports is gone — every intra-package import is now relative. Dead imports
+# (sys, copy, enum.Enum) removed; MosaicType moved to the leaf mosaic_types module.
+from .mosaic_types import MosaicType
 from .MosiacToOrder import GenerateOrderList
 from .MosiacToInstruction import GenerateInstructions
 from .preview_builder import build_preview_payload, write_preview_atomic
@@ -72,6 +71,23 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
     return simplified_idx
 
 
+def background_color_budget(bg_idx, fg_mask_np, background_color_percent):
+    """How many distinct LEGO colors to keep in the simplified background.
+
+    Scales the user's ``background_color_percent`` slider over the number of
+    distinct colors in the REAL background region (``fg_mask_np == 0``).
+
+    D-001: this previously counted ``bg_idx[fg_mask_np == 255]`` — the
+    foreground silhouette — where ``remove_background`` white-fills every pixel,
+    so the unique count was always 1 and the slider collapsed every background
+    to a single color. ``fg_mask_np == 0`` is the visible background and mirrors
+    the ``alpha_mask=(255 - fg_mask_np)`` passed to ``simplify_background_lego``.
+    """
+    background_indices = bg_idx[fg_mask_np == 0]
+    unique_count = len(np.unique(background_indices))
+    return max(1, int((background_color_percent / 100) * unique_count))
+
+
 #takes an image and lego stud width and returns lego image and array of lego image pixel colors
 def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
     #calculate stud height calculation such that it is always divisible by 16
@@ -118,16 +134,29 @@ def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
     return out_img, out_idx
 
 
+# D-016: MediaPipe SelfieSegmentation's documented default threshold is 0.5.
+# We use 0.51 — empirically biases slightly against borderline foreground pixels
+# to reduce halo around low-contrast edges. Pinned as a named constant; worth
+# re-tuning now that D-007 feeds MediaPipe the correct (RGB) colorspace.
+_SEGMENTATION_FG_THRESHOLD = 0.51
+
+
 #separates the background of an image, returning the foreground and background
 def remove_background(pil_img):
-    mp_selfie = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
-    img = np.array(pil_img)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = mp_selfie.process(img_rgb)
-    if results.segmentation_mask is None:
-        raise RuntimeError("Selfie segmentation failed")
-    mask = results.segmentation_mask
-    fg_mask = mask > 0.51
+    img = np.array(pil_img)  # PIL is already RGB — that's what MediaPipe expects.
+    # D-011: context-manager form releases MediaPipe's native (C++) graph
+    # resources on exit. Plain GC does not, so without this the graph leaks once
+    # max_tasks_per_child rises above 1 (worker runs >1 job before exiting).
+    with mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1) as mp_selfie:
+        # D-007: feed RGB straight through. The old cv2.cvtColor(img, BGR2RGB)
+        # swapped channels and handed MediaPipe a BGR-coded tensor, degrading
+        # segmentation precision (the model is RGB-trained).
+        results = mp_selfie.process(img)
+        if results.segmentation_mask is None:
+            raise RuntimeError("Selfie segmentation failed")
+        # Derive fg_mask inside the `with` so it never reads through MediaPipe's
+        # buffer after the graph closes.
+        fg_mask = results.segmentation_mask > _SEGMENTATION_FG_THRESHOLD
     background = np.where(~fg_mask[...,None], img, 255)
     foreground = np.where(fg_mask[...,None], img, 255)
     fg_pil = Image.fromarray(foreground.astype(np.uint8))
@@ -178,41 +207,8 @@ def make_difference_transparent(orig, new):
     return Image.fromarray(fg)
 
 
-#helper enum for input handling
-class MosaicType(str, Enum):
-    TWO_D = "2d"
-    THREE_D = "3d"
-
-
-#processes system args and raises error if invalid
-def handle_input(args):
-    if len(args) != 5:
-        raise ValueError("Usage: python picToMosiac.py Width Dimension PercentOfBackgroundColors WantFrame")
-
-    width = int(args[1])
-    dimension = args[2].upper()
-    background_color_percent = int(args[3])
-
-    frame_str = args[4].strip().lower() # Parse boolean explicitly
-    if frame_str not in ("true", "false"):
-        raise ValueError("WantFrame must be 'True' or 'False' (not case sensitive)")
-    to_frame = (frame_str == "true")
-
-    if not (MIN_BLOCK_WIDTH <= width <= MAX_BLOCK_WIDTH): #ensure desired width is within bounds
-        raise ValueError("Width must be 1-40 blocks")
-
-    if dimension not in ("2D", "3D"):
-        raise ValueError("Dimension must be '2D' or '3D' (not case sensitive)")
-
-    if not (1 <= background_color_percent <= 100):
-        raise ValueError("PercentOfBackgroundColors must be 1-100 percent")
-   
-    studs_width = width * STUDS_PER_BLOCK #there are 16 studs per baseplate block side (this ensures width of mosiac = width of baseplate(s))
-
-    if (dimension == "2D"): # return 2d for flat mosiac
-        return MosaicType.TWO_D, studs_width, background_color_percent, to_frame
-   
-    return MosaicType.THREE_D, studs_width, background_color_percent, to_frame # return 3d for mosiac with foreground and background
+# MosaicType is imported from .mosaic_types (D-032). Re-exported here so existing
+# `from .picToMosiac import MosaicType` call sites keep working.
 
 
 #gives the error name, type, and line location
@@ -266,7 +262,7 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
             fg_mask_resized = fg_a.resize(bg_idx.shape[::-1], Image.NEAREST)
             fg_mask_np = np.array(fg_mask_resized)
-            color_quant = max(1,int((background_color_percent/100)*len(np.unique(bg_idx[fg_mask_np==255]))))
+            color_quant = background_color_budget(bg_idx, fg_mask_np, background_color_percent)
             bg_idx_simplified = simplify_background_lego(bg_idx, PALETTE_LAB, k=color_quant, alpha_mask=(255-fg_mask_np))
             bg_rgb_simplified = LEGO_PALETTE_RGB[bg_idx_simplified]
             bg_out_img = Image.fromarray(bg_rgb_simplified.astype(np.uint8))
@@ -344,15 +340,6 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
     except Exception as e:
         give_exception_message(e)
-
-
-if __name__ == "__main__":
-    try:
-        log_info("handling input...")
-        mosiac_type, block_width, background_color_percent, to_frame = handle_input(sys.argv)
-        image_folder = Path(__file__).resolve().parent.parent / "images"
-        image_name = "stella1.jpg"
-        image_path = image_folder / image_name
-        pic_to_mosaic(image_path, block_width, mosiac_type, background_color_percent, to_frame)
-    except Exception as e:
-        give_exception_message(e)
+# D-013: the __main__ CLI entry point (+ handle_input) was removed. It ran
+# against a hardcoded image path (images/stella1.jpg) and the legacy
+# output_dir=None scratch path; the API worker is the only production entry.

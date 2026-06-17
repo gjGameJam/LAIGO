@@ -34,44 +34,53 @@ document does NOT cover those.
 - **mitigated** — partial workaround in place, root cause still present
 - **wontfix-by-design** — acknowledged trade-off, not a defect to chase
 - **fixed-in: <commit>** — closed; entry retained as a regression check
+- **fixed (branch `<name>`)** — fix applied + verified on a branch, not yet committed to a hash. Replace with `fixed-in: <commit>` at merge.
+- **subsumed by [D-NNN]** — closed by removal: another fix deleted the code this defect lived in.
+- **deferred (<reason>)** — intentionally not fixed this pass (e.g., regression risk).
+
+> **Sweep note (2026-06-16):** Waves 1–6 of the `fix/mosaic-defects-sweep`
+> branch closed 24 defects (D-001..D-011 except D-012, plus
+> D-013/14/16/19/20/21/23/27/28/30/31/32/33), subsumed D-022 (via D-013), and
+> deferred D-012. Still **open**: D-015, D-017, D-018, D-024, D-025, D-026,
+> D-029 (Waves 7–8). See `CLAUDE.md` for the wave grouping.
 
 ## Index (sorted by severity, then file)
 
 | ID | Severity | Status | Title | File |
 |----|----------|--------|-------|------|
-| [D-001](#d-001) | **P0** | open | `background_color_percent` slider is non-functional in 3D | picToMosiac.py |
-| [D-002](#d-002) | **P1** | open | Duplicate stdout from `laigoLOG` propagating to root | logger.py + Main.py |
-| [D-003](#d-003) | **P1** | open | `_grid_to_python_ints` uses Python loop on 640×640 grid | preview_builder.py |
-| [D-004](#d-004) | **P1** | open | `log_info(fg_colors)` / `log_info(bg_colors)` dump full sets at INFO | MosiacToInstruction.py, Util.py |
-| [D-005](#d-005) | **P1** | open | Triple recomputation of fg/bg unique colors | MosiacToInstruction.py |
-| [D-006](#d-006) | **P1** | open | `Image.verify()` is a header sniff, not a decode | Main.py |
-| [D-007](#d-007) | **P2** | open | `cv2.cvtColor(img, COLOR_BGR2RGB)` feeds wrong colorspace to MediaPipe | picToMosiac.py |
-| [D-008](#d-008) | **P2** | open | `GenerateOrderList` silently drops pieces on `KeyError` | MosiacToOrder.py |
-| [D-009](#d-009) | **P2** | open | `RotatingFileHandler` opened by every worker subprocess | logger.py |
-| [D-010](#d-010) | **P2** | open | Worker subprocess re-imports the FastAPI + checkout tree | Main.py |
-| [D-011](#d-011) | **P2** | open | MediaPipe `SelfieSegmentation` never closed | picToMosiac.py |
-| [D-012](#d-012) | **P2** | open | `adjust_lightness_lab` runs at full input resolution | picToMosiac.py |
-| [D-013](#d-013) | **P2** | open | CLI / API duality in shared utility modules | cross-cutting |
-| [D-014](#d-014) | **P2** | open | Logging architecture: per-process file handler + duplicate propagation | cross-cutting |
+| [D-001](#d-001) | **P0** | fixed (branch `fix/mosaic-defects-sweep`) | `background_color_percent` slider is non-functional in 3D | picToMosiac.py |
+| [D-002](#d-002) | **P1** | fixed (branch `fix/mosaic-defects-sweep`) | Duplicate stdout from `laigoLOG` propagating to root | logger.py + Main.py |
+| [D-003](#d-003) | **P1** | fixed (branch `fix/mosaic-defects-sweep`) | `_grid_to_python_ints` uses Python loop on 640×640 grid | preview_builder.py |
+| [D-004](#d-004) | **P1** | fixed (branch `fix/mosaic-defects-sweep`) | `log_info(fg_colors)` / `log_info(bg_colors)` dump full sets at INFO | MosiacToInstruction.py, Util.py |
+| [D-005](#d-005) | **P1** | fixed (branch `fix/mosaic-defects-sweep`) | Triple recomputation of fg/bg unique colors | MosiacToInstruction.py |
+| [D-006](#d-006) | **P1** | fixed (branch `fix/mosaic-defects-sweep`) | `Image.verify()` is a header sniff, not a decode | Main.py |
+| [D-007](#d-007) | **P2** | fixed (branch `fix/mosaic-defects-sweep`) | `cv2.cvtColor(img, COLOR_BGR2RGB)` feeds wrong colorspace to MediaPipe | picToMosiac.py |
+| [D-008](#d-008) | **P2** | fixed (branch `fix/mosaic-defects-sweep`) | `GenerateOrderList` silently drops pieces on `KeyError` | MosiacToOrder.py |
+| [D-009](#d-009) | **P2** | fixed (branch `fix/mosaic-defects-sweep`) | `RotatingFileHandler` opened by every worker subprocess | logger.py |
+| [D-010](#d-010) | **P2** | fixed (branch `fix/mosaic-defects-sweep`) | Worker subprocess re-imports the FastAPI + checkout tree | Main.py |
+| [D-011](#d-011) | **P2** | fixed (branch `fix/mosaic-defects-sweep`) | MediaPipe `SelfieSegmentation` never closed | picToMosiac.py |
+| [D-012](#d-012) | **P2** | deferred (visual-regression risk) | `adjust_lightness_lab` runs at full input resolution | picToMosiac.py |
+| [D-013](#d-013) | **P2** | fixed (branch `fix/mosaic-defects-sweep`) | CLI / API duality in shared utility modules | cross-cutting |
+| [D-014](#d-014) | **P2** | fixed (branch `fix/mosaic-defects-sweep`) | Logging architecture: per-process file handler + duplicate propagation | cross-cutting |
 | [D-015](#d-015) | **P3** | open | `make_difference_transparent` doc string and name describe the inverse of the code | picToMosiac.py |
-| [D-016](#d-016) | **P3** | open | `mask > 0.51` magic threshold | picToMosiac.py |
+| [D-016](#d-016) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | `mask > 0.51` magic threshold | picToMosiac.py |
 | [D-017](#d-017) | **P3** | open | `pic_to_mosaic` returns `None`; caller masks with `or workspace` | picToMosiac.py / Main.py |
 | [D-018](#d-018) | **P3** | open | `give_exception_message` is in-band log-and-reraise | picToMosiac.py |
-| [D-019](#d-019) | **P3** | open | Bare `from Util import …` in `MosiacToOrder.py:9` | MosiacToOrder.py |
-| [D-020](#d-020) | **P3** | open | Bare `from logger import logger` in `Util.py:8` | Util.py |
-| [D-021](#d-021) | **P3** | open | Two PNG sort strategies, one dead | MosiacToInstruction.py |
-| [D-022](#d-022) | **P3** | open | `empty_instructions_folder` raises when folder is missing | MosiacToInstruction.py |
-| [D-023](#d-023) | **P3** | open | `assert` used for runtime invariants | MosiacToInstruction.py |
+| [D-019](#d-019) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | Bare `from Util import …` in `MosiacToOrder.py:9` | MosiacToOrder.py |
+| [D-020](#d-020) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | Bare `from logger import logger` in `Util.py:8` | Util.py |
+| [D-021](#d-021) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | Two PNG sort strategies, one dead | MosiacToInstruction.py |
+| [D-022](#d-022) | **P3** | subsumed by [D-013](#d-013) | `empty_instructions_folder` raises when folder is missing | MosiacToInstruction.py |
+| [D-023](#d-023) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | `assert` used for runtime invariants | MosiacToInstruction.py |
 | [D-024](#d-024) | **P3** | open | Inconsistent `step` return shape across instruction helpers | MosiacToInstruction.py + VisualMaker.py |
 | [D-025](#d-025) | **P3** | open | `step` counter threaded through every function as a return value | MosiacToInstruction.py + VisualMaker.py |
 | [D-026](#d-026) | **P3** | open | `_mark_submission_failed` does a redundant `rmtree(job_root)` | Main.py |
-| [D-027](#d-027) | **P3** | open | `mp.set_start_method("spawn", force=True)` at module import | Main.py |
-| [D-028](#d-028) | **P3** | open | `MAX_WORKERS` and `MAX_QUEUE_SIZE` env vars documented but ignored | Main.py |
+| [D-027](#d-027) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | `mp.set_start_method("spawn", force=True)` at module import | Main.py |
+| [D-028](#d-028) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | `MAX_WORKERS` and `MAX_QUEUE_SIZE` env vars documented but ignored | Main.py |
 | [D-029](#d-029) | **P3** | open | `FRONTEND_ORIGIN` env var set but never read | Main.py |
-| [D-030](#d-030) | **P3** | open | `max_tasks_per_child=1` requires Python 3.12+, unenforced | Main.py / requirements.txt |
-| [D-031](#d-031) | **P3** | open | `DEBUG = bool(os.getenv("DEBUG"))` is the D1 typo bug, latent | Util.py |
-| [D-032](#d-032) | **P3** | open | `preview_builder` accepts string literals instead of `MosaicType` enum | preview_builder.py |
-| [D-033](#d-033) | **P3** | open | Preview palette index 0 reserved but not enforced | preview_builder.py |
+| [D-030](#d-030) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | `max_tasks_per_child=1` requires Python 3.12+, unenforced | Main.py / requirements.txt |
+| [D-031](#d-031) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | `DEBUG = bool(os.getenv("DEBUG"))` is the D1 typo bug, latent | Util.py |
+| [D-032](#d-032) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | `preview_builder` accepts string literals instead of `MosaicType` enum | preview_builder.py |
+| [D-033](#d-033) | **P3** | fixed (branch `fix/mosaic-defects-sweep`) | Preview palette index 0 reserved but not enforced | preview_builder.py |
 
 ---
 
@@ -81,7 +90,7 @@ document does NOT cover those.
 
 **Title:** `background_color_percent` slider is non-functional in 3D mosaics
 **Severity:** **P0** (visible defect in every 3D mosaic shipped)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/picToMosiac.py:267–270`
 
 ### Symptom
@@ -110,21 +119,27 @@ positions:
 background = np.where(~fg_mask[...,None], img, 255)
 ```
 
-After `image_to_lego_mosaic`, those white pixels map to the LEGO-white palette
-index (one specific integer). So `np.unique(bg_idx[fg_mask_np==255])` is almost
-always `array([<white_idx>])` — length 1 — regardless of the source image. Then:
+The white fill maps mostly to LEGO white, but **not to a single index**.
+Empirically (stella1.jpg, 48×32 studs) `np.unique(bg_idx[fg_mask_np==255])` has
+~**11** distinct values, not 1: LANCZOS downscaling blends the white fill with
+adjacent real-background pixels at the silhouette boundary, and Floyd-Steinberg
+dithering diffuses quantization error into the white region. So the budget
+scaled over the **wrong** color set — the foreground-bleed colors — rather than
+the background's real variety:
 
-```python
-color_quant = max(1, int((bg_pct/100) * 1))
-            = max(1, int(bg_pct/100))
-            = 1     for bg_pct ∈ [0, 99]
-            = 1     for bg_pct = 100
+```text
+bg%   old k (over fg region)   distinct bg colors actually produced
+  1            1                          1
+ 50            5                          5   (capped by the wrong, under-counting basis)
+100           11                         11   (misses ~5 real background colors)
 ```
 
-`simplify_background_lego(..., k=1, ...)` collapses the *real* background
-(selected via `alpha_mask=(255-fg_mask_np)`, which is correct) down to its
-single most-frequent color. The simplification itself works as designed; it's
-the **target** that's wrong.
+`simplify_background_lego` itself works as designed — it's selected correctly
+via `alpha_mask=(255-fg_mask_np)`. The bug is purely the **`k` target**: it was
+computed from the foreground silhouette's bleed colors instead of the real
+background, so the slider under-represented the background (and at low values
+collapsed it hard). The earlier "always length 1" framing of this entry was an
+oversimplification — corrected here from the audit measurement.
 
 ### Reproduction
 
@@ -142,23 +157,28 @@ the **target** that's wrong.
   product.
 - 2D mosaics are unaffected (no foreground mask).
 
-### Fix
+### Fix (shipped)
 
-Change the mask to select **background** pixels, not foreground:
+Extracted a pure helper `background_color_budget(bg_idx, fg_mask_np, pct)` in
+`picToMosiac.py` that scales over the **background** region (`fg_mask_np == 0`),
+and `pic_to_mosaic` now calls it:
 
 ```python
-color_quant = max(1, int((background_color_percent/100) * len(np.unique(bg_idx[fg_mask_np==0]))))
+color_quant = background_color_budget(bg_idx, fg_mask_np, background_color_percent)
+# helper: max(1, int((pct/100) * len(np.unique(bg_idx[fg_mask_np == 0]))))
 ```
 
-`fg_mask_np == 0` is the visible background region; `np.unique` then returns
-all real background LEGO colors and the percentage scales over them.
+`fg_mask_np == 0` is the visible background region (and mirrors the
+`alpha_mask=(255-fg_mask_np)` already passed to `simplify_background_lego`), so
+`np.unique` returns all real background LEGO colors and the slider scales over
+them.
 
-### Verification
+### Verification (done)
 
-- Run the reproduction above with the fix. The three mosaics should have
-  visibly different background color counts.
-- Add a regression test that mocks `bg_idx` and `fg_mask_np` with known shapes,
-  asserts `color_quant` scales linearly with `background_color_percent`.
+- Unit: `scripts/test_background_budget.py` asserts the budget scales linearly,
+  floors at 1, and is monotonic.
+- Empirical (stella1.jpg, 48×32): budget tracks the slider 1 → 4 → 8 → 12 → 16
+  for bg% 1/25/50/75/100, reaching all 16 real background colors at 100%.
 - For a more end-to-end check, compute `len(np.unique(bg_idx_simplified))`
   before and after the fix on a fixture image; the count should track the
   slider.
@@ -178,7 +198,7 @@ all real background LEGO colors and the percentage scales over them.
 
 **Title:** `cv2.cvtColor(img, COLOR_BGR2RGB)` feeds the wrong colorspace to MediaPipe
 **Severity:** **P2** (degraded segmentation precision; not visible in output colors)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/picToMosiac.py:124–135`
 
 ### Symptom
@@ -266,7 +286,7 @@ BGR, which is also wrong for MediaPipe (MediaPipe wants RGB).
 
 **Title:** MediaPipe `SelfieSegmentation` instance is created per call and never closed
 **Severity:** **P2** (latent; benign today, blocking for CPU roadmap items #5/#6)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/picToMosiac.py:122–135`
 
 ### Symptom
@@ -352,7 +372,7 @@ profiling shows construction is hot.
 
 **Title:** `adjust_lightness_lab` runs at full input resolution
 **Severity:** **P2** (compute waste on every job; 5–8% of single-job CPU per CLAUDE.md hotspot #3)
-**Status:** open
+**Status:** deferred (visual-regression risk)
 **Location:** `scripts/picToMosiac.py:138–168`
 
 ### Symptom
@@ -542,7 +562,7 @@ Either way, delete the misleading one-line comment.
 
 **Title:** `mask > 0.51` is an undocumented magic threshold
 **Severity:** **P3** (documentation debt; possibly a typo)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/picToMosiac.py:130`
 
 ### Symptom
@@ -768,7 +788,7 @@ because it's a thin wrapper around `logger.error`. Either:
 
 **Title:** `GenerateOrderList` silently drops pieces on palette `KeyError`
 **Severity:** **P2** (latent — would be P0 if triggered; ships an incomplete kit)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/MosiacToOrder.py:53–57, 69–73`
 
 ### Symptom
@@ -869,7 +889,7 @@ practice, switch to Option 2 with a paired alert.
 
 **Title:** Bare `from Util import …` in `MosiacToOrder.py:9`
 **Severity:** **P3** (landmine; only works because of sys.path side effect)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/MosiacToOrder.py:9–16`
 
 ### Symptom
@@ -947,7 +967,7 @@ confirm no other bare imports exist.
 
 **Title:** `log_info(fg_colors)` / `log_info(bg_colors)` dump full sets at INFO level
 **Severity:** **P1** (ongoing log noise + disk cost; compounds with [D-005](#d-005))
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/MosiacToInstruction.py:103, 108`; `scripts/MosiacToOrder.py:90` (`log_info(f"Sum...")` is fine; the offending line is the order_dict log if extended)
 
 ### Symptom
@@ -1017,7 +1037,7 @@ to one each.
 
 **Title:** Triple recomputation of fg/bg unique colors for log-only purposes
 **Severity:** **P1** (perf waste on every job; trivially deletable)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/MosiacToInstruction.py:101–121`
 
 ### Symptom
@@ -1081,7 +1101,7 @@ they're the cheapest of the three.
 
 **Title:** Two PNG sort strategies, one dead (dead one is a future-maintainer landmine)
 **Severity:** **P3** (currently inert; obvious-looking pattern that is wrong)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/MosiacToInstruction.py:30–42` vs `:179–182`
 
 ### Symptom
@@ -1160,7 +1180,7 @@ Order is irrelevant for the deletion loop.
 
 **Title:** `empty_instructions_folder` raises when the folder is missing
 **Severity:** **P3** (only fires on legacy CLI path, which isn't hooked into prod)
-**Status:** open
+**Status:** subsumed by [D-013](#d-013)
 **Location:** `scripts/MosiacToInstruction.py:12–15`
 
 ### Symptom
@@ -1230,7 +1250,7 @@ entirely; this function becomes unreachable then.
 
 **Title:** `assert` used for runtime invariants (vanishes under `python -O`)
 **Severity:** **P3** (latent; assertions don't fire in optimized mode)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/MosiacToInstruction.py:82, 83, 112, 113, 114`
 
 ### Symptom
@@ -1453,7 +1473,7 @@ mechanical.
 
 **Title:** `Image.verify()` is a header sniff, not a decode
 **Severity:** **P1** (wasted compute on every malformed upload)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/Main.py:1303–1309`
 
 ### Symptom
@@ -1528,7 +1548,7 @@ can be decoded." For 250 MB uploads this is real work — but bounded
 
 **Title:** Worker subprocess re-imports the FastAPI + checkout tree on every job
 **Severity:** **P2** (3–5 s cold-start per job; CPU roadmap hotspot #6)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/Main.py` (entire module is loaded by every worker spawn because `run_job` lives in it)
 
 ### Symptom
@@ -1698,7 +1718,7 @@ needed here.
 
 **Title:** `mp.set_start_method("spawn", force=True)` at module import
 **Severity:** **P3** (testability hazard; works in production)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/Main.py:3–4`
 
 ### Symptom
@@ -1768,7 +1788,7 @@ Tests that pre-set fork will fail with a clear message.
 
 **Title:** `MAX_WORKERS` and `MAX_QUEUE_SIZE` env vars documented but ignored
 **Severity:** **P3** (config debt; operator surprise)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/Main.py:68–69`; `.env`; `CLAUDE.md § Configuration` table
 
 ### Symptom
@@ -1909,8 +1929,8 @@ pattern used in other LAIGO env vars (`BRICKLINK_ENABLED`).
 
 **Title:** `max_tasks_per_child=1` requires Python 3.12+, unenforced
 **Severity:** **P3** (deployment-environment landmine; latent on current Render)
-**Status:** open
-**Location:** `scripts/Main.py:299–302`; `requirements.txt` (no version pin)
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
+**Location:** `scripts/Main.py` lifespan (executor construction); `runtime.txt`
 
 ### Symptom
 
@@ -1944,34 +1964,46 @@ on 3.12, so the project works.
 
 ### Fix
 
-Two layers:
+Two layers — pin the prod runtime, and **degrade gracefully** on older
+interpreters so local dev still runs (the initial fix hard-refused boot on
+≤3.11, which broke local runnability on the 3.11 dev venv):
 
-1. Add a `runtime.txt` or `python-version` file pinning 3.12+:
+1. `runtime.txt` pins the Render runtime to 3.12+:
 
    ```
    python-3.12
    ```
 
-2. Add a sentinel check at the top of `Main.py`:
+2. In the `Main.py` lifespan, build the executor kwargs conditionally rather
+   than passing `max_tasks_per_child` unconditionally (which `TypeError`s on
+   ≤3.11) or refusing to boot:
 
    ```python
-   import sys
-   if sys.version_info < (3, 12):
-       raise RuntimeError(
-           f"LAIGO requires Python 3.12+ (uses ProcessPoolExecutor."
-           f"max_tasks_per_child). Got {sys.version_info.major}."
-           f"{sys.version_info.minor}."
+   executor_kwargs = {"max_workers": MAX_WORKERS}
+   if sys.version_info >= (3, 12):
+       executor_kwargs["max_tasks_per_child"] = 1   # respawn per job (RSS reclaim)
+   else:
+       log.warning(
+           "Python %d.%d < 3.12: worker respawn disabled "
+           "(max_tasks_per_child unavailable; no per-job memory reclaim). "
+           "Fine for local dev; Render prod pins 3.12 via runtime.txt.",
+           sys.version_info.major, sys.version_info.minor,
        )
+   app.state.executor = ProcessPoolExecutor(**executor_kwargs)
    ```
 
-   So contributors who try to start the server on the wrong Python see an
-   actionable error.
+   On 3.12+ the worker is respawned after every job; on ≤3.11 it persists
+   across jobs (no per-job RSS reclaim — acceptable for dev). MediaPipe's
+   native graph is released each job regardless via its context manager
+   (D-011), so only OS-level memory return is forgone on 3.11.
 
 ### Verification
 
-- After fix: try to start the server on Python 3.11 (if available locally).
-  Expect the explicit error from the sentinel, not the TypeError from
-  `ProcessPoolExecutor`.
+- Start the server on Python 3.11: it boots cleanly, logs the
+  `worker respawn disabled` warning, and `ProcessPoolExecutor started: …
+  respawn=off`. Jobs (incl. repeated 3D/MediaPipe runs in the persisting
+  worker) complete end-to-end over HTTP.
+- On Python 3.12 the warning is absent and the executor reports `respawn=on`.
 
 ### Related
 
@@ -1985,7 +2017,7 @@ Two layers:
 
 **Title:** Bare `from logger import logger` in `Util.py:8`
 **Severity:** **P3** (landmine; sibling to D-019)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/Util.py:8`
 
 ### Symptom
@@ -2032,7 +2064,7 @@ preview_builder.py:28–33 comment.)
 
 **Title:** `DEBUG = bool(os.getenv("DEBUG"))` is the D1 typo bug, latent
 **Severity:** **P3** (latent — variable is dead today)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/Util.py:11`
 
 ### Symptom
@@ -2090,7 +2122,7 @@ unconditionally; that's the actual debug control today.
 
 **Title:** `RotatingFileHandler` is opened by every worker subprocess
 **Severity:** **P2** (latent today; blocking for CPU roadmap items #5/#6)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/logger.py:22–27`
 
 ### Symptom
@@ -2191,7 +2223,7 @@ code, and the stdout-only fix is sufficient for `MAX_WORKERS=2`.
 
 **Title:** Duplicate stdout from `laigoLOG` propagating to root
 **Severity:** **P1** (ongoing log volume cost on Render)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/logger.py:36–38`; `scripts/Main.py:38–43`
 
 ### Symptom
@@ -2268,7 +2300,7 @@ if not logger.handlers:
 
 **Title:** `_grid_to_python_ints` uses Python list-comprehension instead of `.tolist()`
 **Severity:** **P1** (perf waste on every job; 200–500 ms on largest mosaics)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/preview_builder.py:64–66, 113, 137`
 
 ### Symptom
@@ -2330,7 +2362,7 @@ without numpy-type errors. Confirmed in the numpy docs.
 
 **Title:** `preview_builder` accepts string literals instead of `MosaicType` enum
 **Severity:** **P3** (latent; type-safety hole)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/preview_builder.py:69–98`
 
 ### Symptom
@@ -2409,7 +2441,7 @@ long-term shape.
 
 **Title:** Preview palette index 0 reserved for frame but not enforced
 **Severity:** **P3** (forward-looking safeguard; no current bug)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/preview_builder.py:44, 52–61, 115–137`
 
 ### Symptom
@@ -2498,7 +2530,7 @@ place.
 
 **Title:** CLI / API duality in shared utility modules
 **Severity:** **P2** (architectural; enables [D-022](#d-022) and adds maintenance tax)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/MosiacToOrder.py:36-37`, `scripts/MosiacToInstruction.py:85-86`, `scripts/picToMosiac.py:349-358` (`__main__`), `scripts/colorQuant.py`
 
 ### Symptom
@@ -2582,7 +2614,7 @@ Delete the CLI path. Specifically:
 
 **Title:** Logging architecture: per-process file handler + duplicate propagation
 **Severity:** **P2** (meta-defect; root cause of D-002 and D-009)
-**Status:** open
+**Status:** fixed (branch `fix/mosaic-defects-sweep`)
 **Location:** `scripts/logger.py` + `scripts/Main.py:38–43` + every module that uses `Util.log_info`
 
 ### Symptom

@@ -1,7 +1,19 @@
 # run with: uvicorn scripts.Main:app --reload    (from project root)
 
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)
+# D-027: request spawn WITHOUT force=True. spawn is required because the pooled
+# callable (worker.run_job) and its picToMosiac/mediapipe deps are not fork-safe
+# on Linux. The old force=True ran on every `import scripts.Main` and reset the
+# process-wide start method — hostile to test runners. Tolerate spawn already
+# being set; fail loud only if an incompatible method is already active.
+try:
+    mp.set_start_method("spawn")
+except RuntimeError:
+    if mp.get_start_method() != "spawn":
+        raise RuntimeError(
+            f"scripts.Main requires multiprocessing start method 'spawn', got "
+            f"{mp.get_start_method()!r}. Cannot continue."
+        )
 
 # ── Corporate TLS interception fix (local dev only) ───────────────────────────
 # On dev machines behind a TLS-intercepting corporate proxy, Python's certifi
@@ -41,7 +53,12 @@ import traceback
 import logging
 import sys
 from PIL import Image
-from .picToMosiac import pic_to_mosaic, MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH
+from .picToMosiac import MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH
+# D-010: run_job + _write_error_manifest live in the leaf module scripts/worker.py
+# (imports only picToMosiac + stdlib). ProcessPoolExecutor spawn-mode re-imports
+# the callable's defining module in every worker; keeping run_job out of Main.py
+# stops each spawn from re-importing the FastAPI + checkout + asyncpg tree.
+from .worker import run_job, _write_error_manifest
 from .Util import load_project_env
 # NOTE: the checkout saga pipeline (checkout.router / debug_router — quote /
 # confirm / status + marketplace ordering) is SHELVED. It stays on disk but is
@@ -86,9 +103,13 @@ JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", 1800))
 # 60d chargeback dispute window, with a buffer. Set to a smaller value
 # (e.g. 7) in staging if testing the cleanup path.
 JOB_SAGA_RETENTION_DAYS = int(os.getenv("JOB_SAGA_RETENTION_DAYS", 90))
-# Keep single-worker behavior for now; queueing controls waiting jobs.
-MAX_WORKERS = 1
-MAX_QUEUE_SIZE = 20
+# D-028: read from env instead of hardcoding (the vars were documented + present
+# in .env but ignored). Defaults preserve single-worker behavior. NOTE: raising
+# MAX_WORKERS above 1 requires Render Standard tier (2 GB) — each worker holds
+# mediapipe+numpy+PIL+cv2 (~400-550 MB RSS) — AND the logging/worker-isolation
+# fixes (D-009/D-010/D-011). .env ships MAX_WORKERS=1 to keep the switch off.
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "1"))
+MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "20"))
 STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
@@ -313,15 +334,29 @@ async def lifespan(app: FastAPI):
         from .checkout.saga_resume import resume_in_flight_sagas
         await resume_in_flight_sagas()
 
-    try:
-        # max_tasks_per_child=1: worker exits and is respawned after every job,
-        # releasing all memory (numpy, skimage, PIL, cv2, mediapipe, palette globals)
-        # back to the OS. Requires Python 3.12+.
-        # Progress is tracked via small files on disk; no Manager is needed.
-        app.state.executor = ProcessPoolExecutor(
-            max_workers=MAX_WORKERS,
-            max_tasks_per_child=1
+    # D-030: max_tasks_per_child was added to ProcessPoolExecutor in Python 3.12.
+    # On 3.12+ we set it to 1 so the worker exits and is respawned after every
+    # job, releasing all memory (numpy, skimage, PIL, cv2, mediapipe, palette
+    # globals) back to the OS. On 3.11 or earlier the kwarg raises an opaque
+    # TypeError, so we omit it and log a warning — the server still runs, but the
+    # single worker persists across jobs (no per-job memory reclaim). That's fine
+    # for local dev; Render prod pins 3.12 via runtime.txt where the kwarg is on.
+    # MediaPipe is context-managed (D-011), so its native graph is released each
+    # job regardless of respawn — the only thing forgone on 3.11 is RSS reclaim.
+    # Progress is tracked via small files on disk; no Manager is needed.
+    executor_kwargs = {"max_workers": MAX_WORKERS}
+    if sys.version_info >= (3, 12):
+        executor_kwargs["max_tasks_per_child"] = 1
+    else:
+        log.warning(
+            "Python %d.%d < 3.12: worker respawn disabled "
+            "(max_tasks_per_child unavailable; no per-job memory reclaim). "
+            "Fine for local dev; Render prod pins 3.12 via runtime.txt.",
+            sys.version_info.major, sys.version_info.minor,
         )
+
+    try:
+        app.state.executor = ProcessPoolExecutor(**executor_kwargs)
 
         # Runtime-only side tables (Phase D step 2 — persistent state moved
         # to jobs_store dispatcher; only un-serializable / transient refs
@@ -362,7 +397,8 @@ async def lifespan(app: FastAPI):
         app.state.scheduler_cv = threading.Condition()
         app.state.active_jobs = 0
 
-        log.info(f"ProcessPoolExecutor started with {MAX_WORKERS} worker(s), max_tasks_per_child=1")
+        _respawn = "on" if "max_tasks_per_child" in executor_kwargs else "off"
+        log.info(f"ProcessPoolExecutor started: {MAX_WORKERS} worker(s), respawn={_respawn}")
     except Exception as e:
         log.critical(f"Failed to initialise executor: {e}", exc_info=True)
         raise
@@ -603,32 +639,6 @@ async def _queue_position_async(job_id: str) -> tuple[int | None, int]:
     return None, len(queued_rows)
 
 
-def _write_error_manifest(job_root: Path, job_id: str, settings: dict,
-                           error: str, tb: str) -> None:
-    """Write failure details to disk so get_job can serve them after the job
-    is evicted from the store. Accepts pre-captured traceback string so this
-    can safely be called outside an except block."""
-    try:
-        error_info = {
-            "status": "failed",
-            "progress": 0,
-            "job_id": job_id,
-            "error": error,
-            "traceback": tb,
-            "finished_at": time.time(),
-            "settings": settings,
-        }
-        error_path = job_root / "manifest_failed.json"
-        error_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(error_path, "w", encoding="utf-8") as f:
-            json.dump(error_info, f, indent=2)
-    except Exception as write_err:
-        print(
-            f"[ERROR] Could not write error manifest for job {job_id}: {write_err}",
-            file=sys.stderr, flush=True
-        )
-
-
 def _run_coro_blocking(coro, loop: asyncio.AbstractEventLoop, timeout: float = 30.0):
     """Submit a coroutine to the FastAPI event loop from a non-async thread
     and BLOCK until it returns (or times out).
@@ -640,173 +650,6 @@ def _run_coro_blocking(coro, loop: asyncio.AbstractEventLoop, timeout: float = 3
     """
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=timeout)
-
-
-# -----------------------------
-# WORKER FUNCTION
-# -----------------------------
-def run_job(job_id: str,
-            image_path: str,
-            settings: dict,
-            output_root: str,
-            studs_per_block: int,
-            progress_path: str) -> dict:
-    """
-    Runs in a separate spawned process (max_tasks_per_child=1 so it exits
-    after this returns, freeing all memory at the OS level).
-    Progress is written to a small file on disk rather than a Manager dict,
-    since the Manager process has been eliminated.
-    """
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] worker: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        stream=sys.stdout,
-    )
-    wlog = logging.getLogger(f"laigo.worker.{job_id[:8]}")
-    wlog.info(f"Job {job_id} started | settings: {settings}")
-
-    OUTPUT_DIR_LOCAL = Path(output_root)
-    job_root = OUTPUT_DIR_LOCAL / job_id
-    workspace = job_root / "workspace"
-    progress_file = Path(progress_path)
-    last_update_time = 0
-
-    def write_progress(pct):
-        nonlocal last_update_time
-        now = time.time()
-        if now - last_update_time >= 2:
-            try:
-                progress_file.write_text(str(pct))
-            except Exception as prog_err:
-                wlog.warning(f"Job {job_id} could not write progress: {prog_err}")
-            last_update_time = now
-
-    def delete_progress():
-        try:
-            progress_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    def fail(msg: str, tb: str) -> dict:
-        """Single failure path: cleans up workspace, input file, and progress
-        file, writes the error manifest, and returns the failure dict."""
-        shutil.rmtree(workspace, ignore_errors=True)
-        try:
-            Path(image_path).unlink(missing_ok=True)
-        except Exception:
-            pass
-        delete_progress()
-        _write_error_manifest(job_root, job_id, settings, msg, tb)
-        gc.collect()
-        return {
-            "status": "failed",
-            "progress": 0,
-            "error": msg,
-            "traceback": tb,
-            "finished_at": time.time(),
-        }
-
-    # --- Create workspace ---
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        tb = traceback.format_exc()
-        wlog.error(f"Job {job_id} failed to create workspace {workspace}: {e}", exc_info=True)
-        return fail(f"Could not create workspace: {e}", tb)
-
-    # --- Parse settings ---
-    try:
-        width = int(settings["mosaic_block_width"]) * studs_per_block
-        mosaic_type = MosaicType(settings["mosaic_type"])
-        background_pct = float(settings["background_color_percent"])
-        to_frame = bool(settings["to_frame"])
-    except (KeyError, ValueError, TypeError) as e:
-        tb = traceback.format_exc()
-        wlog.error(f"Job {job_id} has invalid settings: {e}", exc_info=True)
-        return fail(f"Invalid job settings: {e}", tb)
-
-    # --- Run mosaic generation ---
-    try:
-        wlog.info(f"Job {job_id} calling pic_to_mosaic | width={width} type={mosaic_type}")
-        result_dir = pic_to_mosaic(
-            Path(image_path),
-            width,
-            mosaic_type,
-            background_pct,
-            to_frame,
-            output_dir=workspace,
-            job_id=job_id,
-            progress_callback=write_progress,
-        ) or workspace
-        wlog.info(f"Job {job_id} pic_to_mosaic complete | result_dir={result_dir}")
-    except Exception as e:
-        tb = traceback.format_exc()
-        wlog.error(f"Job {job_id} pic_to_mosaic raised: {type(e).__name__}: {e}", exc_info=True)
-        return fail(str(e), tb)
-
-    # --- Write success manifest (non-fatal if it fails) ---
-    try:
-        manifest = {
-            "schema": "laigo.manifest.v1",
-            "job_id": job_id,
-            "created_at": time.time(),
-            "settings": settings,
-        }
-        with open(result_dir / "manifest.json", "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-        wlog.info(f"Job {job_id} manifest written")
-    except Exception as e:
-        wlog.error(f"Job {job_id} failed to write manifest: {e}", exc_info=True)
-
-    # --- Archive workspace ---
-    try:
-        archive_base = job_root / "artifact"
-        wlog.info(f"Job {job_id} archiving to {archive_base}.zip")
-        shutil.make_archive(str(archive_base), "zip", result_dir)
-        wlog.info(f"Job {job_id} archive created")
-    except Exception as e:
-        tb = traceback.format_exc()
-        wlog.error(f"Job {job_id} failed to create archive: {e}", exc_info=True)
-        return fail(f"Archive creation failed: {e}", tb)
-
-    # Copy order_list.json to a stable location before workspace deletion so the
-    # checkout optimizer can read it after the workspace is gone.
-    _order_list_src = workspace / "OrderLists" / "order_list.json"
-    if _order_list_src.exists():
-        try:
-            shutil.copy2(_order_list_src, job_root / "order_list.json")
-        except Exception as e:
-            wlog.warning(f"Job {job_id} could not copy order_list.json: {e}")
-
-    # Copy preview.json (3D-preview payload for the frontend) to the stable
-    # location before workspace deletion. Mirrors the order_list handoff above.
-    _preview_src = workspace / "preview.json"
-    if _preview_src.exists():
-        try:
-            shutil.copy2(_preview_src, job_root / "preview.json")
-        except Exception as e:
-            wlog.warning(f"Job {job_id} could not copy preview.json: {e}")
-
-    # --- Success cleanup ---
-    shutil.rmtree(workspace, ignore_errors=True)
-
-    try:
-        Path(image_path).unlink(missing_ok=True)
-    except Exception as e:
-        wlog.warning(f"Job {job_id} could not delete input file {image_path}: {e}")
-
-    delete_progress()
-
-    del result_dir
-    gc.collect()
-
-    wlog.info(f"Job {job_id} complete")
-    return {
-        "status": "complete",
-        "finished_at": time.time(),
-    }
 
 
 # -----------------------------
@@ -1324,8 +1167,13 @@ async def generate(
     log.info(f"Job {job_id} file saved | size={size} bytes")
 
     try:
+        # D-006: img.verify() only sniffs headers — a truncated JPEG/TIFF with
+        # valid markers passes and then fails inside the worker 5-30s later.
+        # Force a full pixel decode + the RGB conversion the pipeline uses so
+        # bad uploads are rejected with an immediate 400, not a doomed job spawn.
         with Image.open(input_file) as img:
-            img.verify()
+            img.load()
+            img.convert("RGB")
     except Exception as e:
         log.warning(f"Job {job_id} rejected — invalid image: {type(e).__name__}: {e}")
         input_file.unlink(missing_ok=True)
