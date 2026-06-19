@@ -136,7 +136,10 @@
       "Bash(./.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('scripts/checkout/clients/lego_client.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -m py_compile scripts/checkout/clients/lego_client.py scripts/checkout/_cf_probe.py)",
       "Bash(./.venv/Scripts/python.exe -m pip uninstall -y patchright)",
-      "Bash(./.venv/Scripts/python.exe -c \"import ast; t=ast.parse\\(open\\('scripts/checkout/clients/lego_client.py'\\).read\\(\\)\\); print\\('lego_client parses OK'\\)\")"
+      "Bash(./.venv/Scripts/python.exe -c \"import ast; t=ast.parse\\(open\\('scripts/checkout/clients/lego_client.py'\\).read\\(\\)\\); print\\('lego_client parses OK'\\)\")",
+      "Bash(git fsck *)",
+      "Bash(git update-ref *)",
+      "Bash(git rev-list *)"
     ]
   },
   "enabledPlugins": {}

@@ -906,16 +906,26 @@ def _get_or_build_baseplate(key, builder):
 
 
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
-def generate_baseplate_setup(step, case, output_dir=None):
+def generate_baseplate_setup(step, case, output_dir=None, minimap=None):
+    # minimap (optional): (n_w, n_h, cur_w, cur_h) "you are here" block grid.
+    # Drawn onto each .copy() below (never the cached template); since img_c is
+    # returned as the column loop's foundation, the minimap rides along onto every
+    # column page for free — no per-column minimap call needed.
     # Step 1: blank canvas, show the standalone baseplate piece (case-independent)
     img_a = _get_or_build_baseplate("stepA", _render_baseplate_step_a).copy()
+    if minimap is not None:
+        draw_block_minimap(ImageDraw.Draw(img_a), *minimap)
     step = save_img_and_increment_step(img_a, step, output_dir)
     # Step 2: positioned baseplate with connectors (varies by case)
     img_b = _get_or_build_baseplate(f"stepB:{case}", lambda: _render_baseplate_step_b(case)).copy()
+    if minimap is not None:
+        draw_block_minimap(ImageDraw.Draw(img_b), *minimap)
     step = save_img_and_increment_step(img_b, step, output_dir)
     # Step 3: top-of-baseplate view; returned canvas is mutated by caller for
     # column drawing, so we .copy() the cached pristine version.
     img_c = _get_or_build_baseplate(f"stepC:{case}", lambda: _render_baseplate_step_c(case)).copy()
+    if minimap is not None:
+        draw_block_minimap(ImageDraw.Draw(img_c), *minimap)
     step = save_img_and_increment_step(img_c, step, output_dir)
     return step, img_c  # return canvas so caller avoids a disk read
 
@@ -1016,6 +1026,119 @@ def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
         fill=top_color,
         outline=(10,10,10)
     )
+
+
+# -----------------------------
+# Instruction-page overlays (per-step piece legend + "you are here" minimap)
+# These use plain top-left page coordinates (no to_pillow / get_block_xy) and
+# live in the empty top strip of the 612x792 page, clear of the isometric build
+# (mid-band) and the bottom-center step number stamped by save_img_and_increment_step.
+# -----------------------------
+
+def draw_mini_plate(draw, cx, cy, unit, color):
+    """Draw a small isometric 1x1 LEGO plate icon. `cx` is the horizontal center
+    and `cy` the vertical center of the top diamond; `unit` is the diamond
+    half-width in pixels. `color` is a normalized (r,g,b) tuple. Plain top-left
+    page coords (y grows downward) — independent of the get_block_xy/to_pillow
+    isometric system used by draw_plate."""
+    hw = unit             # horizontal half-width of the top diamond
+    hh = unit * 0.5       # vertical half-height (2:1 isometric)
+    depth = unit * 0.55   # drop of the side faces
+
+    top_color = to_rgb(color)
+    right_color = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
+    front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
+    edge = (10, 10, 10)
+
+    left_v = (cx - hw, cy)
+    top_v = (cx, cy - hh)
+    right_v = (cx + hw, cy)
+    bot_v = (cx, cy + hh)
+
+    # side faces first so the top diamond paints over their shared edges
+    left_face = [left_v, bot_v, (cx, cy + hh + depth), (cx - hw, cy + depth)]
+    right_face = [right_v, bot_v, (cx, cy + hh + depth), (cx + hw, cy + depth)]
+    draw.polygon(left_face, front_color, outline=edge)
+    draw.polygon(right_face, right_color, outline=edge)
+
+    # top diamond
+    draw.polygon([left_v, top_v, right_v, bot_v], top_color, outline=edge)
+
+    # stud on top — a short cylinder (base ellipse + side wall + top ellipse) so
+    # it reads as a raised LEGO stud with height, not a flat disc.
+    srx = hw * 0.42           # stud ellipse half-width
+    sry = hh * 0.42           # stud ellipse half-height (same 2:1 foreshortening)
+    rise = unit * 0.28        # how tall the stud stands in px
+    base_cy = cy - hh * 0.05  # base ellipse sits ~centered on the plate top face
+    top_cy = base_cy - rise
+    side_color = to_rgb((color[0] * 0.78, color[1] * 0.78, color[2] * 0.78))
+    # rounded base; the side wall (drawn next, no outline) hides its upper half
+    draw.ellipse([cx - srx, base_cy - sry, cx + srx, base_cy + sry], fill=side_color, outline=edge)
+    draw.rectangle([cx - srx, top_cy, cx + srx, base_cy], fill=side_color)
+    draw.line([(cx - srx, top_cy), (cx - srx, base_cy)], fill=edge)
+    draw.line([(cx + srx, top_cy), (cx + srx, base_cy)], fill=edge)
+    draw.ellipse([cx - srx, top_cy - sry, cx + srx, top_cy + sry], fill=top_color, outline=edge)
+
+
+def draw_step_piece_legend(draw, stud_colors, *, x=25, y=18, max_width=440):
+    """Draw a compact legend of the pieces placed in this step: one mini-plate
+    icon per distinct color with a small 'xN' count. `stud_colors` is a list of
+    normalized (r,g,b) tuples (opaque studs only). Collapses same-color runs,
+    preserves first-seen order, wraps to a new row past `max_width`."""
+    if not stud_colors:
+        return
+    counts = {}
+    order = []
+    for c in stud_colors:
+        key = tuple(round(float(v), 4) for v in c[:3])
+        if key not in counts:
+            counts[key] = 0
+            order.append(key)
+        counts[key] += 1
+
+    font = get_font(16)
+    unit = 9 * 1.32           # mini-plate half-width (icons ~32% larger than base)
+    cell_w = 2 * unit + 34    # icon (~2*unit wide) + room for the 'xN' label
+    row_h = 40                # row pitch: icon height + label + gap
+    icon_cy = unit + 6        # vertical center of the icon within its row
+
+    cur_x = x
+    cur_y = y
+    for key in order:
+        if cur_x + cell_w > x + max_width:
+            cur_x = x
+            cur_y += row_h
+        cx = cur_x + unit
+        cy = cur_y + icon_cy
+        draw_mini_plate(draw, cx, cy, unit, key)
+        draw.text((cur_x + 2 * unit + 4, cy - 8), f"x{counts[key]}", fill="black", font=font)
+        cur_x += cell_w
+
+
+def draw_block_minimap(draw, n_w, n_h, cur_w, cur_h, *, anchor_right=587, top=18, box=120):
+    """Draw a schematic block-grid minimap (n_w x n_h cells) anchored to the
+    top-right, highlighting the current baseplate (cur_w, cur_h). `cur_w` is the
+    column index (left->right), `cur_h` the row index (top->down), matching the
+    image block order (blockH=0 is the top row, blockW=0 the left column)."""
+    if n_w < 1 or n_h < 1:
+        return
+    cell = min(18, box // max(n_w, n_h))
+    cell = max(cell, 3)       # keep cells visible for very large grids
+    grid_w = cell * n_w
+    left = anchor_right - grid_w
+    grey = (210, 210, 210)
+    highlight = (255, 210, 0)
+    edge = (60, 60, 60)
+    for r in range(n_h):
+        for c in range(n_w):
+            x0 = left + c * cell
+            y0 = top + r * cell
+            x1 = x0 + cell
+            y1 = y0 + cell
+            if c == cur_w and r == cur_h:
+                draw.rectangle([x0, y0, x1, y1], fill=highlight, outline=(0, 0, 0), width=2)
+            else:
+                draw.rectangle([x0, y0, x1, y1], fill=grey, outline=edge)
 
 
 # Helper: convert stud offsets to pixel coords

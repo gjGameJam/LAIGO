@@ -1,4 +1,4 @@
-from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction
+from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction, draw_step_piece_legend
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas as rl_canvas
 import numpy as np
@@ -141,6 +141,9 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                 column_rgb = [tuple(c / 255.0 for c in bg_block[15 - y, col]) for y in range(16)]
                 draw_plate_column(draw, col, 0, column_rgb, False) #zero height no highlight
                 draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
+                # legend of the pieces placed this step (opaque studs only)
+                studs = [c[:3] for c in column_rgb if c[3] != 0]
+                draw_step_piece_legend(draw2, studs)
                 step = save_img_and_increment_step(to_reuse, step, output_dir, copy=False)
 
             #layer 2: foreground
@@ -156,6 +159,9 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
                         continue
                     draw_plate_column(draw, col, 1, column_rgba, False) #one height no highlight
                     draw_plate_column(draw2, col, 1, column_rgba, True) #one height with highlight
+                    # legend of the pieces placed this step (opaque studs only)
+                    studs = [c[:3] for c in column_rgba if c[3] != 0]
+                    draw_step_piece_legend(draw2, studs)
                     step = save_img_and_increment_step(to_reuse, step, output_dir, copy=False)
 
             block_count += 1
@@ -212,7 +218,8 @@ def GenerateBasePlateInstructions(blockRow, rowMax, blockCol, colMax, step, outp
         case = 1
     elif rowMax - 1 == blockRow:
         case = 2
-    return generate_baseplate_setup(step, case, output_dir)
+    minimap = (colMax, rowMax, blockCol, blockRow)  # (n_w, n_h, cur_w, cur_h)
+    return generate_baseplate_setup(step, case, output_dir, minimap=minimap)
 
 
 def block_column_to_rgb_tuples(block, col_idx):
