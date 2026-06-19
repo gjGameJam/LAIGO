@@ -68,8 +68,10 @@ SPEC_BY_ELEMENT = {
     6279875: PieceSpec("hook connector", 1, 1, 1, SHAPE_CONNECTOR, _GREY_PLATE, show_dims=False),
 
     # --- frame (GetFrameForSize) ---
+    # Corner brick: small thick L (2x2 minus front 1x1 = 3 studs), block height.
     235726:  PieceSpec("corner brick", 2, 2, 3, SHAPE_CORNER, _FRAME_BLACK, show_dims=False),
-    6483102: PieceSpec("corner plate", 2, 2, 1, SHAPE_CORNER, _FRAME_BLACK, show_dims=False),
+    # Corner plate: large flat L (4x4 minus front 2x2 = 12 studs), plate height.
+    6483102: PieceSpec("corner plate", 4, 4, 1, SHAPE_CORNER, _FRAME_BLACK, show_dims=False),
     300526:  PieceSpec("1x1 brick", 1, 1, 3, SHAPE_BRICK, _FRAME_BLACK),
     6178922: PieceSpec("2x1 axle brick", 2, 1, 3, SHAPE_BRICK, _FRAME_BLACK, axle=True),
     4109810: PieceSpec("axle peg", 1, 1, 1, SHAPE_CONNECTOR, _FRAME_BLACK, show_dims=False),

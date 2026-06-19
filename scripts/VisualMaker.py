@@ -1243,24 +1243,51 @@ def _draw_mini_rect(draw, cx, cy, s, width, length, height, color, *, axle=False
             _draw_mini_stud(draw, scx, scy, srx, sry, rise, color)
 
 
-def _draw_mini_corner(draw, cx, cy, s, height, color):
-    """Proportional L-shaped corner piece (2x2 minus the front 1x1) centered at
-    (cx, cy) — mirrors draw_corner_brick's top face at icon scale."""
+def _draw_mini_corner(draw, cx, cy, s, n, height, color):
+    """Proportional L-shaped corner piece centered at (cx, cy): an n x n footprint
+    with the front (n//2) x (n//2) quadrant removed, so n=4 -> 4x4-minus-2x2
+    (12 studs, the corner PLATE) and n=2 -> 2x2-minus-1x1 (3 studs, the corner
+    BRICK) — matching the build-art draw_corner_plate / draw_corner_brick. `s` is
+    the per-stud screen size; `height` sets the body depth (flat plate vs thick
+    brick). Studs are drawn as necked cylinders, same as the other mini icons."""
+    c = n // 2                           # removed front quadrant is c x c
     ewx, ewy = s, -s * 0.5
     elx, ely = -s, -s * 0.5
     depth = s * (0.55 if height <= 1 else 0.95)
-    px = cx                              # 2x2 footprint is symmetric in (w - l)
-    py = cy - depth / 2.0 + (2 + 2) * s / 4.0
-    top_c, _right_c, front_c, edge = _mini_shades(color)
+    px = cx                              # square n x n footprint is symmetric in (w - l)
+    py = cy - depth / 2.0 + (n + n) * s / 4.0
+    top_c, right_c, front_c, edge = _mini_shades(color)
 
     def corner(i, j):
         return (px + i * ewx + j * elx, py + i * ewy + j * ely)
 
-    # L outline (front 1x1 at (0,0) removed): 6 stud-corners.
-    face = [corner(1, 0), corner(2, 0), corner(2, 2), corner(0, 2), corner(0, 1), corner(1, 1)]
-    # Slab body: same outline shifted down, drawn first so the top sits over it.
-    draw.polygon([(x, y + depth) for x, y in face], front_c, outline=edge)
+    # Top-face L outline (full n x n with the front c x c quadrant, i<c & j<c,
+    # removed). Indices: 0=(c,0) 1=(n,0) 2=(n,n) 3=(0,n) 4=(0,c) 5=(c,c).
+    face = [corner(c, 0), corner(n, 0), corner(n, n), corner(0, n), corner(0, c), corner(c, c)]
+    # Filled side walls connect the top face down to the base so the icon reads as
+    # ONE solid piece (not two stacked plates). Only the lower-silhouette edges are
+    # visible: the two outer front edges (0->1, 3->4) plus the two inner notch
+    # edges (4->5, 5->0). +i edges take the right shade, -j edges the front shade
+    # (same convention as _draw_mini_rect). Drawn before the top face covers them.
+    for (a, b), shade in (((0, 1), right_c), ((4, 5), right_c),
+                          ((3, 4), front_c), ((5, 0), front_c)):
+        ax, ay = face[a]
+        bx, by = face[b]
+        draw.polygon([(ax, ay), (bx, by), (bx, by + depth), (ax, ay + depth)], shade, outline=edge)
+    # Top face over the wall tops.
     draw.polygon(face, top_c, outline=edge)
+    # Necked studs on the n x n grid minus the notch, back-to-front (painter's).
+    if s >= 4.5:
+        srx, sry = s * 0.30, s * 0.18
+        rise = s * 0.28
+        cells = sorted(
+            ((i, j) for i in range(n) for j in range(n) if not (i < c and j < c)),
+            key=lambda ij: ij[0] + ij[1], reverse=True,
+        )
+        for i, j in cells:
+            scx = px + (i + 0.5) * ewx + (j + 0.5) * elx
+            scy = py + (i + 0.5) * ewy + (j + 0.5) * ely - rise
+            _draw_mini_stud(draw, scx, scy, srx, sry, rise, color)
 
 
 def _draw_connector_pin(draw, cx, cy, s, color, *, mirror):
@@ -1285,8 +1312,9 @@ def draw_mini_piece(draw, cx, cy, unit, spec):
         _draw_connector_pin(draw, cx, cy, unit, spec.color, mirror=mirror)
         return
     if spec.shape == ps.SHAPE_CORNER:
-        s = _mini_per_stud(2, 2, unit)
-        _draw_mini_corner(draw, cx, cy, s, spec.height, spec.color)
+        n = max(spec.width, spec.length)          # 4 = corner plate, 2 = corner brick
+        s = _mini_per_stud(n, n, unit)
+        _draw_mini_corner(draw, cx, cy, s, n, spec.height, spec.color)
         return
     w, l = max(spec.width, 1), max(spec.length, 1)
     s = _mini_per_stud(w, l, unit)

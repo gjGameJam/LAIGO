@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw
 
 from scripts import piece_specs as ps
 from scripts.MosiacToOrder import GetBaseplatesForSize, GetFrameForSize
-from scripts.VisualMaker import _baseplate_step_b_parts, draw_step_parts_legend
+from scripts.VisualMaker import _baseplate_step_b_parts, draw_step_parts_legend, draw_mini_piece
 
 
 def test_spec_table_covers_all_order_elements():
@@ -44,6 +44,18 @@ def test_known_piece_dimensions():
     assert ps.SPEC_BY_ELEMENT[235726].shape == ps.SHAPE_CORNER
     assert ps.SPEC_BY_ELEMENT[6526672].shape == ps.SHAPE_CONNECTOR
     print("OK: test_known_piece_dimensions")
+
+
+def test_corner_pieces_distinct():
+    # Corner PLATE = large flat L (4x4 minus 2x2 = 12 studs), plate height 1.
+    plate = ps.SPEC_BY_ELEMENT[6483102]
+    assert (plate.width, plate.length, plate.height) == (4, 4, 1), "corner plate dims"
+    assert plate.shape == ps.SHAPE_CORNER
+    # Corner BRICK = small thick L (2x2 minus 1x1 = 3 studs), block height 3.
+    brick = ps.SPEC_BY_ELEMENT[235726]
+    assert (brick.width, brick.length, brick.height) == (2, 2, 3), "corner brick dims"
+    assert brick.shape == ps.SHAPE_CORNER
+    print("OK: test_corner_pieces_distinct")
 
 
 def test_mosaic_plate_spec():
@@ -117,6 +129,26 @@ def test_legend_stays_in_top_strip():
     print(f"OK: test_legend_stays_in_top_strip (bbox=({x0},{y0},{x1},{y1}), px={n})")
 
 
+def _render_icon_bbox(element_id):
+    # Render just the icon (no label text) so the bbox measures the piece itself.
+    img = Image.new("RGBA", (400, 400), (255, 255, 255, 255))
+    draw_mini_piece(ImageDraw.Draw(img), 200, 200, 11.0, ps.SPEC_BY_ELEMENT[element_id])
+    return _nonwhite_bbox(img)
+
+
+def test_corner_icons_render_distinctly():
+    # The corner plate (4x4-minus-2x2, 12 studs) must render a clearly larger icon
+    # than the corner brick (2x2-minus-1x1, 3 studs) — no longer the same icon.
+    (px0, _py0, px1, _py1), plate_px = _render_icon_bbox(6483102)
+    (bx0, _by0, bx1, _by1), brick_px = _render_icon_bbox(235726)
+    plate_w = px1 - px0
+    brick_w = bx1 - bx0
+    assert plate_w > brick_w, f"corner plate icon ({plate_w}) not wider than brick ({brick_w})"
+    # The bigger L with 12 studs paints more pixels than the small 3-stud L.
+    assert plate_px > brick_px, f"corner plate px ({plate_px}) not > brick px ({brick_px})"
+    print(f"OK: test_corner_icons_render_distinctly (plate_w={plate_w}, brick_w={brick_w})")
+
+
 def test_legend_empty_is_noop():
     img = Image.new("RGBA", (612, 792), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -129,9 +161,11 @@ def test_legend_empty_is_noop():
 if __name__ == "__main__":
     test_spec_table_covers_all_order_elements()
     test_known_piece_dimensions()
+    test_corner_pieces_distinct()
     test_mosaic_plate_spec()
     test_step_b_parts_per_case()
     test_step_b_connector_quantities()
     test_legend_stays_in_top_strip()
+    test_corner_icons_render_distinctly()
     test_legend_empty_is_noop()
     print("\nAll piece-specs / legend tests passed.")
