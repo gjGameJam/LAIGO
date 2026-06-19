@@ -2,6 +2,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import random
 from .Util import GetOutputPathDir, log_debug, log_info, log_error
+from . import piece_specs as ps
 # -----------------------------
 # CONSTANTS
 # -----------------------------
@@ -905,6 +906,24 @@ def _get_or_build_baseplate(key, builder):
     return _baseplate_setup_cache[key]
 
 
+def _baseplate_step_b_parts(case):
+    """Pieces introduced when attaching the baseplate to its neighbors (the step
+    after the bare baseplate): always 5x 2x2 reinforcement plates, plus the
+    connectors/bridge plates this block needs for its position. `case` encodes
+    neighbors — 0 = right+bottom, 1 = bottom only (last column), 2 = right only
+    (last row), 3 = none (corner). Green = horizontal/right seam, red =
+    vertical/bottom seam, matching draw_baseplate_bottom and the per-block counts
+    in MosiacToOrder.GetBaseplatesForSize."""
+    parts = [(ps.SPEC_BY_ELEMENT[4211094], 5)]            # 2x2 plates, every block
+    if case in (0, 2):                                    # has a right neighbor -> green
+        parts.append((ps.SPEC_BY_ELEMENT[6526672], 2))   # green connectors
+        parts.append((ps.SPEC_BY_ELEMENT[4621548], 1))   # green bridge plate
+    if case in (0, 1):                                    # has a bottom neighbor -> red
+        parts.append((ps.SPEC_BY_ELEMENT[6347789], 2))   # red connectors
+        parts.append((ps.SPEC_BY_ELEMENT[379521], 1))    # red bridge plate
+    return parts
+
+
 #function for gnerating instructions for baseplate setup and returns step after incrementing parameter for each step
 def generate_baseplate_setup(step, case, output_dir=None, minimap=None):
     # minimap (optional): (n_w, n_h, cur_w, cur_h) "you are here" block grid.
@@ -913,15 +932,22 @@ def generate_baseplate_setup(step, case, output_dir=None, minimap=None):
     # column page for free — no per-column minimap call needed.
     # Step 1: blank canvas, show the standalone baseplate piece (case-independent)
     img_a = _get_or_build_baseplate("stepA", _render_baseplate_step_a).copy()
+    draw_a = ImageDraw.Draw(img_a)
     if minimap is not None:
-        draw_block_minimap(ImageDraw.Draw(img_a), *minimap)
+        draw_block_minimap(draw_a, *minimap)
+    # parts legend: this step places the 16x16 baseplate
+    draw_step_parts_legend(draw_a, [(ps.SPEC_BY_ELEMENT[6302092], 1)])
     step = save_img_and_increment_step(img_a, step, output_dir)
     # Step 2: positioned baseplate with connectors (varies by case)
     img_b = _get_or_build_baseplate(f"stepB:{case}", lambda: _render_baseplate_step_b(case)).copy()
+    draw_b = ImageDraw.Draw(img_b)
     if minimap is not None:
-        draw_block_minimap(ImageDraw.Draw(img_b), *minimap)
+        draw_block_minimap(draw_b, *minimap)
+    # parts legend: 5x 2x2 plates + any connectors this block's position needs
+    draw_step_parts_legend(draw_b, _baseplate_step_b_parts(case))
     step = save_img_and_increment_step(img_b, step, output_dir)
-    # Step 3: top-of-baseplate view; returned canvas is mutated by caller for
+    # Step 3: top-of-baseplate view (no new piece introduced — stages the stud
+    # surface for column placement); returned canvas is mutated by caller for
     # column drawing, so we .copy() the cached pristine version.
     img_c = _get_or_build_baseplate(f"stepC:{case}", lambda: _render_baseplate_step_c(case)).copy()
     if minimap is not None:
@@ -1035,6 +1061,24 @@ def draw_plate(draw, blockX, blockY, blockZ, color, highlight):
 # (mid-band) and the bottom-center step number stamped by save_img_and_increment_step.
 # -----------------------------
 
+def _draw_mini_stud(draw, cx, top_cy, srx, sry, rise, color):
+    """Draw one raised LEGO stud as a short cylinder: base ellipse + side wall +
+    top ellipse, so it reads with a neck rather than a flat disc. (cx, top_cy)
+    centers the TOP ellipse; the base sits `rise` px lower (toward the viewer).
+    Shared by draw_mini_plate (1x1) and _draw_mini_rect (2x2/2x4/4x2/...) so every
+    legend stud looks the same. `color` is the normalized (r,g,b) plate color."""
+    edge = (10, 10, 10)
+    top_color = to_rgb(color)
+    side_color = to_rgb((color[0] * 0.78, color[1] * 0.78, color[2] * 0.78))
+    base_cy = top_cy + rise
+    # rounded base; the side wall (drawn next, no outline) hides its upper half
+    draw.ellipse([cx - srx, base_cy - sry, cx + srx, base_cy + sry], fill=side_color, outline=edge)
+    draw.rectangle([cx - srx, top_cy, cx + srx, base_cy], fill=side_color)
+    draw.line([(cx - srx, top_cy), (cx - srx, base_cy)], fill=edge)
+    draw.line([(cx + srx, top_cy), (cx + srx, base_cy)], fill=edge)
+    draw.ellipse([cx - srx, top_cy - sry, cx + srx, top_cy + sry], fill=top_color, outline=edge)
+
+
 def draw_mini_plate(draw, cx, cy, unit, color):
     """Draw a small isometric 1x1 LEGO plate icon. `cx` is the horizontal center
     and `cy` the vertical center of the top diamond; `unit` is the diamond
@@ -1065,19 +1109,13 @@ def draw_mini_plate(draw, cx, cy, unit, color):
     draw.polygon([left_v, top_v, right_v, bot_v], top_color, outline=edge)
 
     # stud on top — a short cylinder (base ellipse + side wall + top ellipse) so
-    # it reads as a raised LEGO stud with height, not a flat disc.
+    # it reads as a raised LEGO stud with a neck, not a flat disc.
     srx = hw * 0.42           # stud ellipse half-width
     sry = hh * 0.42           # stud ellipse half-height (same 2:1 foreshortening)
     rise = unit * 0.28        # how tall the stud stands in px
     base_cy = cy - hh * 0.05  # base ellipse sits ~centered on the plate top face
     top_cy = base_cy - rise
-    side_color = to_rgb((color[0] * 0.78, color[1] * 0.78, color[2] * 0.78))
-    # rounded base; the side wall (drawn next, no outline) hides its upper half
-    draw.ellipse([cx - srx, base_cy - sry, cx + srx, base_cy + sry], fill=side_color, outline=edge)
-    draw.rectangle([cx - srx, top_cy, cx + srx, base_cy], fill=side_color)
-    draw.line([(cx - srx, top_cy), (cx - srx, base_cy)], fill=edge)
-    draw.line([(cx + srx, top_cy), (cx + srx, base_cy)], fill=edge)
-    draw.ellipse([cx - srx, top_cy - sry, cx + srx, top_cy + sry], fill=top_color, outline=edge)
+    _draw_mini_stud(draw, cx, top_cy, srx, sry, rise, color)
 
 
 def draw_step_piece_legend(draw, stud_colors, *, x=25, y=18, max_width=440):
@@ -1112,6 +1150,195 @@ def draw_step_piece_legend(draw, stud_colors, *, x=25, y=18, max_width=440):
         cy = cur_y + icon_cy
         draw_mini_plate(draw, cx, cy, unit, key)
         draw.text((cur_x + 2 * unit + 4, cy - 8), f"x{counts[key]}", fill="black", font=font)
+        cur_x += cell_w
+
+
+# -----------------------------
+# Generalized per-step parts legend — proportional mini icons for ANY piece
+# (baseplate, connectors, frame bricks/plates), not just the 1x1 plates that
+# draw_step_piece_legend handles. Plain top-left page coords, same band as
+# draw_mini_plate / draw_step_piece_legend (clear of the top-right minimap and the
+# isometric build mid-band). Specs come from piece_specs.PieceSpec.
+# -----------------------------
+
+# Pixel deltas of the green LEGO-Art connector pin, copied verbatim from
+# draw_baseplate_bottom's greenPin polygon so the legend icon matches the
+# baseplate art. The red pin is this shape mirrored across x. KEEP IN SYNC with
+# draw_baseplate_bottom if that pin shape ever changes.
+_CONNECTOR_PIN_DELTAS = [(-3, 9), (-30, 25), (-22, 29), (5, 13)]
+
+
+def _connector_pin_points(ax, ay, *, mirror=False, scale=1.0):
+    """The 4-point parallelogram of the green/red baseplate connector pin.
+    (ax, ay) is the anchor; `mirror` flips x (green->red); `scale` shrinks it for
+    legend icons. At offset 0, scale 1, mirror False this reproduces the
+    baseplate's greenPin exactly."""
+    deltas = [(-dx, dy) for dx, dy in _CONNECTOR_PIN_DELTAS] if mirror else _CONNECTOR_PIN_DELTAS
+    return [(ax + dx * scale, ay + dy * scale) for dx, dy in deltas]
+
+
+def _mini_shades(color):
+    """(top, right, front, edge) colors for a mini iso piece — same shading
+    ratios as draw_mini_plate."""
+    top = to_rgb(color)
+    right = to_rgb((color[0] * 0.85, color[1] * 0.85, color[2] * 0.85))
+    front = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
+    return top, right, front, (10, 10, 10)
+
+
+def _mini_per_stud(width, length, unit, *, max_span=58.0):
+    """Per-stud screen size so a (width x length) piece fits a legend cell:
+    nominal `unit` for small pieces, shrunk for long/large ones (a 16x16 baseplate
+    collapses to a small box; a 10x2 stays a long thin bar)."""
+    span_studs = max(width + length, 2)
+    return max(min(unit, max_span / span_studs), 2.0)
+
+
+def _draw_mini_rect(draw, cx, cy, s, width, length, height, color, *, axle=False):
+    """Proportional isometric W x L plate/brick centered at (cx, cy). `s` is the
+    per-stud screen size; `height` (plate layers) sets the body depth. Studs are
+    drawn only when they'd be legible."""
+    ewx, ewy = s, -s * 0.5            # +1 stud along width
+    elx, ely = -s, -s * 0.5           # +1 stud along length
+    depth = s * (0.55 if height <= 1 else 0.95)
+    # Center the top-face bounding box (plus the downward body) on (cx, cy).
+    px = cx - (width - length) * s / 2.0
+    py = cy - depth / 2.0 + (width + length) * s / 4.0
+    top_c, right_c, front_c, edge = _mini_shades(color)
+
+    def corner(i, j):
+        return (px + i * ewx + j * elx, py + i * ewy + j * ely)
+
+    front = corner(0, 0)
+    right = corner(width, 0)
+    back = corner(width, length)
+    left = corner(0, length)
+    # Two visible side walls (front-left + front-right edges extruded down).
+    draw.polygon([front, left, (left[0], left[1] + depth), (front[0], front[1] + depth)], front_c, outline=edge)
+    draw.polygon([front, right, (right[0], right[1] + depth), (front[0], front[1] + depth)], right_c, outline=edge)
+    # Top face.
+    draw.polygon([front, right, back, left], top_c, outline=edge)
+    # Axle-hole marker on the front wall.
+    if axle:
+        mx = (front[0] + right[0]) / 2.0
+        my = (front[1] + right[1]) / 2.0 + depth / 2.0
+        arm = max(s * 0.35, 2)
+        draw.line([(mx - arm, my), (mx + arm, my)], fill=(0, 0, 0), width=2)
+        draw.line([(mx, my - arm), (mx, my + arm)], fill=(0, 0, 0), width=2)
+    # Studs — skip when too small or too many (keeps big/long pieces readable).
+    # Drawn as full cylinders (base + neck + top), same as draw_mini_plate's 1x1
+    # stud, so 2x2/2x4/4x2 pieces read with necks instead of flat discs.
+    if s >= 5 and width * length <= 24:
+        srx, sry = s * 0.30, s * 0.18
+        rise = s * 0.28
+        cells = sorted(
+            ((i, j) for i in range(width) for j in range(length)),
+            key=lambda c: c[0] + c[1], reverse=True,   # back-to-front (painter's)
+        )
+        for i, j in cells:
+            scx = px + (i + 0.5) * ewx + (j + 0.5) * elx
+            scy = py + (i + 0.5) * ewy + (j + 0.5) * ely - rise
+            _draw_mini_stud(draw, scx, scy, srx, sry, rise, color)
+
+
+def _draw_mini_corner(draw, cx, cy, s, height, color):
+    """Proportional L-shaped corner piece (2x2 minus the front 1x1) centered at
+    (cx, cy) — mirrors draw_corner_brick's top face at icon scale."""
+    ewx, ewy = s, -s * 0.5
+    elx, ely = -s, -s * 0.5
+    depth = s * (0.55 if height <= 1 else 0.95)
+    px = cx                              # 2x2 footprint is symmetric in (w - l)
+    py = cy - depth / 2.0 + (2 + 2) * s / 4.0
+    top_c, _right_c, front_c, edge = _mini_shades(color)
+
+    def corner(i, j):
+        return (px + i * ewx + j * elx, py + i * ewy + j * ely)
+
+    # L outline (front 1x1 at (0,0) removed): 6 stud-corners.
+    face = [corner(1, 0), corner(2, 0), corner(2, 2), corner(0, 2), corner(0, 1), corner(1, 1)]
+    # Slab body: same outline shifted down, drawn first so the top sits over it.
+    draw.polygon([(x, y + depth) for x, y in face], front_c, outline=edge)
+    draw.polygon(face, top_c, outline=edge)
+
+
+def _draw_connector_pin(draw, cx, cy, s, color, *, mirror):
+    """Green/red LEGO-Art connector pin (baseplate shape) centered at (cx, cy)."""
+    scale = max(s / 12.0, 0.45)          # ~unit-sized icon
+    pts = _connector_pin_points(0.0, 0.0, mirror=mirror, scale=scale)
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    bx = (min(xs) + max(xs)) / 2.0
+    by = (min(ys) + max(ys)) / 2.0
+    pts = [(x - bx + cx, y - by + cy) for x, y in pts]
+    draw.polygon(pts, to_rgb(color), outline=(10, 10, 10))
+
+
+def draw_mini_piece(draw, cx, cy, unit, spec):
+    """Draw a small proportional isometric icon of `spec` (piece_specs.PieceSpec)
+    centered at (cx, cy). `unit` is the nominal 1-stud half-width (matches
+    draw_mini_plate). Plain top-left page coords."""
+    if spec.shape == ps.SHAPE_CONNECTOR:
+        # The red pin is the green pin mirrored across x; detect by hue.
+        mirror = spec.color[0] >= spec.color[1]
+        _draw_connector_pin(draw, cx, cy, unit, spec.color, mirror=mirror)
+        return
+    if spec.shape == ps.SHAPE_CORNER:
+        s = _mini_per_stud(2, 2, unit)
+        _draw_mini_corner(draw, cx, cy, s, spec.height, spec.color)
+        return
+    w, l = max(spec.width, 1), max(spec.length, 1)
+    s = _mini_per_stud(w, l, unit)
+    _draw_mini_rect(draw, cx, cy, s, w, l, spec.height, spec.color, axle=spec.axle)
+
+
+def _text_width(draw, text, font):
+    try:
+        return draw.textlength(text, font=font)
+    except AttributeError:                # very old Pillow without textlength
+        return len(text) * 7
+
+
+def draw_step_parts_legend(draw, parts, *, x=25, y=18, max_width=440, max_rows=2):
+    """Per-step legend of the pieces used: a proportional mini icon per entry with
+    a two-line 'WxH' / 'xN' label. `parts` is a list of (PieceSpec, qty). Wraps to
+    a new row past `max_width`; stops after `max_rows` so it can't spill into the
+    isometric build area below. Top-left strip (clear of the top-right minimap)."""
+    if not parts:
+        return
+    font = get_font(15)
+    unit = 11.0                          # nominal per-stud size (~matches draw_mini_plate)
+    icon_cy = y + 22                     # icon vertical center within a row
+    row_h = 58
+    pad = 16
+    cur_x = x
+    row = 0
+    for spec, qty in parts:
+        w, l = max(spec.width, 1), max(spec.length, 1)
+        s = _mini_per_stud(w, l, unit)
+        icon_w = 30 if spec.shape == ps.SHAPE_CONNECTOR else (w + l) * s
+        if spec.show_dims:
+            label = f"{spec.width}x{spec.length}"
+        elif spec.shape == ps.SHAPE_CONNECTOR:
+            label = ""              # connectors: pin icon + qty only (no "green conn"/"red conn")
+        else:
+            label = spec.name
+        qty_label = f"x{qty}"
+        cell_w = max(icon_w, _text_width(draw, label, font), 2 * unit) + pad
+        if cur_x + cell_w > x + max_width and cur_x > x:
+            row += 1
+            if row >= max_rows:
+                break
+            cur_x = x
+        cxc = cur_x + cell_w / 2.0
+        cyc = icon_cy + row * row_h
+        draw_mini_piece(draw, cxc, cyc, unit, spec)
+        # Label line (skipped for nameless connectors) + qty line, centered.
+        # The qty stays on the second line so it lines up with the other cells.
+        qw = _text_width(draw, qty_label, font)
+        if label:
+            lw = _text_width(draw, label, font)
+            draw.text((cxc - lw / 2.0, cyc + 20), label, fill="black", font=font)
+        draw.text((cxc - qw / 2.0, cyc + 36), qty_label, fill="black", font=font)
         cur_x += cell_w
 
 
@@ -1889,7 +2116,6 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     blockWidth = (int)(width / 16)
     blockHeight = (int)(height / 16)
     black = (.3, .3, .3)
-    font = get_font(60)
     perimeter = (blockWidth * 2) + (blockHeight * 2)
     
     #draw corner plate
@@ -1900,6 +2126,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     # draw stuff (highlight on draw2 and no highlight on draw)
     draw_corner_plate(draw, 4, 4, 0, 4, 2, black, 2, 2, False)
     draw_corner_plate(draw2, 4, 4, 0, 4, 2, black, 2, 2, True)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6483102], 4)])  # corner plate x4 (one per corner)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #draw corner brick
@@ -1907,6 +2134,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     draw2 = ImageDraw.Draw(to_reuse)
     draw_corner_brick(draw, 1, 15, 0, black, False)
     draw_corner_brick(draw2, 1, 15, 0, black, True)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[235726], 4)])  # corner brick x4 (one per corner)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #add 1x1 bricks (to side of corner brick and top edge of corner brick)
@@ -1921,7 +2149,9 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     #piece 3
     draw_brick(draw, -2, 22, 0, black, False)
     draw_brick(draw2, -2, 22, 0, black, True)
-    draw2.text((50, 75), "4X", fill="black", font=font) #draw quantity number so users know how many pieces to make
+    # legend replaces the old big "4X" (it collided with the top-left legend);
+    # 12 total = 3 per corner x 4 corners (onexoneBricks in GetFrameForSize)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300526], 12)])
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #set up wider background to capture entire piece
@@ -1934,6 +2164,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     #10x2 plate
     draw_ortho_plate(draw, 3, 0, False, 10, 2, 1, black, False)
     draw_ortho_plate(draw2, 3, 0, False, 10, 2, 1, black, True)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[383226], perimeter)])  # 10x2 plate, one per baseplate edge
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #8x1 brick: 1
@@ -1941,6 +2172,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     draw2 = ImageDraw.Draw(to_reuse)
     draw_ortho_plate(draw, 0, 7, False, 8, 1, 3, black, False)
     draw_ortho_plate(draw2, 0, 7, False, 8, 1, 3, black, True)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300826], perimeter)])  # 8x1 brick, one per baseplate edge
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #2x1 axle bricks: 2
@@ -1952,8 +2184,9 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     #right axle brick
     draw_ortho_plate(draw, 16, 23, True, 2, 1, 3, black, False)
     draw_ortho_plate(draw2, 16, 23, True, 2, 1, 3, black, True)
-    quantity = str(perimeter) + "X"
-    draw2.text((50, 75), quantity, fill="black", font=font) #draw quantity number so users know how many pieces to make
+    # legend replaces the old big quantity text; total = 2 per arrangement x
+    # perimeter = 4*(blockWidth+blockHeight) (twoxoneBricksWithAxleHole)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6178922], 2 * perimeter)])
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #each block that is connected to another block should have a 4x1 brick and 6x2 plate
@@ -1965,6 +2198,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
         draw2 = ImageDraw.Draw(to_reuse)
         draw_ortho_plate(draw, 4, 0, False, 6, 2, 1, black, False)
         draw_ortho_plate(draw2, 4, 0, False, 6, 2, 1, black, True)
+        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[379526], numOfConnectors)])  # 6x2 plate, one per baseplate seam
         step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
         #4x1 brick
@@ -1972,8 +2206,8 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
         draw2 = ImageDraw.Draw(to_reuse)
         draw_ortho_plate(draw, 1, 7, False, 4, 1, 3, black, False)
         draw_ortho_plate(draw2, 1, 7, False, 4, 1, 3, black, True)
-        quantity = str(numOfConnectors) + "X"
-        draw2.text((50, 75), quantity, fill="black", font=font) #draw quantity number so users know how many pieces to make
+        # legend replaces the old big quantity text (same count, numOfConnectors)
+        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[301026], numOfConnectors)])
         step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #return step once all actions are taken
