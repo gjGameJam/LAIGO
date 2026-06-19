@@ -1372,6 +1372,14 @@ def draw_step_parts_legend(draw, parts, *, x=25, y=18, max_width=440, max_rows=2
         cur_x += cell_w
 
 
+def draw_big_quantity(draw, n, x, y):
+    """Large 'xN' multiplier drawn next to an assembled frame piece — tells the
+    builder how many of that fully-made piece to produce. Placed in the build
+    area, clear of the top-left parts legend and the bottom-center step number.
+    Plain top-left text (no anchor=) so the bitmap-font fallback still works."""
+    draw.text((x, y), f"x{n}", fill="black", font=get_font(72))
+
+
 def draw_block_minimap(draw, n_w, n_h, cur_w, cur_h, *, anchor_right=587, top=18, box=120):
     """Draw a schematic block-grid minimap (n_w x n_h cells) anchored to the
     top-right, highlighting the current baseplate (cur_w, cur_h). `cur_w` is the
@@ -2156,7 +2164,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     # draw stuff (highlight on draw2 and no highlight on draw)
     draw_corner_plate(draw, 4, 4, 0, 4, 2, black, 2, 2, False)
     draw_corner_plate(draw2, 4, 4, 0, 4, 2, black, 2, 2, True)
-    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6483102], 4)])  # corner plate x4 (one per corner)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6483102], 1)])  # corner plate x1 (per assembled corner)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #draw corner brick
@@ -2164,7 +2172,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     draw2 = ImageDraw.Draw(to_reuse)
     draw_corner_brick(draw, 1, 15, 0, black, False)
     draw_corner_brick(draw2, 1, 15, 0, black, True)
-    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[235726], 4)])  # corner brick x4 (one per corner)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[235726], 1)])  # corner brick x1 (per assembled corner)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #add 1x1 bricks (to side of corner brick and top edge of corner brick)
@@ -2179,9 +2187,11 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     #piece 3
     draw_brick(draw, -2, 22, 0, black, False)
     draw_brick(draw2, -2, 22, 0, black, True)
-    # legend replaces the old big "4X" (it collided with the top-left legend);
-    # 12 total = 3 per corner x 4 corners (onexoneBricks in GetFrameForSize)
-    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300526], 12)])
+    # legend: 3 one-by-one bricks per assembled corner (onexoneBricks in
+    # GetFrameForSize). This is the corner's final sub-step, so the corner is now
+    # complete — show how many corners to make (4, one per baseplate corner).
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300526], 3)])
+    draw_big_quantity(draw2, 4, 430, 330)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #set up wider background to capture entire piece
@@ -2194,7 +2204,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     #10x2 plate
     draw_ortho_plate(draw, 3, 0, False, 10, 2, 1, black, False)
     draw_ortho_plate(draw2, 3, 0, False, 10, 2, 1, black, True)
-    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[383226], perimeter)])  # 10x2 plate, one per baseplate edge
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[383226], 1)])  # 10x2 plate x1 (per assembled long edge)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #8x1 brick: 1
@@ -2202,7 +2212,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     draw2 = ImageDraw.Draw(to_reuse)
     draw_ortho_plate(draw, 0, 7, False, 8, 1, 3, black, False)
     draw_ortho_plate(draw2, 0, 7, False, 8, 1, 3, black, True)
-    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300826], perimeter)])  # 8x1 brick, one per baseplate edge
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300826], 1)])  # 8x1 brick x1 (per assembled long edge)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #2x1 axle bricks: 2
@@ -2214,9 +2224,11 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     #right axle brick
     draw_ortho_plate(draw, 16, 23, True, 2, 1, 3, black, False)
     draw_ortho_plate(draw2, 16, 23, True, 2, 1, 3, black, True)
-    # legend replaces the old big quantity text; total = 2 per arrangement x
-    # perimeter = 4*(blockWidth+blockHeight) (twoxoneBricksWithAxleHole)
-    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6178922], 2 * perimeter)])
+    # legend: 2 axle bricks per assembled long edge (twoxoneBricksWithAxleHole).
+    # This is the long edge's final sub-step, so it's now complete — show how many
+    # long edges to make: one per baseplate edge = perimeter = 2*(blockW+blockH).
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6178922], 2)])
+    draw_big_quantity(draw2, perimeter, 600, 210)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #each block that is connected to another block should have a 4x1 brick and 6x2 plate
@@ -2228,7 +2240,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
         draw2 = ImageDraw.Draw(to_reuse)
         draw_ortho_plate(draw, 4, 0, False, 6, 2, 1, black, False)
         draw_ortho_plate(draw2, 4, 0, False, 6, 2, 1, black, True)
-        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[379526], numOfConnectors)])  # 6x2 plate, one per baseplate seam
+        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[379526], 1)])  # 6x2 plate x1 (per assembled connector)
         step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
         #4x1 brick
@@ -2236,8 +2248,11 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
         draw2 = ImageDraw.Draw(to_reuse)
         draw_ortho_plate(draw, 1, 7, False, 4, 1, 3, black, False)
         draw_ortho_plate(draw2, 1, 7, False, 4, 1, 3, black, True)
-        # legend replaces the old big quantity text (same count, numOfConnectors)
-        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[301026], numOfConnectors)])
+        # legend: 1 4x1 brick per assembled connector. This is the connector's
+        # final sub-step, so it's now complete — show how many connectors to make:
+        # one per baseplate seam = numOfConnectors.
+        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[301026], 1)])
+        draw_big_quantity(draw2, numOfConnectors, 450, 330)
         step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
 
     #return step once all actions are taken
