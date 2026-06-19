@@ -1228,7 +1228,9 @@ def _draw_mini_rect(draw, cx, cy, s, width, length, height, color, *, axle=False
     # Studs — skip when too small or too many (keeps big/long pieces readable).
     # Drawn as full cylinders (base + neck + top), same as draw_mini_plate's 1x1
     # stud, so 2x2/2x4/4x2 pieces read with necks instead of flat discs.
-    if s >= 5 and width * length <= 24:
+    # Threshold 4.5 (not 5) so the long thin 10x2 plate (s~4.8) still gets studs;
+    # the 16x16 baseplate stays a flat box via the width*length<=24 count gate.
+    if s >= 4.5 and width * length <= 24:
         srx, sry = s * 0.30, s * 0.18
         rise = s * 0.28
         cells = sorted(
