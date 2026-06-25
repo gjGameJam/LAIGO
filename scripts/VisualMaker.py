@@ -1,6 +1,7 @@
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import random
+import math
 from .Util import GetOutputPathDir, log_debug, log_info, log_error
 from . import piece_specs as ps
 # -----------------------------
@@ -29,14 +30,23 @@ def get_file_name(step_num, output_dir=None):
     else:
         return f"{GetOutputPathDir()}/Instructions/{step_num}.png"
 
-#helper function to get font (with fallback if arial doesn't exist on system)
+# Bundled in the repo (scripts/fonts/) so instruction text renders identically on
+# local (Windows) and the deployed Linux service. Liberation Sans is a free,
+# metric-compatible Arial clone, so the layout matches the previous arial.ttf look.
+_BUNDLED_FONT = Path(__file__).parent / "fonts" / "LiberationSans-Regular.ttf"
+
+# helper function to get the instruction font at a given size
 def get_font(size=32):
     try:
-        # Try to load Arial TTF (Windows-friendly)
-        return ImageFont.truetype("arial.ttf", size)
+        # Load the repo-bundled TTF by absolute path -> same on every platform.
+        return ImageFont.truetype(str(_BUNDLED_FONT), size)
     except OSError:
-        # Fall back to PIL default bitmap font
-        return ImageFont.load_default()
+        # Last resort if the bundled file is ever missing: Pillow's built-in
+        # TrueType, which (unlike the old load_default()) still honors `size`.
+        try:
+            return ImageFont.load_default(size)   # Pillow >= 10.1
+        except TypeError:
+            return ImageFont.load_default()        # very old Pillow: bitmap fallback
 
 def save_img_and_increment_step(img, step, output_dir=None, copy=True):
     save_target = img.copy() if copy else img
@@ -952,8 +962,24 @@ def generate_baseplate_setup(step, case, output_dir=None, minimap=None):
     img_c = _get_or_build_baseplate(f"stepC:{case}", lambda: _render_baseplate_step_c(case)).copy()
     if minimap is not None:
         draw_block_minimap(ImageDraw.Draw(img_c), *minimap)
-    step = save_img_and_increment_step(img_c, step, output_dir)
-    return step, img_c  # return canvas so caller avoids a disk read
+    # Flip arrow lives ONLY on the saved step-3 PNG. Draw it on a throwaway copy
+    # so it never bleeds onto img_c, which the caller reuses as the foundation
+    # for every column page. Copy AFTER the minimap so the minimap still rides
+    # onto both the saved PNG and the returned canvas.
+    arrow_img = img_c.copy()
+    arrow_draw = ImageDraw.Draw(arrow_img)
+    draw_curved_arrow(
+        arrow_draw,
+        box=(150, 120, 430, 360),
+        start_angle=180,
+        end_angle=360,
+        width=6,
+        head_len=22,
+        head_wid=26,
+        fill="black",
+    )
+    step = save_img_and_increment_step(arrow_img, step, output_dir)
+    return step, img_c  # clean canvas (no arrow) returned to caller
 
 # -----------------------------
 # Convert block grid to isometric XY
@@ -1866,6 +1892,51 @@ def draw_arrow(draw, x, y, s_len, s_thick, h_len, h_wid, fill="black"):
     draw.polygon(arrow, fill=fill)
 
 
+def draw_curved_arrow(draw, box, start_angle, end_angle, width=6,
+                      head_len=22, head_wid=26, fill="black"):
+    """
+    Draws a curved (arc) arrow: a shaft riding on the ellipse defined by `box`
+    plus a triangular arrowhead at `end_angle` pointing along the arc tangent.
+    Reads as a rotational / "flip it over" motion.
+
+    draw        : ImageDraw.Draw object
+    box         : (x0, y0, x1, y1) bounding box of the ellipse the arc rides on
+    start_angle : arc start in degrees. PIL convention: 0=right, 90=bottom,
+                  180=left, 270=top, sweeping clockwise in screen space.
+    end_angle   : arc end in degrees (the arrowhead is drawn here)
+    width       : thickness of the curved shaft
+    head_len    : arrowhead length (tip distance beyond the arc end point)
+    head_wid    : arrowhead base width
+    fill        : color
+    """
+    x0, y0, x1, y1 = box
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    rx = (x1 - x0) / 2.0
+    ry = (y1 - y0) / 2.0
+
+    # Curved shaft
+    draw.arc(box, start=start_angle, end=end_angle, fill=fill, width=width)
+
+    # End point of the arc (where the head attaches)
+    a = math.radians(end_angle)
+    ex = cx + rx * math.cos(a)
+    ey = cy + ry * math.sin(a)
+
+    # Forward tangent at the arc end (clockwise sweep): d/da (cos, sin) = (-sin, cos)
+    tx = -math.sin(a)
+    ty = math.cos(a)
+    tlen = math.hypot(tx, ty) or 1.0
+    tx, ty = tx / tlen, ty / tlen
+    # Perpendicular, for the head base width
+    px, py = -ty, tx
+
+    tip   = (ex + tx * head_len, ey + ty * head_len)
+    baseL = (ex + px * head_wid / 2.0, ey + py * head_wid / 2.0)
+    baseR = (ex - px * head_wid / 2.0, ey - py * head_wid / 2.0)
+    draw.polygon([tip, baseL, baseR], fill=fill)
+
+
 def draw_frame_setup_instruction(width, height, step, output_dir):
     img, draw = get_img_and_draw(step, True, output_dir)
     to_reuse = img.copy()
@@ -2125,12 +2196,15 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
 
     draw2.text((30, 100), "Push axle pins into holes all the way", fill="black", font=font)
     draw2.text((30, middle_y_of_image), "The frame and mosaic should be connected", fill="black", font=font)
-    draw_ortho_plate(draw2, -12, 16, True, 2, 1, 3, (.3, .3, .3), False)
-    #draw axle pin below the axle pin text
+    # axle BRICK (with the cross-shaped hole) now on the RIGHT side
+    draw_ortho_plate(draw2, -4, 24, True, 2, 1, 3, (.3, .3, .3), False)
+    # axle PIN photo now on the LEFT side
     BASE_DIR = Path(__file__).resolve().parent
     axle_pin = Image.open(BASE_DIR / "axle_pin.jpg").convert("RGBA") #TODO: ensure file path works on hosted service
     axle_pin = axle_pin.resize((100, 100))
-    to_reuse.paste(axle_pin, (300, 150), axle_pin)
+    to_reuse.paste(axle_pin, (90, 150), axle_pin)
+    # arrow pointing FROM the pin (left) TO the hole (right); both sit at y~200
+    draw_arrow(draw2, 200, 200, 100, 22, 40, 44, fill="black")
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
     #display plate and brick layer (those layers should be complete now)
