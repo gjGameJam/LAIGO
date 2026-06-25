@@ -1937,6 +1937,137 @@ def draw_curved_arrow(draw, box, start_angle, end_angle, width=6,
     draw.polygon([tip, baseL, baseR], fill=fill)
 
 
+def draw_directional_arrow(draw, tip_x, tip_y, dir_x, dir_y,
+                           shaft_len, shaft_thick, head_len, head_wid, fill="black"):
+    """
+    Draws a straight arrow whose TIP (the point of the arrowhead) sits at
+    (tip_x, tip_y) and points along the unit of (dir_x, dir_y); the shaft trails
+    backwards, opposite the direction. Generalizes draw_arrow (which only points
+    right) using the same tangent/perpendicular head math as draw_curved_arrow,
+    so a single call can aim up / down / left / right.
+
+    draw                 : ImageDraw.Draw object
+    tip_x, tip_y         : where the arrowhead point lands
+    dir_x, dir_y         : direction the arrow points (need not be unit length)
+    shaft_len            : length of the shaft behind the arrowhead
+    shaft_thick          : shaft thickness
+    head_len, head_wid   : arrowhead length / base width
+    fill                 : color
+    """
+    mag = math.hypot(dir_x, dir_y) or 1.0
+    ux, uy = dir_x / mag, dir_y / mag      # forward unit vector
+    px, py = -uy, ux                       # perpendicular unit vector
+
+    # Arrowhead: tip at (tip_x, tip_y), base head_len behind it.
+    base_x = tip_x - ux * head_len
+    base_y = tip_y - uy * head_len
+    head_left  = (base_x + px * head_wid / 2.0, base_y + py * head_wid / 2.0)
+    head_right = (base_x - px * head_wid / 2.0, base_y - py * head_wid / 2.0)
+
+    # Shaft: a rectangle running shaft_len further back from the head base.
+    end_x = base_x - ux * shaft_len
+    end_y = base_y - uy * shaft_len
+    shaft = [
+        (base_x + px * shaft_thick / 2.0, base_y + py * shaft_thick / 2.0),
+        (base_x - px * shaft_thick / 2.0, base_y - py * shaft_thick / 2.0),
+        (end_x  - px * shaft_thick / 2.0, end_y  - py * shaft_thick / 2.0),
+        (end_x  + px * shaft_thick / 2.0, end_y  + py * shaft_thick / 2.0),
+    ]
+    draw.polygon(shaft, fill=fill)
+    draw.polygon([(tip_x, tip_y), head_left, head_right], fill=fill)
+
+
+def draw_axle_pin_map(draw, blockWidth, blockHeight, center_x, band_top, band_bottom):
+    """
+    Top-down schematic for the axle-connection step: the mosaic baseplate grid
+    (grey squares) wrapped by the assembled frame (dark border), with one
+    inward-pointing arrow at every axle-pin hole. Each long frame edge carries
+    two axle bricks, so every baseplate edge along the perimeter gets two pins,
+    placed at the ~25% and ~75% marks -> 2 * perimeter arrows total. Auto-fits
+    and centers within the [band_top, band_bottom] vertical band.
+
+    draw                 : ImageDraw.Draw to render onto
+    blockWidth/Height    : mosaic size in 16x16 baseplate blocks
+    center_x             : page x to center the grid on
+    band_top/band_bottom : vertical pixel band the whole diagram must fit within
+    """
+    light_grey = to_rgb((.8, .8, .8))
+    frame_grey = to_rgb((.3, .3, .3))
+    outline = (10, 10, 10)
+
+    # Fixed arrow / mark geometry (independent of grid size for legibility).
+    cross = 6                 # half-length of each "+" hole arm
+    a_shaft_len = 16
+    a_shaft_thick = 5
+    a_head_len = 11
+    a_head_wid = 14
+    # how far an arrow sticks out past a grid edge (tip sits cross+2 inside it)
+    arrow_out = a_head_len + a_shaft_len - (cross + 2)   # ~19px
+    edge_pad = arrow_out + 6      # clearance reserved beyond each grid edge
+    caption_block = 34            # space under the grid for the caption
+
+    band_h = band_bottom - band_top
+    max_w = 430
+    max_h = band_h - 2 * edge_pad - caption_block
+    CAP = 90                      # don't oversize a tiny (e.g. 1x1) mosaic
+    length = min(max_w / blockWidth, max_h / blockHeight, CAP)
+
+    grid_w = length * blockWidth
+    grid_h = length * blockHeight
+
+    # Center the whole composition (top arrows + grid + bottom arrows + caption).
+    total_h = edge_pad + grid_h + edge_pad + caption_block
+    grid_left = center_x - grid_w / 2.0
+    grid_top = band_top + (band_h - total_h) / 2.0 + edge_pad
+    grid_right = grid_left + grid_w
+    grid_bottom = grid_top + grid_h
+
+    # Assembled frame border the pins lock into (box is the outer edge).
+    fb = max(6, int(length * 0.16))
+    draw.rectangle(
+        [grid_left - fb, grid_top - fb, grid_right + fb, grid_bottom + fb],
+        outline=frame_grey, width=fb,
+    )
+
+    # Mosaic baseplate squares.
+    for w in range(blockWidth):
+        for h in range(blockHeight):
+            x = grid_left + length * w
+            y = grid_top + length * h
+            draw.rectangle([x, y, x + length, y + length],
+                           fill=light_grey, outline=outline)
+
+    # A "+" cross-hole mark on the border plus an inward arrow, per axle pin.
+    def pin(px, py, dx, dy):
+        draw.line([(px - cross, py), (px + cross, py)], fill=(0, 0, 0), width=3)
+        draw.line([(px, py - cross), (px, py + cross)], fill=(0, 0, 0), width=3)
+        tip_x = px + dx * (cross + 2)   # tip just inside the grid edge
+        tip_y = py + dy * (cross + 2)
+        draw_directional_arrow(draw, tip_x, tip_y, dx, dy,
+                               a_shaft_len, a_shaft_thick, a_head_len, a_head_wid)
+
+    # Two pins per baseplate edge, arrows pointing inward toward the mosaic.
+    for w in range(blockWidth):
+        left = grid_left + length * w
+        pin(left + 0.25 * length, grid_top, 0, 1)       # top edge -> down
+        pin(left + 0.75 * length, grid_top, 0, 1)
+        pin(left + 0.25 * length, grid_bottom, 0, -1)   # bottom edge -> up
+        pin(left + 0.75 * length, grid_bottom, 0, -1)
+    for h in range(blockHeight):
+        top = grid_top + length * h
+        pin(grid_left, top + 0.25 * length, 1, 0)       # left edge -> right
+        pin(grid_left, top + 0.75 * length, 1, 0)
+        pin(grid_right, top + 0.25 * length, -1, 0)      # right edge -> left
+        pin(grid_right, top + 0.75 * length, -1, 0)
+
+    # Caption under the grid.
+    caption_font = get_font(20)
+    caption = "Each arrow marks one axle pin"
+    cap_w = _text_width(draw, caption, caption_font)
+    draw.text((center_x - cap_w / 2.0, grid_bottom + fb + 10),
+              caption, fill="black", font=caption_font)
+
+
 def draw_frame_setup_instruction(width, height, step, output_dir):
     img, draw = get_img_and_draw(step, True, output_dir)
     to_reuse = img.copy()
@@ -2205,6 +2336,8 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
     to_reuse.paste(axle_pin, (90, 150), axle_pin)
     # arrow pointing FROM the pin (left) TO the hole (right); both sit at y~200
     draw_arrow(draw2, 200, 200, 100, 22, 40, 44, fill="black")
+    # lower-half map: where every axle pin locks the frame onto the mosaic
+    draw_axle_pin_map(draw2, blockWidth, blockHeight, middle_x_of_image, 430, 740)
     step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
 
     #display plate and brick layer (those layers should be complete now)
