@@ -3,10 +3,10 @@ LAIGO — LEGO Mosaic Builder
 
 Converts a photo into a LEGO mosaic: a color-quantized brick layout,
 a Pick-a-Brick order list (uploadable to lego.com), and a step-by-step
-PDF build guide.
+PDF build guide. The finished build pack is sold pay-what-you-want
+(name your price; $0 is allowed).
 
 Full project guide: CLAUDE.md
-Checkout / payment reference: docs/ORDER_OPTIMIZER.md, docs/PRE_RELEASE_PAYMENT_CHECKLIST.md
 
 
 Running locally
@@ -29,40 +29,47 @@ First-time setup
 
 1. Create the venv and install deps (project root).
 2. Copy `.env` (committed defaults) and create `.env.secrets` (gitignored).
-   Required keys live in docs/ORDER_OPTIMIZER.md §4.1; the checkout
-   pipeline is gated off until those are present.
-3. Apply DB migrations against your Neon DSN — see CLAUDE.md
-   "Database migrations (alembic)" for the exact commands.
+   For the pay-what-you-want endpoints, set `STRIPE_SECRET_KEY` and
+   `STRIPE_WEBHOOK_SECRET` (see CLAUDE.md "Payment provider"). The default
+   `DB_BACKEND=json` needs no database — there is nothing to migrate.
+
+The automated checkout / marketplace-ordering pipeline is shelved; its setup
+(marketplace API keys, Neon DB, alembic migrations) is only needed if you
+re-enable it — see docs/BACKEND_SWITCHING.md and the SHELVED docs.
 
 
 Basic usage
 -----------
 
-POST /generate  (multipart upload) — kicks off a mosaic job.
-GET  /jobs/{job_id}                — poll job status.
-GET  /jobs/{job_id}/download       — download the artifact zip when complete.
+POST /generate              (multipart upload) — kicks off a mosaic job.
+GET  /jobs/{job_id}                            — poll job status.
+GET  /jobs/{job_id}/preview                    — 3D-renderable mosaic JSON (docs/PREVIEW_API.md).
+GET  /jobs/{job_id}/download                   — download the artifact zip when complete (ungated).
+POST /jobs/{job_id}/pay                         — pay-what-you-want charge for the build pack.
+POST /donate                                   — standalone tip (client-confirm Stripe).
 
 The zip contains:
   - order_list.json       (upload to lego.com Pick-a-Brick)
   - instructions.pdf      (step-by-step build guide)
 
-Checkout endpoints (`/jobs/{id}/checkout/...`) are gated by the
-checkout gate (see `GET /checkout/gate` and docs/CHECKOUT_AUDIT.md §10).
-
 
 Running the tests
 -----------------
 
-From project root:
+From project root (`.venv\Scripts\python.exe -m scripts.<name>`):
 
-    .venv\Scripts\python.exe -m scripts.test_optimizer
-    .venv\Scripts\python.exe -m scripts.test_gate_bypass
-    .venv\Scripts\python.exe -m scripts.test_saga_state_machine
-    .venv\Scripts\python.exe -m scripts.test_jobs_store_json
-    .venv\Scripts\python.exe -m scripts.test_jobs_store_edge
+Live product:
 
-Postgres-backed tests (need DB_BACKEND=postgres + a Neon DSN):
+    scripts.test_pay_router
+    scripts.test_donate_router
+    scripts.test_preview
+    scripts.test_background_budget
+    scripts.test_order_list
+    scripts.test_piece_specs
+    scripts.test_jobs_store_json
+    scripts.test_jobs_store_edge
 
-    .venv\Scripts\python.exe -m scripts.test_jobs_store_dispatch
-    .venv\Scripts\python.exe -m scripts.test_phase_e_pg
-    .venv\Scripts\python.exe -m scripts.test_reconcile_pg
+Shelved checkout pipeline (test_optimizer, test_gate_bypass,
+test_saga_state_machine run with no DB; test_jobs_store_dispatch,
+test_phase_e_pg, test_reconcile_pg, test_jsonb_codec need
+DB_BACKEND=postgres + a Neon DSN).

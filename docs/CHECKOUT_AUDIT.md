@@ -1,5 +1,14 @@
 # Checkout / Order Optimizer — Technical Audit & Target Architecture
 
+> ⚠️ **SHELVED (2026-06-13 pay-what-you-want pivot).** This document describes the
+> automated checkout/marketplace-ordering saga, which is **deactivated** in the
+> current product: its routers are not mounted, `CHECKOUT_ENABLED=false`, and
+> `DB_BACKEND=json`. The live product sells the build pack pay-what-you-want
+> (`POST /jobs/{id}/pay`, `POST /donate`). Retained for reference / future
+> re-enable — see `CLAUDE.md` ("Shelved subsystem: automated checkout pipeline")
+> and `docs/BACKEND_SWITCHING.md`. **Nothing below reflects current runtime
+> behavior.**
+
 **Audience:** LAIGO maintainers — design doc for the pre-launch v1 ship.
 **Scope:** Everything under `scripts/checkout/`, plus the `Main.py` integration points.
 **Posture:** Pre-launch. Stripe disabled, BrickOwl catalog API not yet granted, LEGO.com Playwright untested in live. No customer money has moved yet. Recommendations are framed as **"what must be true before the first real charge."**

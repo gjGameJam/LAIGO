@@ -1,5 +1,11 @@
 # LEGO Browser Host — VPS + Residential Proxy (Cloudflare bypass)
 
+> ⚠️ **SHELVED (2026-06-13 pay-what-you-want pivot).** The LEGO.com browser-host /
+> Cloudflare-bypass work supports the automated checkout saga, which is
+> **deactivated** in the current product (routers not mounted,
+> `CHECKOUT_ENABLED=false`, `DB_BACKEND=json`). Retained for reference / future
+> re-enable — see `CLAUDE.md` ("Shelved subsystem: automated checkout pipeline").
+
 ## 1. Why this exists
 
 LEGO.com (Pick-a-Brick) is fronted by **Cloudflare**, which hard-blocks

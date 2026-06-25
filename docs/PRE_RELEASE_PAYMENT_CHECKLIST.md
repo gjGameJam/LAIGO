@@ -1,5 +1,14 @@
 # Pre-Release Payment Checklist
 
+> ⚠️ **SHELVED (2026-06-13 pay-what-you-want pivot).** This checklist governs the
+> automated checkout/marketplace-ordering saga, which is **deactivated** in the
+> current product: its routers are not mounted, `CHECKOUT_ENABLED=false`, and
+> `DB_BACKEND=json`. The "Posture today" line below is from before the pivot and
+> is **stale**. The live product sells the build pack pay-what-you-want
+> (`POST /jobs/{id}/pay`, `POST /donate`). Retained for reference / future
+> re-enable — see `CLAUDE.md` ("Shelved subsystem: automated checkout pipeline")
+> and `docs/BACKEND_SWITCHING.md`.
+
 **Audience:** LAIGO maintainers — single source of truth for "what must be true before the first real $1 moves."
 
 **Posture today:** Stripe wired + enabled in TEST mode (`STRIPE_ENABLED = True` in `stripe_provider.py`, `sk_test_...` in `.env.secrets`, `CHECKOUT_ENABLED=true` in `.env`, `DB_BACKEND=postgres` **on Render against Neon `main` at schema `0002` since 2026-05-22**). BrickOwl catalog API not granted. LEGO.com Playwright never run in live. No live customer money has moved.

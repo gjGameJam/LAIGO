@@ -1,5 +1,13 @@
 # DATABASE_OPS.md — Neon Postgres operations + debugging
 
+> ⚠️ **DORMANT (Postgres backend inactive).** LAIGO currently runs
+> `DB_BACKEND=json`; the Neon/Postgres path this document covers is **not active**,
+> and Neon is parked (free-tier compute quota exhausted as of 2026-06-18). This
+> reference applies whenever the Postgres backend is re-enabled — either for a
+> durable jobs store on its own, or as part of re-enabling the shelved checkout
+> saga. To flip backends, see `docs/BACKEND_SWITCHING.md`. The line below ("uses a
+> single Neon Postgres database in production") describes the pre-pivot posture.
+
 LAIGO uses a single Neon Postgres database in production. This file is the
 how-to / debug reference. Read top-to-bottom when you come back cold; jump to
 "Debug playbook" when something's on fire.

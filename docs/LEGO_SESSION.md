@@ -1,5 +1,11 @@
 # LEGO.com Playwright Session — Operator Reference
 
+> ⚠️ **SHELVED (2026-06-13 pay-what-you-want pivot).** LEGO.com Playwright ordering
+> is part of the automated checkout saga, which is **deactivated** in the current
+> product (routers not mounted, `CHECKOUT_ENABLED=false`, `DB_BACKEND=json`). No
+> session seeding is required to run LAIGO today. Retained for reference / future
+> re-enable — see `CLAUDE.md` ("Shelved subsystem: automated checkout pipeline").
+
 ## 1. Overview
 
 LEGO.com orders are placed via Playwright Chromium automation in

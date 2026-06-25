@@ -1,5 +1,14 @@
 # Order Optimizer — Operator & Developer Reference
 
+> ⚠️ **SHELVED (2026-06-13 pay-what-you-want pivot).** This document describes the
+> automated checkout/marketplace-ordering saga, which is **deactivated** in the
+> current product: its routers are not mounted, `CHECKOUT_ENABLED=false`, and
+> `DB_BACKEND=json`. The live product sells the build pack pay-what-you-want
+> (`POST /jobs/{id}/pay`, `POST /donate`). Retained for reference / future
+> re-enable — see `CLAUDE.md` ("Shelved subsystem: automated checkout pipeline")
+> and `docs/BACKEND_SWITCHING.md`. **Nothing below reflects current runtime
+> behavior.**
+
 ## 1. Overview
 
 After a LAIGO mosaic job completes, the order optimizer automates the entire LEGO piece purchasing workflow on the customer's behalf.
