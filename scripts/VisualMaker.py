@@ -1190,7 +1190,8 @@ def draw_step_piece_legend(draw, stud_colors, *, x=25, y=18, max_width=440):
 # Pixel deltas of the green LEGO-Art connector pin, copied verbatim from
 # draw_baseplate_bottom's greenPin polygon so the legend icon matches the
 # baseplate art. The red pin is this shape mirrored across x. KEEP IN SYNC with
-# draw_baseplate_bottom if that pin shape ever changes.
+# draw_baseplate_bottom if that pin shape ever changes. Used only by the GREY
+# connectors now (axle peg / hooks); the green/red pins use _draw_connector_rod.
 _CONNECTOR_PIN_DELTAS = [(-3, 9), (-30, 25), (-22, 29), (5, 13)]
 
 
@@ -1328,14 +1329,109 @@ def _draw_connector_pin(draw, cx, cy, s, color, *, mirror):
     draw.polygon(pts, to_rgb(color), outline=(10, 10, 10))
 
 
+def _draw_connector_rod(draw, cx, cy, s, color):
+    """Green/red LEGO Technic connector pin (design 32054/65304, "Pin 3L with
+    Friction Ridges and Stop Bush") as a round isometric cylinder along the length
+    (el) axis with one wider, round stop-bush collar offset toward the short end —
+    the pin passes THROUGH the collar. Built from circular cross-sections (sheared
+    to ellipses in iso) swept far->near with a varying radius (thin pin, wide
+    collar). The black border is drawn in depth order so it never paints over
+    what's in front: the collar's front flange ring is stroked BEFORE the near pin
+    is filled (the pin then overpaints the part that lies in front of it); the
+    collar's back rim and the pin's far end are only their far-side silhouette arcs
+    (no full circle / "hole"); only the near pin tip is a full circle. Green and
+    red share this shape/orientation (no mirror). Centered at (cx, cy)."""
+    s *= 1.21                         # a touch bigger than the other mini icons
+    top_c, side_c, _shadow, edge = _mini_shades(color)
+    ewx, ewy = s, -s * 0.5            # +1 unit along width (up-right, cross-section axis)
+    elx, ely = -s, -s * 0.5           # +1 unit along length (up-left, the pin axis)
+
+    rod_len, rod_r = 2.4, 0.17                       # round pin: length, radius
+    col_r, col_len, col_at = 0.31, 0.5, 0.25         # round collar: radius, length, start frac
+    j0 = col_at * rod_len                            # collar near edge along length
+    j1 = j0 + col_len                                # collar far edge
+    two_pi = 2.0 * math.pi
+    back0, back1 = 3.0 * math.pi / 4.0, 7.0 * math.pi / 4.0   # far-side silhouette half-arc
+
+    def ring(jj, radius, a0=0.0, a1=two_pi, up=0.0, n=24):
+        # Cross-section circle perpendicular to the axis at length jj (a full ring,
+        # or the partial arc [a0, a1]); optionally shifted up. Sheared to an ellipse.
+        return [(jj * elx + radius * math.cos(a) * ewx,
+                 jj * ely - up + radius * math.cos(a) * ewy + radius * math.sin(a) * s)
+                for a in (a0 + (a1 - a0) * k / n for k in range(n + 1))]
+
+    def gpt(jj, radius, theta):       # one silhouette-generator point
+        return (jj * elx + radius * math.cos(theta) * ewx,
+                jj * ely + radius * math.cos(theta) * ewy + radius * math.sin(theta) * s)
+
+    span = 1.118 * s
+    nseg = lambda dj: max(6, int(dj * span / 1.1))
+
+    def tube(ja, jb, radius):
+        # filled body discs + top-highlight discs along [ja, jb]
+        out = []
+        m = nseg(abs(jb - ja))
+        for k in range(m + 1):
+            jj = ja + (jb - ja) * k / m
+            out.append((ring(jj, radius), side_c))
+            out.append((ring(jj, radius * 0.5, up=radius * s * 0.42), top_c))
+        return out
+
+    far_t = tube(rod_len, j1, rod_r)                 # far pin (behind collar)
+    col_t = tube(j1, j0, col_r)                      # collar body
+    near_t = tube(j0, 0.0, rod_r)                    # near pin (in front of collar)
+    flange = (ring(j0, col_r), top_c)                # collar front face
+    tip = (ring(0.0, rod_r), top_c)                  # pin front face
+
+    # Center on (cx, cy) using all fill points.
+    pts = [p for grp in (far_t, col_t, near_t) for poly, _ in grp for p in poly]
+    pts += flange[0] + tip[0]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    dx = cx - (min(xs) + max(xs)) / 2.0
+    dy = cy - (min(ys) + max(ys)) / 2.0
+    sh = lambda q: [(x + dx, y + dy) for x, y in q]
+    bw = max(1, int(round(s * 0.05)))
+
+    def fill(pf):
+        draw.polygon(sh(pf[0]), pf[1])
+
+    def stroke(q, *, closed=False):
+        q = sh(q)
+        draw.line(q + ([q[0]] if closed else []), fill=edge, width=bw, joint="curve")
+
+    # Back-to-front, interleaving borders so none paints over what's in front of it.
+    for pf in far_t:
+        fill(pf)
+    for pf in col_t:
+        fill(pf)
+    stroke(ring(j1, col_r, back0, back1))            # collar BACK rim (far-side arc only)
+    fill(flange)
+    stroke(ring(j0, col_r), closed=True)             # collar FRONT flange ring (pin overpaints occluded part next)
+    for pf in near_t:
+        fill(pf)
+    fill(tip)
+    # Outer silhouette long edges (top + bottom generators, stepping at the collar).
+    for theta in (-math.pi / 4.0, 3.0 * math.pi / 4.0):
+        stroke([gpt(0.0, rod_r, theta), gpt(j0, rod_r, theta), gpt(j0, col_r, theta),
+                gpt(j1, col_r, theta), gpt(j1, rod_r, theta), gpt(rod_len, rod_r, theta)])
+    stroke(ring(rod_len, rod_r, back0, back1))       # pin FAR end: rounded arc, no "hole"
+    stroke(ring(0.0, rod_r), closed=True)            # pin FRONT tip: the single circle
+
+
 def draw_mini_piece(draw, cx, cy, unit, spec):
     """Draw a small proportional isometric icon of `spec` (piece_specs.PieceSpec)
     centered at (cx, cy). `unit` is the nominal 1-stud half-width (matches
     draw_mini_plate). Plain top-left page coords."""
     if spec.shape == ps.SHAPE_CONNECTOR:
-        # The red pin is the green pin mirrored across x; detect by hue.
-        mirror = spec.color[0] >= spec.color[1]
-        _draw_connector_pin(draw, cx, cy, unit, spec.color, mirror=mirror)
+        # Green (6526672) / red (6347789) are both design 32054 — same part, drawn
+        # the same way (no mirror) as a flat-faced 3D rod. Grey connectors (axle
+        # peg / hooks) keep the legacy flat parallelogram icon.
+        if max(spec.color) - min(spec.color) > 0.25:   # chromatic => green/red
+            _draw_connector_rod(draw, cx, cy, unit, spec.color)
+        else:
+            mirror = spec.color[0] >= spec.color[1]
+            _draw_connector_pin(draw, cx, cy, unit, spec.color, mirror=mirror)
         return
     if spec.shape == ps.SHAPE_CORNER:
         n = max(spec.width, spec.length)          # 4 = corner plate, 2 = corner brick
