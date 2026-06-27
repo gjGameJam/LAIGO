@@ -86,6 +86,41 @@ def block_center_xy(bx, by, xOffset, yOffset):
     return get_block_xy(bx + xOffset + 0.5, by + yOffset + 0.5)
 
 
+def _draw_baseplate_connector_pin(draw, xSpot, ySpot, color, *, mirror=False):
+    """Flat 'back of connector' pin for the baseplate-setup step: the original
+    4-point parallelogram plus a wider flat collar band over 47.5%-75% of the pin
+    length (0% = oval-hole end, 100% = page-middle end). Same flat fill `color`
+    and black (10,10,10) outline as the rest of the pin, drawn as ONE polygon so
+    the silhouette outline stays clean. mirror=False -> green; mirror=True -> red
+    (x deltas negated), which reproduces the old redPin when collar_offset == 0."""
+    P0, P1, P2, P3 = (-3.0, 9.0), (-30.0, 25.0), (-22.0, 29.0), (5.0, 13.0)
+    collar_offset = 2.5  # extra half-width (px) the collar bulges out each side
+
+    lx, ly = P0[0] - P1[0], P0[1] - P1[1]      # long axis = (27, -16)
+    L = math.hypot(lx, ly)
+    nx, ny = -ly / L, lx / L                   # top->bottom unit normal
+    ox, oy = nx * collar_offset, ny * collar_offset
+
+    def lerp(a, b, t):
+        return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+    top_lo, top_hi = lerp(P1, P0, 0.475), lerp(P1, P0, 0.75)  # hole edge extended 10% longer
+    bot_lo, bot_hi = lerp(P2, P3, 0.475), lerp(P2, P3, 0.75)
+
+    pts = [
+        P1,
+        top_lo, (top_lo[0] - ox, top_lo[1] - oy),
+        (top_hi[0] - ox, top_hi[1] - oy), top_hi,
+        P0, P3,
+        bot_hi, (bot_hi[0] + ox, bot_hi[1] + oy),
+        (bot_lo[0] + ox, bot_lo[1] + oy), bot_lo,
+        P2,
+    ]
+    if mirror:
+        pts = [(-dx, dy) for dx, dy in pts]
+    draw.polygon([(xSpot + dx, ySpot + dy) for dx, dy in pts], color, outline=(10, 10, 10))
+
+
 def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     """
     Draw a single monolithic NxN LEGO baseplate (height = 1 plate)
@@ -324,45 +359,13 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
 
 
         # draw back of green connectors
-        xSpot = x + 100
-        ySpot = y + 1
-        greenPin = [
-            (xSpot - 3,           ySpot + 9),            # top-left
-            (xSpot - 30,      ySpot + 25),       # top-right
-            (xSpot - 22, ySpot + 29),  # bottom-right
-            (xSpot + 5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(greenPin, green_color, outline=(10,10,10))
+        _draw_baseplate_connector_pin(draw, x + 100, y + 1, green_color)
 
 
-        xSpot = x + 235
-        ySpot = y + 69
-        greenPin = [
-            (xSpot - 3,           ySpot + 9),            # top-left
-            (xSpot - 30,      ySpot + 25),       # top-right
-            (xSpot - 22, ySpot + 29),  # bottom-right
-            (xSpot + 5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(greenPin, green_color, outline=(10,10,10))
+        _draw_baseplate_connector_pin(draw, x + 235, y + 69, green_color)
         # draw back of red connectors
-        xSpot = x + 245
-        ySpot = y + 69
-        redPin = [
-            (xSpot + 3,           ySpot + 9),            # top-left
-            (xSpot + 30,      ySpot + 25),       # top-right
-            (xSpot + 22, ySpot + 29),  # bottom-right
-            (xSpot + -5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(redPin, red_color, outline=(10,10,10))
-        xSpot = x + 380
-        ySpot = y + 1
-        redPin = [
-            (xSpot + 3,           ySpot + 9),            # top-left
-            (xSpot + 30,      ySpot + 25),       # top-right
-            (xSpot + 22, ySpot + 29),  # bottom-right
-            (xSpot + -5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(redPin, red_color, outline=(10,10,10))
+        _draw_baseplate_connector_pin(draw, x + 245, y + 69, red_color, mirror=True)
+        _draw_baseplate_connector_pin(draw, x + 380, y + 1, red_color, mirror=True)
         #then do green holes
         for sx, sy in green_holes:
             sx_iso, sy_iso = get_block_xy(
@@ -414,24 +417,8 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
                 outline=(10,10,10)
             )
         # draw back of red connectors
-        xSpot = x + 245
-        ySpot = y + 69
-        redPin = [
-            (xSpot + 3,           ySpot + 9),            # top-left
-            (xSpot + 30,      ySpot + 25),       # top-right
-            (xSpot + 22, ySpot + 29),  # bottom-right
-            (xSpot + -5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(redPin, red_color, outline=(10,10,10))
-        xSpot = x + 380
-        ySpot = y + 1
-        redPin = [
-            (xSpot + 3,           ySpot + 9),            # top-left
-            (xSpot + 30,      ySpot + 25),       # top-right
-            (xSpot + 22, ySpot + 29),  # bottom-right
-            (xSpot + -5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(redPin, red_color, outline=(10,10,10))
+        _draw_baseplate_connector_pin(draw, x + 245, y + 69, red_color, mirror=True)
+        _draw_baseplate_connector_pin(draw, x + 380, y + 1, red_color, mirror=True)
         return
     if (case == 2):
         #draw upside down pieces
@@ -463,24 +450,8 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
                 outline=(10,10,10)
             )
         # draw back of green connectors
-        xSpot = x + 100
-        ySpot = y + 1
-        greenPin = [
-            (xSpot - 3,           ySpot + 9),            # top-left
-            (xSpot - 30,      ySpot + 25),       # top-right
-            (xSpot - 22, ySpot + 29),  # bottom-right
-            (xSpot + 5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(greenPin, green_color, outline=(10,10,10))
-        xSpot = x + 235
-        ySpot = y + 69
-        greenPin = [
-            (xSpot - 3,           ySpot + 9),            # top-left
-            (xSpot - 30,      ySpot + 25),       # top-right
-            (xSpot - 22, ySpot + 29),  # bottom-right
-            (xSpot + 5,      ySpot + 13),       # bottom-left
-        ]
-        draw.polygon(greenPin, green_color, outline=(10,10,10))
+        _draw_baseplate_connector_pin(draw, x + 100, y + 1, green_color)
+        _draw_baseplate_connector_pin(draw, x + 235, y + 69, green_color)
         return
     if (case == 3):
         #no connectors (already handled)
@@ -1187,11 +1158,12 @@ def draw_step_piece_legend(draw, stud_colors, *, x=25, y=18, max_width=440):
 # isometric build mid-band). Specs come from piece_specs.PieceSpec.
 # -----------------------------
 
-# Pixel deltas of the green LEGO-Art connector pin, copied verbatim from
-# draw_baseplate_bottom's greenPin polygon so the legend icon matches the
-# baseplate art. The red pin is this shape mirrored across x. KEEP IN SYNC with
-# draw_baseplate_bottom if that pin shape ever changes. Used only by the GREY
-# connectors now (axle peg / hooks); the green/red pins use _draw_connector_rod.
+# Pixel deltas of the original flat connector-pin parallelogram (red = mirrored
+# across x). Now an INDEPENDENT constant used ONLY by the GREY legend connectors
+# (axle peg / hooks), which keep the plain flat-parallelogram icon. The baseplate
+# green/red pins have DIVERGED: they now carry a flat collar band (see
+# _draw_baseplate_connector_pin), and the green/red legend icons use
+# _draw_connector_rod. Do NOT sync this back to draw_baseplate_bottom.
 _CONNECTOR_PIN_DELTAS = [(-3, 9), (-30, 25), (-22, 29), (5, 13)]
 
 
