@@ -236,16 +236,15 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     # Shading follows the center block's "light from the right" convention:
     # left-half walls use the darker front_color, right-half walls right_color.
 
-    # Back rows: one depth wall per back edge, along the plate edge from each
-    # side corner's top vertex to the back corner's near vertex (renders the
-    # rim's visible face). Back-left face points SE (right_color), back-right SW
-    # (front_color).
-    draw.polygon([bl[1], bc[0], _drop(bc[0]), _drop(bl[1])], right_color, outline=(10, 10, 10))
-    draw.polygon([tr[1], bc[2], _drop(bc[2]), _drop(tr[1])], front_color, outline=(10, 10, 10))
-
-    # Back corner: both lower edges (they meet at its center-facing bottom vertex).
-    draw.polygon([bc[0], bc[3], _drop(bc[3]), _drop(bc[0])], front_color, outline=(10, 10, 10))
-    draw.polygon([bc[2], bc[3], _drop(bc[3]), _drop(bc[2])], right_color, outline=(10, 10, 10))
+    # Back corner: a full 2x2 raised block with two height walls on its lower
+    # edges (meeting at its centre-facing bottom vertex) -- the same "height
+    # rectangles" the centre 4x4 has -- so it reads as a raised 2x2 with real
+    # height, just like the front corner.
+    draw.polygon([bc[0], bc[3], _drop(bc[3], PLATE_HEIGHT), _drop(bc[0], PLATE_HEIGHT)],
+                 front_color, outline=(10, 10, 10))
+    draw.polygon([bc[2], bc[3], _drop(bc[3], PLATE_HEIGHT), _drop(bc[2], PLATE_HEIGHT)],
+                 right_color, outline=(10, 10, 10))
+    draw.polygon(bc, top_color, outline=(10, 10, 10))
 
     # Side corners: a single triangle behind each rail (left: NE edge bl1-bl2;
     # right: NW edge tr1-tr0). The inner vertex drops straight down only as far
@@ -257,9 +256,36 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     right_tip = (tr[0][0], tr[3][1])   # inner vertex tr0 dropped to bottom-vertex level
     draw.polygon([bl[1], bl[2], left_tip, _drop(bl[1])], front_color, outline=(10, 10, 10))
     draw.polygon([tr[1], tr[0], right_tip, _drop(tr[1])], right_color, outline=(10, 10, 10))
+    draw.polygon(bl, top_color, outline=(10, 10, 10))
+    draw.polygon(tr, top_color, outline=(10, 10, 10))
 
-    # Re-draw the three back-half pad tops crisp over the walls.
-    draw.polygon(bc, top_color, outline=(10, 10, 10))
+    # Back rows: each is a raised bar = a flat 1-stud-wide TOP face (the strip the
+    # perimeter holes run along) + a BOTTOM (front) wall that drops the full plate
+    # thickness from the strip's inner edge, giving the back edge the same visible
+    # height as the front edges / centre block. Each row runs from its side corner
+    # to the back corner's NEAR vertex so it does NOT cover the back corner, which
+    # stays a clean 2x2.
+    # One stud inward from each back edge (toward the plate centre):
+    IN_NW = (PLATE_HALF_WIDTH, PLATE_HALF_HEIGHT)    # back-left  edge -> SE
+    IN_NE = (-PLATE_HALF_WIDTH, PLATE_HALF_HEIGHT)   # back-right edge -> SW
+
+    def _add(p, v):
+        return (p[0] + v[0], p[1] + v[1])
+
+    def _back_row(outer_a, outer_b, inward, wall_color):
+        ia, ib = _add(outer_a, inward), _add(outer_b, inward)
+        # bottom (front) wall: full plate thickness, facing the viewer
+        draw.polygon([ia, ib, _add(ib, (0, PLATE_HEIGHT)), _add(ia, (0, PLATE_HEIGHT))],
+                     wall_color, outline=(10, 10, 10))
+        # top face: flat 1-stud strip the holes run along
+        draw.polygon([outer_a, outer_b, ib, ia], top_color, outline=(10, 10, 10))
+
+    _back_row(bl[1], bc[0], IN_NW, right_color)   # back-left row  (left corner -> back corner)
+    _back_row(tr[1], bc[2], IN_NE, front_color)   # back-right row (right corner -> back corner)
+
+    # The side corners sit ON TOP of the rows: re-draw their top squares last so a
+    # row can't paint over the corner top face. The corner obscures the part of
+    # the row it overlaps, not the other way around.
     draw.polygon(bl, top_color, outline=(10, 10, 10))
     draw.polygon(tr, top_color, outline=(10, 10, 10))
 
