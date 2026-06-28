@@ -138,6 +138,10 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     front_color = to_rgb((color[0] * 0.70, color[1] * 0.70, color[2] * 0.70))
     green_color = to_rgb((.647, .792, .09))
     red_color = to_rgb((0.8, 0.1, 0.1))
+    # Shared 3D thickness for the center block AND the back-corner pads/rails
+    # below. The corner squares are already in PIL space (y grows down), so a
+    # face that "drops down" on screen adds +depth to a point's y.
+    depth = PLATE_HEIGHT * 0.8  # slightly thinner than a plate
 
     # -----------------
     # Baseplate faces
@@ -210,6 +214,55 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
     bottom_right_square = [(x - dx, y - dy) for x, y in bottom_left_square]
     draw.polygon(bottom_right_square, top_color, outline=(10,10,10))
 
+    # -----------------------------------------------------------------
+    # 3D thickness for the back half of the corner border.
+    # Each flat corner diamond above is [left, top, right, bottom] in PIL
+    # points; a "depth wall" on a lower edge drops that edge down by `depth`
+    # (mirrors the center block's big_front / big_right). The front (bottom)
+    # corner and the two front rails are intentionally left flat -- their
+    # walls would fall off the baseplate's front edge.
+    # -----------------------------------------------------------------
+    def _drop(pt, d=depth):
+        return (pt[0], pt[1] + d)
+
+
+    bc = bottom_right_square           # back corner       [left, top, right, bottom]
+    bl = bottom_left_square            # left side corner  [left, top, right, bottom]
+    tr = top_right_square              # right side corner [left, top, right, bottom]
+
+    # Depth walls are drawn first; the pad tops are re-drawn afterwards so each
+    # wall's inner half is occluded by its own pad. That occlusion is what turns
+    # the side-corner walls into the visible "triangle behind the row".
+    # Shading follows the center block's "light from the right" convention:
+    # left-half walls use the darker front_color, right-half walls right_color.
+
+    # Back rows: one depth wall per back edge, along the plate edge from each
+    # side corner's top vertex to the back corner's near vertex (renders the
+    # rim's visible face). Back-left face points SE (right_color), back-right SW
+    # (front_color).
+    draw.polygon([bl[1], bc[0], _drop(bc[0]), _drop(bl[1])], right_color, outline=(10, 10, 10))
+    draw.polygon([tr[1], bc[2], _drop(bc[2]), _drop(tr[1])], front_color, outline=(10, 10, 10))
+
+    # Back corner: both lower edges (they meet at its center-facing bottom vertex).
+    draw.polygon([bc[0], bc[3], _drop(bc[3]), _drop(bc[0])], front_color, outline=(10, 10, 10))
+    draw.polygon([bc[2], bc[3], _drop(bc[3]), _drop(bc[2])], right_color, outline=(10, 10, 10))
+
+    # Side corners: a single triangle behind each rail (left: NE edge bl1-bl2;
+    # right: NW edge tr1-tr0). The inner vertex drops straight down only as far
+    # as the pad's bottom vertex -- which sits on the plate's front edge -- so
+    # the triangle ends exactly where it meets the front row (corner raised to
+    # the same level as the front rows, no gap or overshoot). The top re-draw
+    # clips the inner half, leaving the triangle flush against its rail.
+    left_tip = (bl[2][0], bl[3][1])    # inner vertex bl2 dropped to bottom-vertex level
+    right_tip = (tr[0][0], tr[3][1])   # inner vertex tr0 dropped to bottom-vertex level
+    draw.polygon([bl[1], bl[2], left_tip, _drop(bl[1])], front_color, outline=(10, 10, 10))
+    draw.polygon([tr[1], tr[0], right_tip, _drop(tr[1])], right_color, outline=(10, 10, 10))
+
+    # Re-draw the three back-half pad tops crisp over the walls.
+    draw.polygon(bc, top_color, outline=(10, 10, 10))
+    draw.polygon(bl, top_color, outline=(10, 10, 10))
+    draw.polygon(tr, top_color, outline=(10, 10, 10))
+
 
     # -----------------
     # Big middle 3D square
@@ -218,7 +271,8 @@ def draw_baseplate_bottom(draw, size=16, color=(0.2, 0.2, 0.2), case=0):
 
     middle = x + PLATE_WIDTH * 6
     top_hh = PLATE_HALF_WIDTH * 2
-    depth = PLATE_HEIGHT * 0.8  # slightly thinner than a plate
+    # `depth` is defined once near the top of this function (shared with the
+    # back-corner pads/rails).
 
 
     # --- Top face ---
