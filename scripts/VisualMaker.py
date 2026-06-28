@@ -1381,11 +1381,15 @@ def _draw_connector_pin(draw, cx, cy, s, color, *, mirror):
     draw.polygon(pts, to_rgb(color), outline=(10, 10, 10))
 
 
-def _draw_connector_rod(draw, cx, cy, s, color):
-    """Green/red LEGO Technic connector pin (design 32054/65304, "Pin 3L with
-    Friction Ridges and Stop Bush") as a round isometric cylinder along the length
-    (el) axis with one wider, round stop-bush collar offset toward the short end —
-    the pin passes THROUGH the collar. Built from circular cross-sections (sheared
+def _draw_connector_rod(draw, cx, cy, s, color, *,
+                        rod_len=2.4, rod_r=0.17, col_r=0.31, col_len=0.5, col_at=0.25):
+    """Round isometric LEGO Technic connector pin: a cylinder along the length
+    (el) axis with one wider, round collar band the pin passes THROUGH. Defaults
+    draw the green/red "Pin 3L with Friction Ridges and Stop Bush" (design
+    32054/65304); the collar geometry is parametrizable (rod_len / rod_r / col_r /
+    col_len / col_at) so the same builder also draws the 2L black friction pin
+    (part 2780, element 6279875) with a small centered collar.
+    Built from circular cross-sections (sheared
     to ellipses in iso) swept far->near with a varying radius (thin pin, wide
     collar). The black border is drawn in depth order so it never paints over
     what's in front: the collar's front flange ring is stroked BEFORE the near pin
@@ -1398,8 +1402,6 @@ def _draw_connector_rod(draw, cx, cy, s, color):
     ewx, ewy = s, -s * 0.5            # +1 unit along width (up-right, cross-section axis)
     elx, ely = -s, -s * 0.5           # +1 unit along length (up-left, the pin axis)
 
-    rod_len, rod_r = 2.4, 0.17                       # round pin: length, radius
-    col_r, col_len, col_at = 0.31, 0.5, 0.25         # round collar: radius, length, start frac
     j0 = col_at * rod_len                            # collar near edge along length
     j1 = j0 + col_len                                # collar far edge
     two_pi = 2.0 * math.pi
@@ -2623,6 +2625,258 @@ def draw_frame_instructions(width, height, step, output_dir=None):
     step = draw_frame_setup_instruction(width, height, step, output_dir)
     return step #return step for any future use
 
+# Shared hook-piece shape, used by both the hook-assembly step and the assembled-
+# hook icon on the attach step so they render identically: a taller panel whose
+# top half equals its bottom half — pin holes centered, wall-mount notch in the
+# bottom half.
+_HOOK_ASPECT = 210.0 / 250.0   # h / w
+_HOOK_HOLE_Y_FRAC = 0.50       # pin-hole row centered vertically
+_HOOK_NOTCH_H_FRAC = 0.40      # notch height (kept in the bottom half)
+_HOOK_PIN_LEN_FRAC = 0.7       # pin length as a fraction of hook height
+
+
+def _draw_hanging_bracket(draw, cx, cy, w, h, color, *, hole_y_frac=0.30, notch_h_frac=0.55):
+    """LEGO-Art hanging bracket — element 6302094, "Technic Panel 3x5 with Wall-
+    Mount Hole" (design 67139). Front view: a flat rounded rectangle with a Technic
+    pin hole near each end (left + right) — where the two black pins lock it on —
+    and a white upside-down "V" wall-mount notch at the bottom (it hooks over a
+    nail / screw). `hole_y_frac` is the pin-hole row's distance below the top edge
+    (as a fraction of h; 0.5 centers it); `notch_h_frac` is the notch height as a
+    fraction of h. Hole *radius* tracks w (not h) so a taller panel keeps the same
+    holes. Centered at (cx, cy); returns the two pin-hole x-centers."""
+    fill = to_rgb(color)
+    # Border / corner radius track w (the stable dimension) so growing h alone
+    # doesn't thicken the outline or round the corners of the bottom half.
+    ow = max(1, int(round(w * 0.048)))
+    radius = w * 0.13
+    x0, y0, x1, y1 = cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill,
+                           outline=(10, 10, 10), width=ow)
+    # White upside-down "V" wall-mount notch at the bottom (hooks over a nail/screw).
+    v_half = w * 0.16
+    v_apex_y = y1 - h * notch_h_frac     # apex points up; legs open at the bottom edge
+    v_tri = [(cx - v_half, y1), (cx, v_apex_y), (cx + v_half, y1)]
+    draw.polygon(v_tri, fill=(245, 245, 245))
+    draw.line(v_tri, fill=(10, 10, 10), width=ow, joint="curve")
+    # Technic pin holes, one at each end (the black pins lock in here).
+    pin_dx = w * 0.34
+    pin_r = max(1.5, w * 0.10)
+    pin_cy = y0 + h * hole_y_frac
+    holes = (cx - pin_dx, cx + pin_dx)
+    for hx in holes:
+        draw.ellipse([hx - pin_r, pin_cy - pin_r, hx + pin_r, pin_cy + pin_r],
+                     fill=(245, 245, 245), outline=(10, 10, 10))
+    return holes
+
+
+def _draw_pin_up(draw, cx, base_y, length, color, *, width):
+    """Black 2L Technic friction pin (part 2780) standing straight UP from
+    (cx, base_y): a rounded vertical rod with a small collar band in the middle.
+    The rod bottom sits at base_y; it rises `length` toward the top of the page."""
+    fill = to_rgb(color)
+    top = base_y - length
+    draw.rounded_rectangle([cx - width / 2.0, top, cx + width / 2.0, base_y],
+                           radius=width * 0.5, fill=fill, outline=(10, 10, 10), width=1)
+    # Small collar band in the middle (a touch wider than the rod).
+    cw = width * 1.55
+    ch = max(2.0, length * 0.15)
+    mid = (top + base_y) / 2.0
+    draw.rounded_rectangle([cx - cw / 2.0, mid - ch / 2.0, cx + cw / 2.0, mid + ch / 2.0],
+                           radius=min(ch, cw) * 0.35, fill=fill, outline=(10, 10, 10), width=1)
+
+
+def _draw_assembled_hook(draw, cx, cy, w, h, color, pin_color, *, pin_len_frac=_HOOK_PIN_LEN_FRAC):
+    """An assembled hanging hook: the taller "same shape" front-view bracket (holes
+    centered, notch in the bottom half — the _HOOK_* shape) with its two black pins
+    pushed HALFWAY into the top edge, so each pin sticks out by half its length and
+    the inserted half is hidden inside the panel. Centered at (cx, cy); returns the
+    two pin-hole x-centers."""
+    top_y = cy - h / 2.0
+    pin_dx = w * 0.34
+    pin_len = max(8.0, h * pin_len_frac)
+    pin_w = max(3.0, w * 0.12)
+    hole_xs = (cx - pin_dx, cx + pin_dx)
+    # Pins drawn FIRST, centered on the top edge; the bracket (drawn next) then
+    # covers the lower, inserted half so each pin sticks out by half its length.
+    for hx in hole_xs:
+        _draw_pin_up(draw, hx, top_y + pin_len / 2.0, pin_len, pin_color, width=pin_w)
+    _draw_hanging_bracket(draw, cx, cy, w, h, color,
+                          hole_y_frac=_HOOK_HOLE_Y_FRAC, notch_h_frac=_HOOK_NOTCH_H_FRAC)
+    return hole_xs
+
+
+def draw_hook_assembly_instruction(width, height, step, output_dir=None):
+    """Intermediary step before attaching the hooks: push the two black pins into
+    the top of each hanging bracket. Drawn as one enlarged front-view hook with a
+    black pin going into each of its two top pin holes, plus an "xN" multiplier
+    (build one per nail hook). Counts mirror MosiacToOrder.GetBaseplatesForSize:
+        nailHooks = min(numOfBlocks, 2)
+    """
+    img, draw = get_img_and_draw(step, True, output_dir)
+    log_info("drawing hook-assembly step...")
+
+    blockWidth = width // 16
+    blockHeight = height // 16
+    nailHooks = min(blockWidth * blockHeight, 2)
+
+    grey = (0.30, 0.30, 0.30)
+    black = (0.12, 0.12, 0.12)
+
+    margin = 25
+    draw.text((margin, margin),
+              "Push the 2 black pins into the top of each hook.",
+              fill="black", font=get_font(20))
+
+    # Enlarged front-view hook (the shared _HOOK_* shape: taller panel, holes
+    # centered, notch in the bottom half). Anchored to a fixed bottom edge so only
+    # the top grew upward relative to the original short version.
+    cx = img.width / 2.0
+    hw = 250.0
+    hh = hw * _HOOK_ASPECT
+    cy = 485.0 - hh / 2.0
+    hole_xs = _draw_hanging_bracket(draw, cx, cy, hw, hh, grey,
+                                    hole_y_frac=_HOOK_HOLE_Y_FRAC, notch_h_frac=_HOOK_NOTCH_H_FRAC)
+
+    # A black pin above each pin column, pushed down INTO the top edge of the hook
+    # (not into the holes on the face).
+    top_y = cy - hh / 2.0
+    for hx in hole_xs:
+        _draw_connector_rod(draw, hx, top_y - 56, 17, black,
+                            rod_len=2.0, rod_r=0.17, col_r=0.23, col_len=0.18, col_at=0.455)
+        draw_directional_arrow(draw, hx, top_y + 6, 0, 1, 20, 6, 14, 18)
+
+    # "xN" — build one assembled hook per nail hook.
+    draw_big_quantity(draw, nailHooks, cx + hw / 2.0 + 18, cy - 36)
+
+    step = save_img_and_increment_step(img, step, output_dir)
+    return step
+
+
+def draw_backhook_instruction(width, height, step, output_dir=None):
+    """Second-to-last step: flip the mosaic over and lock the hanging bracket(s)
+    onto the back with the black circular Technic pins.
+
+    Rendered as a top-down "back of the mosaic" map — the grey baseplate grid with
+    the hanging bracket(s) along the top edge, a "+" hole mark and a downward arrow
+    at every black-pin location, plus a piece legend (bracket icon + round black-pin
+    icon with quantities).
+
+    The bracket / pin counts mirror MosiacToOrder.GetBaseplatesForSize. The formula
+    is duplicated by hand rather than imported because VisualMaker is a leaf module
+    that must not import MosiacToOrder — keep the two in sync:
+        nailHooks = min(numOfBlocks, 2);  pins = nailHooks * 2
+    """
+    img, draw = get_img_and_draw(step, True, output_dir)
+    log_info("drawing backhook attachment step...")
+
+    blockWidth = width // 16
+    blockHeight = height // 16
+    numOfBlocks = blockWidth * blockHeight
+    nailHooks = min(numOfBlocks, 2)
+
+    grey = (0.30, 0.30, 0.30)
+    black = (0.12, 0.12, 0.12)
+    light_grey = to_rgb((0.8, 0.8, 0.8))
+    outline = (10, 10, 10)
+
+    # --- title ---
+    margin = 25
+    title_font = get_font(20)
+    bracket_word = "bracket" if nailHooks == 1 else "brackets"
+    draw.text((margin, margin),
+              "Flip the mosaic over. Attach the hanging", fill="black", font=title_font)
+    draw.text((margin, margin + 26),
+              f"{bracket_word} to the back with the black pins.", fill="black", font=title_font)
+
+    # --- legend: one assembled hook (taller hook shape + 2 pins half-inserted) ---
+    legend_font = get_font(16)
+    legend_y = 128
+    bx = margin + 36
+    lw = 46.0
+    _draw_assembled_hook(draw, bx, legend_y, lw, lw * _HOOK_ASPECT, grey, black)
+    draw.text((bx + 36, legend_y - 9),
+              f"assembled hook  x{nailHooks}", fill="black", font=legend_font)
+
+    # --- back-view map: grey baseplate grid with bracket(s) along the top edge ---
+    cross = 6
+    a_shaft_len, a_shaft_thick, a_head_len, a_head_wid = 14, 5, 11, 14
+    caption_block = 34
+    bottom_pad = a_head_len + a_shaft_len
+    band_top, band_bottom = 175, 690
+    band_h = band_bottom - band_top
+    center_x = img.width / 2.0
+
+    # Fit the grid to the band. The hooks now hang BELOW the frame's top edge
+    # (inside the grid), so only a sliver above grid_top is needed for the + marks.
+    max_w = 430
+    CAP = 90
+    top_reserve_frac = 0.12
+    len_by_h = (band_h - caption_block - bottom_pad) / (top_reserve_frac + blockHeight)
+    length = min(max_w / blockWidth, len_by_h, CAP)
+
+    grid_w = length * blockWidth
+    grid_h = length * blockHeight
+    top_reserve = top_reserve_frac * length
+
+    total_h = top_reserve + grid_h + bottom_pad + caption_block
+    grid_left = center_x - grid_w / 2.0
+    grid_top = band_top + (band_h - total_h) / 2.0 + top_reserve
+    grid_right = grid_left + grid_w
+    grid_bottom = grid_top + grid_h
+
+    # Mosaic baseplate squares (the back of the mosaic).
+    for w in range(blockWidth):
+        for h in range(blockHeight):
+            x = grid_left + length * w
+            y = grid_top + length * h
+            draw.rectangle([x, y, x + length, y + length],
+                           fill=light_grey, outline=outline)
+
+    # Each hook is ~5 studs wide and sits on one top-row baseplate cell. The hook
+    # hangs BELOW the frame's top edge with its pins pointing UP into the frame
+    # holes, so top-to-bottom we stack: the "+" pin holes (on the frame edge), an
+    # up-arrow, then the hook below it.
+    studs_per_block = 16
+    bw = (5.0 / studs_per_block) * length          # ~5 studs wide (front-view face)
+    bh = bw * _HOOK_ASPECT                           # taller "same shape" hook
+    pin_dx = bw * 0.34                               # the hook's two pin columns
+    pin_out = max(8.0, bh * _HOOK_PIN_LEN_FRAC) / 2.0   # how far the pins stick up
+    mark = max(3.0, min(float(cross), 0.06 * length))   # "+" arms scale with the cell
+
+    arrow_tip_y = grid_top + 7                        # arrowhead just below the + row
+    arrow_bottom = arrow_tip_y + a_head_len + a_shaft_len
+    bracket_cy = arrow_bottom + 2 + pin_out + bh / 2.0   # hook below the arrow
+
+    if nailHooks == 1:
+        mid = blockWidth // 2
+        placements = [grid_left + (mid + 0.5) * length]
+    elif blockWidth == 1:
+        placements = [grid_left + 0.30 * length, grid_left + 0.70 * length]
+    else:
+        placements = [grid_left + 0.5 * length, grid_left + (blockWidth - 0.5) * length]
+
+    for bcx in placements:
+        # hook below the arrow, its pins pointing up toward the frame holes
+        _draw_assembled_hook(draw, bcx, bracket_cy, bw, bh, grey, black)
+        # up-arrow just below the "+" marks, pointing up into the frame holes
+        draw_directional_arrow(draw, bcx, arrow_tip_y, 0, -1,
+                               a_shaft_len, a_shaft_thick, a_head_len, a_head_wid)
+        # "+" at each pin hole on the frame's top edge (where the pins go in)
+        for hx in (bcx - pin_dx, bcx + pin_dx):
+            draw.line([(hx - mark, grid_top), (hx + mark, grid_top)], fill=(0, 0, 0), width=2)
+            draw.line([(hx, grid_top - mark), (hx, grid_top + mark)], fill=(0, 0, 0), width=2)
+
+    # Caption under the grid.
+    cap_font = get_font(20)
+    caption = "Push the black pins up into the + holes to lock on"
+    cap_w = _text_width(draw, caption, cap_font)
+    draw.text((center_x - cap_w / 2.0, grid_bottom + 12),
+              caption, fill="black", font=cap_font)
+
+    step = save_img_and_increment_step(img, step, output_dir)
+    return step
+
+
 #draws final views of completed mosiac (all put together) with frame if applicable
 def draw_final_view(step, composite, want_frame, output_dir=None):
     img, draw = get_img_and_draw(step, True, output_dir)
@@ -2663,7 +2917,7 @@ def draw_final_view(step, composite, want_frame, output_dir=None):
     font = get_font(20)
     margin = 50
     placement = (margin, margin)
-    text = "Admire your artwork (add frame hooks to back is desired)"
+    text = "Admire your artwork"
     draw.text(placement, text, fill="black", font=font)
 
 

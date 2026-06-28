@@ -34,6 +34,7 @@ _GREY_PLATE = (0.44, 0.44, 0.44)      # 2x2 reinforcement plates on the undersid
 _GREEN = (0.647, 0.792, 0.09)         # LEGO Art green connector / bridge plate
 _RED = (0.8, 0.1, 0.1)                # LEGO Art red connector / bridge plate
 _FRAME_BLACK = (0.3, 0.3, 0.3)        # frame pieces are drawn in this dark grey
+_PIN_BLACK = (0.12, 0.12, 0.12)       # black Technic hook-connector pins
 
 
 @dataclass(frozen=True)
@@ -63,9 +64,11 @@ SPEC_BY_ELEMENT = {
     6347789: PieceSpec("red conn", 1, 1, 1, SHAPE_CONNECTOR, _RED, show_dims=False),
     4621548: PieceSpec("green bridge plate", 2, 4, 1, SHAPE_PLATE, _GREEN),
     379521:  PieceSpec("red bridge plate", 4, 2, 1, SHAPE_PLATE, _RED),
-    # Nail/hanging hooks — deferred (omitted from legends for now); listed for coverage.
+    # Nail/hanging hooks — rendered by VisualMaker.draw_backhook_instruction (the
+    # second-to-last instruction step), which draws its own bracket + round-pin
+    # legend rather than going through draw_mini_piece. Specs kept for coverage.
     6302094: PieceSpec("nail hook", 1, 1, 1, SHAPE_CONNECTOR, _GREY_PLATE, show_dims=False),
-    6279875: PieceSpec("hook connector", 1, 1, 1, SHAPE_CONNECTOR, _GREY_PLATE, show_dims=False),
+    6279875: PieceSpec("hook connector", 1, 1, 1, SHAPE_CONNECTOR, _PIN_BLACK, show_dims=False),
 
     # --- frame (GetFrameForSize) ---
     # Corner brick: small thick L (2x2 minus front 1x1 = 3 studs), block height.

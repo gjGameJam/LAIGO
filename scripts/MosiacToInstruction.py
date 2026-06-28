@@ -1,4 +1,4 @@
-from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction, draw_step_piece_legend
+from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction, draw_hook_assembly_instruction, draw_backhook_instruction, draw_step_piece_legend
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas as rl_canvas
 import numpy as np
@@ -170,12 +170,14 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
     #add frame instruction steps
     step = draw_grid_setup_instruction(step, output_dir)
     if want_frame:
-        #show final view with frame (include frame building instructions)
+        #include frame building + assembly instructions before the back hooks
         step = draw_frame_instructions(bg_rgba.width, bg_rgba.height, step, output_dir)
-        step = draw_final_view(step, composite, True, output_dir)
-    else:
-        #show final view without frame
-        step = draw_final_view(step, composite, False, output_dir)
+    #hook hardware (every kit ships it regardless of frame): first sub-assemble each
+    #hook by pushing its 2 black pins in, then attach the hook(s) to the back, then
+    #the final "admire your artwork" view
+    step = draw_hook_assembly_instruction(bg_rgba.width, bg_rgba.height, step, output_dir)
+    step = draw_backhook_instruction(bg_rgba.width, bg_rgba.height, step, output_dir)
+    step = draw_final_view(step, composite, want_frame, output_dir)
 
     # Save PDF
     instructions_dir = Path(output_dir) / "Instructions"
