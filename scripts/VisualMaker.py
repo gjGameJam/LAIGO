@@ -1497,6 +1497,52 @@ def draw_mini_piece(draw, cx, cy, unit, spec):
     _draw_mini_rect(draw, cx, cy, s, w, l, spec.height, spec.color, axle=spec.axle)
 
 
+# Scale (build-art px -> legend px) shared by ALL assembled-unit icons so their
+# relative sizes stay 1:1 with each other (the long edge is ~2x the seam, etc.).
+# Chosen so the widest unit — the ~721px-wide long edge — lands at a legend-
+# friendly width (~260px). See _render_assembly_icon.
+_ASSEMBLY_ICON_SCALE = 0.36
+
+
+def _render_assembly_icon(kind):
+    """Render a finished frame sub-assembly EXACTLY as the per-piece build steps
+    draw it — same draw_corner_plate / draw_corner_brick / draw_brick /
+    draw_ortho_plate calls, in the same painter's order, as the matching
+    _assemble_corner / _assemble_long_edge / _assemble_seam helper — onto a
+    transparent canvas, then crop to content and scale by _ASSEMBLY_ICON_SCALE.
+    The canvas MUST be 792px tall: the build-art coordinate system is y-flipped
+    against a 792 page (to_pillow) and draw_stud hardcodes that height. Returns an
+    RGBA icon that is 1:1 with the piece the builder just assembled. `kind` is one
+    of "corner" / "long_edge" / "seam"."""
+    black = (.3, .3, .3)
+    canvas = Image.new("RGBA", (1100, 792), (0, 0, 0, 0))
+    d = ImageDraw.Draw(canvas)
+    if kind == "corner":
+        # corner plate -> corner brick -> 3 one-by-one bricks (frame_for_mosiac steps 1-3)
+        draw_corner_plate(d, 4, 4, 0, 4, 2, black, 2, 2, False)
+        draw_corner_brick(d, 1, 15, 0, black, False)
+        draw_brick(d, -3, 15, 0, black, False)
+        draw_brick(d, 5, 15, 0, black, False)
+        draw_brick(d, -2, 22, 0, black, False)
+    elif kind == "long_edge":
+        # 10x2 plate -> 8x1 brick -> 2 axle bricks at the ends (frame_for_mosiac steps 4-6)
+        draw_ortho_plate(d, 3, 0, False, 10, 2, 1, black, False)
+        draw_ortho_plate(d, 0, 7, False, 8, 1, 3, black, False)
+        draw_ortho_plate(d, -4, 3, True, 2, 1, 3, black, False)
+        draw_ortho_plate(d, 16, 23, True, 2, 1, 3, black, False)
+    elif kind == "seam":
+        # 6x2 plate -> 4x1 brick (frame_for_mosiac steps 7-8)
+        draw_ortho_plate(d, 4, 0, False, 6, 2, 1, black, False)
+        draw_ortho_plate(d, 1, 7, False, 4, 1, 3, black, False)
+    else:
+        raise ValueError(f"unknown assembly kind: {kind!r}")
+    bbox = canvas.getbbox()
+    icon = canvas.crop(bbox)
+    new_w = max(1, round(icon.width * _ASSEMBLY_ICON_SCALE))
+    new_h = max(1, round(icon.height * _ASSEMBLY_ICON_SCALE))
+    return icon.resize((new_w, new_h), Image.LANCZOS)
+
+
 def _text_width(draw, text, font):
     try:
         return draw.textlength(text, font=font)
@@ -1546,6 +1592,25 @@ def draw_step_parts_legend(draw, parts, *, x=25, y=18, max_width=440, max_rows=2
             draw.text((cxc - lw / 2.0, cyc + 20), label, fill="black", font=font)
         draw.text((cxc - qw / 2.0, cyc + 36), qty_label, fill="black", font=font)
         cur_x += cell_w
+
+
+def draw_assembled_unit_legend(img, kind, qty, label, *, x=30, cy=150):
+    """Single-entry legend for a frame-PLACEMENT step: a 1:1 icon of the pre-built
+    sub-assembly being placed this step (rendered by _render_assembly_icon from the
+    same build-art primitives as the Part-1 assembly steps), plus its name and a
+    bold 'xN' count. Each placement step places exactly one kind of assembled unit,
+    so one entry is enough. `img` is the step's PIL.Image (needed to paste the RGBA
+    icon); `cy` is the icon's vertical center, sitting in the empty band between the
+    step caption and the grid. Distinct from draw_step_parts_legend, which is
+    PieceSpec-driven and labels individual pieces 'WxH'/'xN'."""
+    icon = _render_assembly_icon(kind)
+    img.paste(icon, (x, int(cy - icon.height / 2)), icon)
+    draw = ImageDraw.Draw(img)
+    label_font = get_font(24)
+    qty_font = get_font(34)
+    tx = x + icon.width + 22
+    draw.text((tx, cy - 30), label, fill="black", font=label_font)
+    draw.text((tx, cy + 2), f"x{qty}", fill="black", font=qty_font)
 
 
 def draw_big_quantity(draw, n, x, y):
@@ -2218,31 +2283,27 @@ def draw_axle_pin_map(draw, blockWidth, blockHeight, center_x, band_top, band_bo
               caption, fill="black", font=caption_font)
 
 
-def draw_frame_setup_instruction(width, height, step, output_dir):
-    img, draw = get_img_and_draw(step, True, output_dir)
-    to_reuse = img.copy()
-    draw2 = ImageDraw.Draw(to_reuse)
-    im_w, im_h = img.size
+def _compute_frame_grid(width, height):
+    """Build the base placement diagram — the light-grey baseplate grid — once, and
+    collect the dot positions for each frame piece kind (corner / long-edge / seam)
+    WITHOUT drawing them. Each placement step then copies this grid and stamps only
+    its own colored dots, so the assemble->place steps can be interleaved per piece.
+    Returns (grid_img, corner_circles, edges, seams)."""
+    grid_img = Image.new("RGBA", (612, 792), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(grid_img)
+    im_w, im_h = grid_img.size
     middle_x_of_image = (int)(im_w / 2)
-    middle_y_of_image = (int)(im_h / 2)
-    draw = ImageDraw.Draw(img)
-    font = get_font(28)
-    small_font = get_font(22)
-    
+
     blockWidth = (int)(width / 16)
     blockHeight = (int)(height / 16)
-    perimeter = (blockWidth * 2) + (blockHeight * 2)
 
-    black = to_rgb((.3, .3, .3))
     light_grey = to_rgb((.8, .8, .8))
-    red = to_rgb((.8, .1, .1))
-    blue = to_rgb((.1, .1, .8))
-    green = to_rgb((.1, .8, .1))
-    
+
     length = 60
     circle_radius = length / 4
     x_offset = middle_x_of_image - ((blockWidth / 2) * length) #center on middle of page
     y_offset = 350
+    corner_circles = []
     edges = []
     seams = []
     #draw grid/corners and calculate frame piece placement
@@ -2258,7 +2319,6 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
                 (x, y + length),
             ]
             draw.polygon(cube, light_grey, outline=(10,10,10))
-            draw2.polygon(cube, light_grey, outline=(10,10,10))
             #corners
             if (w == 0 and h == 0) or (w == blockWidth - 1 and h == 0) or (w == 0 and h == blockHeight - 1) or (w == blockWidth - 1 and h == blockHeight - 1):
                 new_x = x
@@ -2273,7 +2333,7 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
                     (new_x + circle_radius),
                     (new_y + circle_radius),
                 ]
-                draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                corner_circles.append(circle)
                 #handle one width
                 if (blockWidth == 1 and h == 0):
                     circle = [
@@ -2282,14 +2342,14 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
                         (x + circle_radius),
                         (y + circle_radius),
                     ]
-                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    corner_circles.append(circle)
                     circle = [
                         (x - circle_radius + length),
                         (y - circle_radius),
                         (x + circle_radius + length),
                         (y + circle_radius),
                     ]
-                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    corner_circles.append(circle)
                 if (blockWidth == 1 and h == blockHeight - 1):
                     circle = [
                         (x - circle_radius),
@@ -2297,14 +2357,14 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
                         (x + circle_radius),
                         (y + circle_radius + length),
                     ]
-                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    corner_circles.append(circle)
                     circle = [
                         (x - circle_radius + length),
                         (y - circle_radius + length),
                         (x + circle_radius + length),
                         (y + circle_radius + length),
                     ]
-                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    corner_circles.append(circle)
                 #Handle one height
                 if (blockHeight == 1 and w == 0):
                     circle = [
@@ -2313,7 +2373,7 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
                         (x + circle_radius),
                         (y + circle_radius),
                     ]
-                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    corner_circles.append(circle)
                 if (blockHeight == 1 and w == blockWidth - 1):
                     circle = [
                         (x - circle_radius + length),
@@ -2321,7 +2381,7 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
                         (x + circle_radius + length),
                         (y + circle_radius),
                     ]
-                    draw2.ellipse(circle, fill=red, outline=(10,10,10))
+                    corner_circles.append(circle)
 
                 #save two edges per corner (or if the width/heigh is 1) to the edges list
                 if w == 0 and h == 0:
@@ -2438,44 +2498,71 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
                     (y + circle_radius),
                 ]
                 seams.append(circle)
+    return grid_img, corner_circles, edges, seams
 
 
-    #instruct user to place corners on corners
-    draw2.text((30, 100), "Put frame corners below each corner", fill="black", font=font)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
-
-    
-    #instruct user to place 8x1 on baseplate centers
-    to_reuse = img.copy()
-    baseplate_middles = img.copy()
+def _place_corner(grid_img, corner_circles, step, output_dir):
+    """Placement step: stamp a red dot at each baseplate corner and tell the builder
+    to slot a pre-assembled corner below each one (always 4)."""
+    to_reuse = grid_img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
-    draw3 = ImageDraw.Draw(baseplate_middles)
-    #draw 8x1 on each edge face
+    red = to_rgb((.8, .1, .1))
+    for circle in corner_circles:
+        draw2.ellipse(circle, fill=red, outline=(10, 10, 10))
+    draw2.text((30, 50), "Put frame corners below each corner", fill="black", font=get_font(28))
+    # legend: one assembled corner per grid corner (always 4 — matches
+    # MosiacToOrder.GetFrameForSize corner-plate/corner-brick qty)
+    draw_assembled_unit_legend(to_reuse, "corner", 4, "corner")
+    return save_img_and_increment_step(to_reuse, step, output_dir)
+
+
+def _place_long_edge(grid_img, edges, perimeter, step, output_dir):
+    """Placement step: stamp a green dot at each baseplate edge-center and tell the
+    builder to slot a pre-assembled long edge below each (one per perimeter edge)."""
+    to_reuse = grid_img.copy()
+    draw2 = ImageDraw.Draw(to_reuse)
+    green = to_rgb((.1, .8, .1))
     for edge in edges:
-        draw2.ellipse(edge, fill=green, outline=(10,10,10))
-        draw3.ellipse(edge, fill=green, outline=(10,10,10))
+        draw2.ellipse(edge, fill=green, outline=(10, 10, 10))
+    draw2.text((30, 50), "Put long frame parts below baseplate centers", fill="black", font=get_font(28))
+    # legend: one assembled long-edge piece per perimeter baseplate edge
+    # (perimeter == GetFrameForSize 8x1-brick qty == len(edges))
+    draw_assembled_unit_legend(to_reuse, "long_edge", perimeter, "long edge")
+    return save_img_and_increment_step(to_reuse, step, output_dir)
 
-    draw2.text((30, 100), "Put long frame parts below baseplate centers", fill="black", font=font)
-    draw2.text((30, 150), "(long frame pieces have axle bricks on each side)", fill="black", font=small_font)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
-    
-    #instruct user to place 4x1 on baseplate seams if numOfConnectors is not 0
-    numOfConnectors =  perimeter - 4
-    if numOfConnectors != 0:
-        to_reuse = img.copy()
-        draw2 = ImageDraw.Draw(to_reuse)
-        for seam in seams:
-            draw2.ellipse(seam, fill=blue, outline=(10,10,10))
 
-        draw2.text((30, 100), "Put short frame parts below baseplate seams", fill="black", font=font)
-        step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
+def _place_seam(grid_img, seams, numOfConnectors, step, output_dir):
+    """Placement step: stamp a blue dot at each baseplate seam and tell the builder
+    to slot a pre-assembled seam piece below each (one per seam = numOfConnectors)."""
+    to_reuse = grid_img.copy()
+    draw2 = ImageDraw.Draw(to_reuse)
+    blue = to_rgb((.1, .1, .8))
+    for seam in seams:
+        draw2.ellipse(seam, fill=blue, outline=(10, 10, 10))
+    draw2.text((30, 50), "Put short frame parts below baseplate seams", fill="black", font=get_font(28))
+    # legend: one assembled seam piece per baseplate seam
+    # (numOfConnectors == GetFrameForSize 4x1-brick qty == len(seams))
+    draw_assembled_unit_legend(to_reuse, "seam", numOfConnectors, "seam piece")
+    return save_img_and_increment_step(to_reuse, step, output_dir)
+
+
+def _finish_frame(grid_img, edges, width, height, step, output_dir):
+    """Closing frame steps, after every assembled piece is placed: push the axle pins
+    home (locking frame to mosaic), add the top 16x1 bricks (shown on the grid with
+    the long-edge green dots as a reference), then the thin corner plates + flat side
+    plates that finish the frame's top layer."""
+    font = get_font(28)
+    blockWidth = (int)(width / 16)
+    blockHeight = (int)(height / 16)
+    middle_x_of_image = grid_img.size[0] // 2
+    middle_y_of_image = grid_img.size[1] // 2
+    green = to_rgb((.1, .8, .1))
 
     #draw axle pins going into axle blocks
     img, draw = get_img_and_draw(step, True, output_dir)
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
-
-    draw2.text((30, 100), "Push axle pins into holes all the way", fill="black", font=font)
+    draw2.text((30, 50), "Push axle pins into holes all the way", fill="black", font=font)
     draw2.text((30, middle_y_of_image), "The frame and mosaic should be connected", fill="black", font=font)
     # axle BRICK (with the cross-shaped hole) now on the RIGHT side
     draw_ortho_plate(draw2, -4, 24, True, 2, 1, 3, (.3, .3, .3), False)
@@ -2488,60 +2575,53 @@ def draw_frame_setup_instruction(width, height, step, output_dir):
     draw_arrow(draw2, 200, 200, 100, 22, 40, 44, fill="black")
     # lower-half map: where every axle pin locks the frame onto the mosaic
     draw_axle_pin_map(draw2, blockWidth, blockHeight, middle_x_of_image, 430, 740)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
 
-    #display plate and brick layer (those layers should be complete now)
-    draw3.text((30, 100), "Place 16x1 bricks here to complete the layer", fill="black", font=font)
+    #display plate and brick layer (those layers should be complete now), drawn on
+    #the grid with the long-edge (green) dots as a position reference
+    baseplate_middles = grid_img.copy()
+    draw3 = ImageDraw.Draw(baseplate_middles)
+    for edge in edges:
+        draw3.ellipse(edge, fill=green, outline=(10, 10, 10))
+    draw3.text((30, 50), "Place 16x1 bricks here to complete the layer", fill="black", font=font)
     draw_plate_sized(draw3, -3, 10, 1, 16, 4, (.3, .3, .3))
-    step = save_img_and_increment_step(baseplate_middles, step, output_dir) # Save current step
+    step = save_img_and_increment_step(baseplate_middles, step, output_dir)
 
     #add top layer of thin corner plates and flat 4x1 plates
     img, draw = get_img_and_draw(step, True, output_dir)
-    draw.text((30, 100), "Place corner plates on corners", fill="black", font=font)
+    draw.text((30, 50), "Place corner plates on corners", fill="black", font=font)
     draw_corner_plate(draw, 0, 8, 0, 3, 1, (.3, .3, .3), 2, 2, False) #3x3 corner
-    draw_ortho_plate(draw, 16, -8, False, 4, 1, 1, (.3, .3, .3), False, True) 
+    draw_ortho_plate(draw, 16, -8, False, 4, 1, 1, (.3, .3, .3), False, True)
     draw.text((30, middle_y_of_image), "Place all flat plates to fill the sides", fill="black", font=font)
-
-    step = save_img_and_increment_step(img, step, output_dir) # Save current step
+    step = save_img_and_increment_step(img, step, output_dir)
     return step
 
 
-#function for drawing frame around mosiac, saving each step until frame is complete
-def draw_frame_for_mosiac(width, height, step, output_dir):
-    blockWidth = (int)(width / 16)
-    blockHeight = (int)(height / 16)
+def _assemble_corner(step, output_dir):
+    """Build ONE frame corner: corner plate, then corner brick, then 3 one-by-one
+    bricks. Final sub-step shows xN = 4 (one corner per baseplate corner)."""
     black = (.3, .3, .3)
-    perimeter = (blockWidth * 2) + (blockHeight * 2)
-    
-    #draw corner plate
     img, draw = get_img_and_draw(step, True, output_dir) #want clean state for this
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
-
-    # draw stuff (highlight on draw2 and no highlight on draw)
     draw_corner_plate(draw, 4, 4, 0, 4, 2, black, 2, 2, False)
     draw_corner_plate(draw2, 4, 4, 0, 4, 2, black, 2, 2, True)
     draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6483102], 1)])  # corner plate x1 (per assembled corner)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
 
-    #draw corner brick
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
     draw_corner_brick(draw, 1, 15, 0, black, False)
     draw_corner_brick(draw2, 1, 15, 0, black, True)
     draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[235726], 1)])  # corner brick x1 (per assembled corner)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
 
-    #add 1x1 bricks (to side of corner brick and top edge of corner brick)
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
-    #piece 1
     draw_brick(draw, -3, 15, 0, black, False)
     draw_brick(draw2, -3, 15, 0, black, True)
-    #piece 2
     draw_brick(draw, 5, 15, 0, black, False)
     draw_brick(draw2, 5, 15, 0, black, True)
-    #piece 3
     draw_brick(draw, -2, 22, 0, black, False)
     draw_brick(draw2, -2, 22, 0, black, True)
     # legend: 3 one-by-one bricks per assembled corner (onexoneBricks in
@@ -2549,8 +2629,14 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     # complete — show how many corners to make (4, one per baseplate corner).
     draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300526], 3)])
     draw_big_quantity(draw2, 4, 430, 330)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
+    return step
 
+
+def _assemble_long_edge(perimeter, step, output_dir):
+    """Build ONE long frame edge: 10x2 plate, then 8x1 brick, then 2 axle bricks at
+    the ends. Final sub-step shows xN = perimeter (one per baseplate edge)."""
+    black = (.3, .3, .3)
     #set up wider background to capture entire piece
     bg_color = (255, 255, 255, 255) # white background
     image_size = (800, 792)
@@ -2562,7 +2648,7 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     draw_ortho_plate(draw, 3, 0, False, 10, 2, 1, black, False)
     draw_ortho_plate(draw2, 3, 0, False, 10, 2, 1, black, True)
     draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[383226], 1)])  # 10x2 plate x1 (per assembled long edge)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
 
     #8x1 brick: 1
     to_reuse = img.copy()
@@ -2570,15 +2656,13 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     draw_ortho_plate(draw, 0, 7, False, 8, 1, 3, black, False)
     draw_ortho_plate(draw2, 0, 7, False, 8, 1, 3, black, True)
     draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[300826], 1)])  # 8x1 brick x1 (per assembled long edge)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
 
     #2x1 axle bricks: 2
     to_reuse = img.copy()
     draw2 = ImageDraw.Draw(to_reuse)
-    #left axle brick
     draw_ortho_plate(draw, -4, 3, True, 2, 1, 3, black, False)
     draw_ortho_plate(draw2, -4, 3, True, 2, 1, 3, black, True)
-    #right axle brick
     draw_ortho_plate(draw, 16, 23, True, 2, 1, 3, black, False)
     draw_ortho_plate(draw2, 16, 23, True, 2, 1, 3, black, True)
     # legend: 2 axle bricks per assembled long edge (twoxoneBricksWithAxleHole).
@@ -2586,43 +2670,66 @@ def draw_frame_for_mosiac(width, height, step, output_dir):
     # long edges to make: one per baseplate edge = perimeter = 2*(blockW+blockH).
     draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[6178922], 2)])
     draw_big_quantity(draw2, perimeter, 600, 210)
-    step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
-
-    #each block that is connected to another block should have a 4x1 brick and 6x2 plate
-    numOfConnectors = perimeter - 4
-    if numOfConnectors != 0:
-        #6x2 plate
-        img, draw = get_img_and_draw(step, True, output_dir) #get clean slate for this step
-        to_reuse = img.copy()
-        draw2 = ImageDraw.Draw(to_reuse)
-        draw_ortho_plate(draw, 4, 0, False, 6, 2, 1, black, False)
-        draw_ortho_plate(draw2, 4, 0, False, 6, 2, 1, black, True)
-        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[379526], 1)])  # 6x2 plate x1 (per assembled connector)
-        step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
-
-        #4x1 brick
-        to_reuse = img.copy()
-        draw2 = ImageDraw.Draw(to_reuse)
-        draw_ortho_plate(draw, 1, 7, False, 4, 1, 3, black, False)
-        draw_ortho_plate(draw2, 1, 7, False, 4, 1, 3, black, True)
-        # legend: 1 4x1 brick per assembled connector. This is the connector's
-        # final sub-step, so it's now complete — show how many connectors to make:
-        # one per baseplate seam = numOfConnectors.
-        draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[301026], 1)])
-        draw_big_quantity(draw2, numOfConnectors, 450, 330)
-        step = save_img_and_increment_step(to_reuse, step, output_dir) # Save current step (with current step pieces highlighted)
-
-    #return step once all actions are taken
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
     return step
 
-#high level function to create instructions for the grid and frame setup that calls medium level functions                                                                                                                                                                                          
+
+def _assemble_seam(numOfConnectors, step, output_dir):
+    """Build ONE short seam piece: 6x2 plate, then 4x1 brick. Final sub-step shows
+    xN = numOfConnectors (one per baseplate seam). Only called when seams exist."""
+    black = (.3, .3, .3)
+    #6x2 plate
+    img, draw = get_img_and_draw(step, True, output_dir) #get clean slate for this step
+    to_reuse = img.copy()
+    draw2 = ImageDraw.Draw(to_reuse)
+    draw_ortho_plate(draw, 4, 0, False, 6, 2, 1, black, False)
+    draw_ortho_plate(draw2, 4, 0, False, 6, 2, 1, black, True)
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[379526], 1)])  # 6x2 plate x1 (per assembled connector)
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
+
+    #4x1 brick
+    to_reuse = img.copy()
+    draw2 = ImageDraw.Draw(to_reuse)
+    draw_ortho_plate(draw, 1, 7, False, 4, 1, 3, black, False)
+    draw_ortho_plate(draw2, 1, 7, False, 4, 1, 3, black, True)
+    # legend: 1 4x1 brick per assembled connector. This is the connector's final
+    # sub-step, so it's now complete — show how many connectors to make: one per
+    # baseplate seam = numOfConnectors.
+    draw_step_parts_legend(draw2, [(ps.SPEC_BY_ELEMENT[301026], 1)])
+    draw_big_quantity(draw2, numOfConnectors, 450, 330)
+    step = save_img_and_increment_step(to_reuse, step, output_dir)
+    return step
+
+
+#high level function to create instructions for the frame setup. The frame is built
+#and placed one piece kind at a time — corner (build then place), long edge (build
+#then place), seam (build then place, only when the mosaic has seams) — followed by
+#the closing axle-pin / 16x1 / corner-plate steps.
 def draw_frame_instructions(width, height, step, output_dir=None):
-    #shows the connection of grid cells into columns and column into grid (now handled externally)
-    #step = draw_grid_setup_instruction(step)
-    #shows steps for making the pieces of the frame
-    step = draw_frame_for_mosiac(width, height, step, output_dir)
-    #show steps for putting together frame pieces
-    step = draw_frame_setup_instruction(width, height, step, output_dir)
+    blockWidth = width // 16
+    blockHeight = height // 16
+    perimeter = (blockWidth * 2) + (blockHeight * 2)
+    numOfConnectors = perimeter - 4
+
+    #placement grid + dot positions for every piece kind, computed once and reused
+    grid_img, corner_circles, edges, seams = _compute_frame_grid(width, height)
+
+    #long edge: build the piece, then place one per perimeter edge (the long edges
+    #go in before the corners)
+    step = _assemble_long_edge(perimeter, step, output_dir)
+    step = _place_long_edge(grid_img, edges, perimeter, step, output_dir)
+
+    #corner: build the piece, then place all 4
+    step = _assemble_corner(step, output_dir)
+    step = _place_corner(grid_img, corner_circles, step, output_dir)
+
+    #seam: build the piece, then place one per seam (skipped when there are none)
+    if numOfConnectors != 0:
+        step = _assemble_seam(numOfConnectors, step, output_dir)
+        step = _place_seam(grid_img, seams, numOfConnectors, step, output_dir)
+
+    #closing steps: axle pins -> 16x1 bricks -> corner/flat top plates
+    step = _finish_frame(grid_img, edges, width, height, step, output_dir)
     return step #return step for any future use
 
 # Shared hook-piece shape, used by both the hook-assembly step and the assembled-
@@ -2931,7 +3038,7 @@ def draw_final_view(step, composite, want_frame, output_dir=None):
     font = get_font(20)
     margin = 50
     placement = (margin, margin)
-    text = "Admire your artwork"
+    text = "Admire your artwork!"
     draw.text(placement, text, fill="black", font=font)
 
 
