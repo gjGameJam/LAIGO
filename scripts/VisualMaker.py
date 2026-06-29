@@ -2727,6 +2727,20 @@ def draw_hook_assembly_instruction(width, height, step, output_dir=None):
               "Push the 2 black pins into the top of each hook.",
               fill="black", font=get_font(20))
 
+    # --- legend: the pieces that make ONE completed hook (1 bracket + 2 pins) ---
+    legend_font = get_font(16)
+    legend_y = 95
+    bx = margin + 30
+    _draw_hanging_bracket(draw, bx, legend_y, 40.0, 40.0 * _HOOK_ASPECT, grey,
+                          hole_y_frac=_HOOK_HOLE_Y_FRAC, notch_h_frac=_HOOK_NOTCH_H_FRAC)
+    draw.text((bx + 30, legend_y - 9),
+              "hanging bracket  x1", fill="black", font=legend_font)
+    pin_x = bx + 232
+    _draw_connector_rod(draw, pin_x, legend_y, 13, black,
+                        rod_len=2.0, rod_r=0.17, col_r=0.23, col_len=0.18, col_at=0.455)
+    draw.text((pin_x + 26, legend_y - 9),
+              "black pin  x2", fill="black", font=legend_font)
+
     # Enlarged front-view hook (the shared _HOOK_* shape: taller panel, holes
     # centered, notch in the bottom half). Anchored to a fixed bottom edge so only
     # the top grew upward relative to the original short version.
@@ -2868,7 +2882,7 @@ def draw_backhook_instruction(width, height, step, output_dir=None):
 
     # Caption under the grid.
     cap_font = get_font(20)
-    caption = "Push the black pins up into the + holes to lock on"
+    caption = "Push the black pins up into the pin holes"
     cap_w = _text_width(draw, caption, cap_font)
     draw.text((center_x - cap_w / 2.0, grid_bottom + 12),
               caption, fill="black", font=cap_font)
