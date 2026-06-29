@@ -3035,7 +3035,7 @@ def draw_final_view(step, composite, want_frame, output_dir=None):
     img.paste(composite_resized, (composite_x, composite_y))
 
 
-    font = get_font(20)
+    font = get_font()
     margin = 50
     placement = (margin, margin)
     text = "Admire your artwork!"
