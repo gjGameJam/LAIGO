@@ -11,17 +11,54 @@ from .Util import (
     SaveDictAsJsonsOptimized,
     log_info,
 )
+from .mosaic_types import STUDS_PER_BLOCK  # D-035: single source of truth for the 16-stud block
 
 PALETTE_DICT = GetPaletteDict()
+# D-036: palette index -> element_id, in LEGO_PALETTE_RGB order (= dict insertion
+# order, since GetPaletteRGBArray uses the same dict keys). The pipeline hands us
+# palette INDICES, so we count them with np.bincount and map straight to element
+# IDs — no RGB round-trip, no np.unique(axis=0) sort, and no off-palette KeyError
+# (every index is a valid palette slot by construction).
+PALETTE_ELEMENT_IDS = list(PALETTE_DICT.values())
+_N_PALETTE = len(PALETTE_ELEMENT_IDS)
+
+
+def _accumulate_index_counts(order, idx_flat):
+    """Add per-element-id pixel counts from a 1-D array of palette indices into
+    `order` (a defaultdict(int)), via a single O(N) np.bincount."""
+    if idx_flat.size == 0:
+        return
+    counts = np.bincount(idx_flat, minlength=_N_PALETTE)
+    if counts.size > _N_PALETTE:
+        # An index >= palette size means a pipeline invariant was violated. Fail
+        # loud rather than silently shipping a kit missing bricks — this is the
+        # index-path successor to the RGB path's D-008 guard.
+        bad = int(np.flatnonzero(counts[_N_PALETTE:]).min() + _N_PALETTE)
+        raise RuntimeError(
+            f"Mosaic palette index {bad} is out of range (palette size "
+            f"{_N_PALETTE}). Refusing to ship a kit missing bricks."
+        )
+    for i in range(_N_PALETTE):
+        c = int(counts[i])
+        if c:
+            order[PALETTE_ELEMENT_IDS[i]] += c
 
 # D-013: get_order_lists_file_path / empty_order_list_folder were the legacy CLI
 # path (output_dir is None -> write to the project-root scratch dir). Removed;
 # output_dir is now required and the API worker is the only caller.
 
-def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
-    """
-    Analyzes images to produce a consolidated LEGO piece order.
-    Optimized for CPU efficiency and minimal memory allocation.
+def GenerateOrderList(fg_idx, fg_visible_mask, bg_idx, want_frame, output_dir):
+    """Build the consolidated LEGO piece order from the palette-INDEX arrays the
+    pipeline already computed (D-036), instead of re-deriving palette identity from
+    RGB pixels (an np.unique(axis=0) sort + RGB->dict lookup that also created the
+    off-palette KeyError surface — now impossible, since every index is a valid
+    palette slot).
+
+    bg_idx          : (H, W) int palette indices, counted in full (the 2D mosaic, or
+                      the simplified 3D background).
+    fg_idx          : (H, W) int palette indices for the 3D foreground, or None (2D).
+    fg_visible_mask : bool (H, W) — count fg_idx only where True (the opaque studs);
+                      ignored when fg_idx is None.
     """
     # D-013: output_dir is required (CLI fallback removed).
     if output_dir is None:
@@ -29,72 +66,35 @@ def GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir):
 
     log_info("creating order list...")
 
-    # 1. Initialize with Baseplates
-    # We wrap the result in a defaultdict(int) to allow safe += operations later
-    width, height = bg_rgba.size
+    # 1. Baseplates (structural). The mosaic is at stud resolution, so the index
+    # array dims ARE the stud width/height GetBaseplatesForSize expects.
+    height, width = bg_idx.shape
     order = defaultdict(int, GetBaseplatesForSize(width, height))
 
-    # 2. Layer: Background
-    # Reshape (H, W, 3) -> (N, 3) for fast unique counting
-    bg_arr = np.asarray(bg_rgba)[:, :, :3].reshape(-1, 3)
-    unique_rgb, counts = np.unique(bg_arr, axis=0, return_counts=True)
-    
-    for rgb_row, count in zip(unique_rgb, counts):
-        color_tuple = tuple(int(c) for c in rgb_row)
-        try:
-            piece_id = PALETTE_DICT[color_tuple]
-            order[piece_id] += int(count)
-        except KeyError:
-            # D-008: fail loud rather than silently dropping pieces. Every mosaic
-            # pixel is built FROM the palette, so an off-palette color is a
-            # pipeline-invariant violation. Dropping it would ship a kit missing
-            # bricks; raising fails the job into manifest_failed.json (no charge,
-            # since checkout reads order_list.json only after job completion).
-            raise RuntimeError(
-                f"Mosaic pixel color {color_tuple} (layer=background) is not in "
-                "LEGO_PALETTE_RGB_DICT. Refusing to ship a kit missing bricks."
-            ) from None
+    # 2. Background / 2D layer: every pixel is a brick.
+    _accumulate_index_counts(order, bg_idx.reshape(-1))
 
-    # 3. Layer: Foreground
-    if fg_out_rgba is not None:
-        fg_arr = np.asarray(fg_out_rgba)
-        # Process only pixels with Alpha > 0
-        visible_mask = fg_arr[:, :, 3] > 0
-        fg_rgb = fg_arr[visible_mask, :3]
-        
-        unique_fg, fg_counts = np.unique(fg_rgb, axis=0, return_counts=True)
-        for rgb_row, count in zip(unique_fg, fg_counts):
-            color_tuple = tuple(int(c) for c in rgb_row)
-            try:
-                piece_id = PALETTE_DICT[color_tuple]
-                order[piece_id] += int(count)
-            except KeyError:
-                # D-008: see background layer above — fail loud, never drop.
-                raise RuntimeError(
-                    f"Mosaic pixel color {color_tuple} (layer=foreground) is not "
-                    "in LEGO_PALETTE_RGB_DICT. Refusing to ship a kit missing bricks."
-                ) from None
+    # 3. Foreground layer (3D only): only the opaque studs.
+    if fg_idx is not None:
+        _accumulate_index_counts(order, fg_idx[fg_visible_mask])
 
-    # 4. Layer: Frame
+    # 4. Frame.
     if want_frame:
         frame_parts = GetFrameForSize(width, height)
         for pid, qty in frame_parts.items():
             order[pid] += qty
 
-    # 5. Save Output
+    # 5. Save.
     output_json_path = Path(output_dir) / "OrderLists" / "order_list.json"
-
-    # Pass the defaultdict directly to the utility
     SaveDictAsJsonsOptimized(order, output_json_path)
-    
     log_info(f"Sum of all pieces: {sum(order.values())}")
     return order
 
 def GetBaseplatesForSize(width, height):
     """Calculates structural baseplate components."""
     # Floor division (//) is faster than float division + int() cast
-    blockWidth = width // 16
-    blockHeight = height // 16
+    blockWidth = width // STUDS_PER_BLOCK
+    blockHeight = height // STUDS_PER_BLOCK
 
     numOfBlocks = blockWidth * blockHeight
     numOfGreenConnectors = (2 * (blockWidth - 1)) * blockHeight
@@ -119,8 +119,8 @@ def GetBaseplatesForSize(width, height):
 
 def GetFrameForSize(width, height):
     """Calculates frame components based on mosaic dimensions."""
-    blockWidth = width // 16
-    blockHeight = height // 16
+    blockWidth = width // STUDS_PER_BLOCK
+    blockHeight = height // STUDS_PER_BLOCK
     num_of_corners = 4
 
     cornerBlocks = num_of_corners

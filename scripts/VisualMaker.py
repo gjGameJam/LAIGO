@@ -1,9 +1,11 @@
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import functools
 import random
 import math
 from .Util import GetOutputPathDir, log_debug, log_info, log_error
 from . import piece_specs as ps
+from .mosaic_types import STUDS_PER_BLOCK  # D-035: single source of truth for the 16-stud block
 # -----------------------------
 # CONSTANTS
 # -----------------------------
@@ -36,6 +38,11 @@ def get_file_name(step_num, output_dir=None):
 _BUNDLED_FONT = Path(__file__).parent / "fonts" / "LiberationSans-Regular.ttf"
 
 # helper function to get the instruction font at a given size
+# D-039: cache by size — ImageFont.truetype re-reads + re-parses the TTF from disk
+# on every call, and this runs per saved step + per legend (1000+ times on a large
+# mosaic). Font objects are immutable and used read-only, so the cached object
+# renders identically; only the handful of distinct sizes are ever loaded.
+@functools.lru_cache(maxsize=None)
 def get_font(size=32):
     try:
         # Load the repo-bundled TTF by absolute path -> same on every platform.
@@ -1047,12 +1054,12 @@ def get_block_xy(blockX, blockY):
     return [baseX, baseY]
 
 
-#pass in array of 16 length to draw a column of plates on a specific column (if element is empty then no plate is needed)
+#pass in array of STUDS_PER_BLOCK length to draw a column of plates on a specific column (if element is empty then no plate is needed)
 def draw_plate_column(draw, start_blockX, height, colors, highlight):
-    if len(colors) != 16:
-        log_error("need 16 color indexes")
+    if len(colors) != STUDS_PER_BLOCK:
+        log_error(f"need {STUDS_PER_BLOCK} color indexes")
         return
-    for i in range(15, -1, -1): #go from 15 to 0
+    for i in range(STUDS_PER_BLOCK - 1, -1, -1): #top plate down to 0
         #paint back to front to adhere to painters algorithm
         #print("DRAWING color:", colors[i])
         if (colors[i][3] != 0):
@@ -1878,8 +1885,8 @@ def draw_grid_setup_instruction(step, output_dir=None):
     width, height = img.size
     draw = ImageDraw.Draw(img)
 
-    blockWidth = (int)(width / 16)
-    blockHeight = (int)(height / 16)
+    blockWidth = (int)(width / STUDS_PER_BLOCK)
+    blockHeight = (int)(height / STUDS_PER_BLOCK)
     
     if blockHeight > 1:
         #instruct user to connect columns via the red connectors going down
@@ -2294,8 +2301,8 @@ def _compute_frame_grid(width, height):
     im_w, im_h = grid_img.size
     middle_x_of_image = (int)(im_w / 2)
 
-    blockWidth = (int)(width / 16)
-    blockHeight = (int)(height / 16)
+    blockWidth = (int)(width / STUDS_PER_BLOCK)
+    blockHeight = (int)(height / STUDS_PER_BLOCK)
 
     light_grey = to_rgb((.8, .8, .8))
 
@@ -2552,8 +2559,8 @@ def _finish_frame(grid_img, edges, width, height, step, output_dir):
     the long-edge green dots as a reference), then the thin corner plates + flat side
     plates that finish the frame's top layer."""
     font = get_font(28)
-    blockWidth = (int)(width / 16)
-    blockHeight = (int)(height / 16)
+    blockWidth = (int)(width / STUDS_PER_BLOCK)
+    blockHeight = (int)(height / STUDS_PER_BLOCK)
     middle_x_of_image = grid_img.size[0] // 2
     middle_y_of_image = grid_img.size[1] // 2
     green = to_rgb((.1, .8, .1))
@@ -2706,8 +2713,8 @@ def _assemble_seam(numOfConnectors, step, output_dir):
 #then place), seam (build then place, only when the mosaic has seams) — followed by
 #the closing axle-pin / 16x1 / corner-plate steps.
 def draw_frame_instructions(width, height, step, output_dir=None):
-    blockWidth = width // 16
-    blockHeight = height // 16
+    blockWidth = width // STUDS_PER_BLOCK
+    blockHeight = height // STUDS_PER_BLOCK
     perimeter = (blockWidth * 2) + (blockHeight * 2)
     numOfConnectors = perimeter - 4
 
@@ -2822,8 +2829,8 @@ def draw_hook_assembly_instruction(width, height, step, output_dir=None):
     img, draw = get_img_and_draw(step, True, output_dir)
     log_info("drawing hook-assembly step...")
 
-    blockWidth = width // 16
-    blockHeight = height // 16
+    blockWidth = width // STUDS_PER_BLOCK
+    blockHeight = height // STUDS_PER_BLOCK
     nailHooks = min(blockWidth * blockHeight, 2)
 
     grey = (0.30, 0.30, 0.30)
@@ -2890,8 +2897,8 @@ def draw_backhook_instruction(width, height, step, output_dir=None):
     img, draw = get_img_and_draw(step, True, output_dir)
     log_info("drawing backhook attachment step...")
 
-    blockWidth = width // 16
-    blockHeight = height // 16
+    blockWidth = width // STUDS_PER_BLOCK
+    blockHeight = height // STUDS_PER_BLOCK
     numOfBlocks = blockWidth * blockHeight
     nailHooks = min(numOfBlocks, 2)
 
@@ -2957,7 +2964,7 @@ def draw_backhook_instruction(width, height, step, output_dir=None):
     # hangs BELOW the frame's top edge with its pins pointing UP into the frame
     # holes, so top-to-bottom we stack: the "+" pin holes (on the frame edge), an
     # up-arrow, then the hook below it.
-    studs_per_block = 16
+    studs_per_block = STUDS_PER_BLOCK
     bw = (5.0 / studs_per_block) * length          # ~5 studs wide (front-view face)
     bh = bw * _HOOK_ASPECT                           # taller "same shape" hook
     pin_dx = bw * 0.34                               # the hook's two pin columns

@@ -53,7 +53,7 @@ import traceback
 import logging
 import sys
 from PIL import Image
-from .picToMosiac import MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH
+from .picToMosiac import MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH, STUDS_PER_BLOCK
 # D-010: run_job + _write_error_manifest live in the leaf module scripts/worker.py
 # (imports only picToMosiac + stdlib). ProcessPoolExecutor spawn-mode re-imports
 # the callable's defining module in every worker; keeping run_job out of Main.py
@@ -69,7 +69,6 @@ from .checkout.gate_router import checkout_gate_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
 from . import jobs_store_dispatch as jobs_store
-import gc
 
 # -----------------------------
 # LOGGING SETUP
@@ -110,7 +109,9 @@ JOB_SAGA_RETENTION_DAYS = int(os.getenv("JOB_SAGA_RETENTION_DAYS", 90))
 # fixes (D-009/D-010/D-011). .env ships MAX_WORKERS=1 to keep the switch off.
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "1"))
 MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "20"))
-STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
+# D-035: STUDS_PER_BLOCK is imported from .picToMosiac (sourced from
+# .mosaic_types) — a fixed structural constant, no longer the STUD_WIDTH_OF_BLOCK
+# env var the downstream instruction/order code ignored.
 upload_mbs = int(os.getenv("MAX_UPLOAD_SIZE_MB", 250))
 MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
 
@@ -556,7 +557,9 @@ async def real_ip_middleware(request: Request, call_next):
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     # B58: do NOT echo exception class/message to the client (info disclosure).
-    # Operator greps laigo.log for request_id to find the full traceback.
+    # Operator greps laigo.log for request_id to find the full traceback. (This
+    # relies on the D-034 wiring: logger.py attaches the file handler to the
+    # "laigo" logger; without it these records reach stdout only.)
     request_id = secrets.token_hex(8)
     log.error(
         f"Unhandled exception [request_id={request_id}] on {request.method} {request.url}: "
@@ -1070,6 +1073,17 @@ async def queue_status():
     }
 
 
+def _validate_image(path: Path) -> None:
+    """Full pixel decode + RGB conversion to reject truncated/invalid uploads up
+    front (D-006: a header sniff alone passes a truncated JPEG that then fails in
+    the worker 5-30s later). Synchronous and potentially slow — img.load() decodes
+    the entire upload — so callers must run it via asyncio.to_thread (D-038), never
+    inline on the event loop."""
+    with Image.open(path) as img:
+        img.load()
+        img.convert("RGB")
+
+
 @app.post("/generate")
 async def generate(
     file: UploadFile = File(...),
@@ -1154,8 +1168,10 @@ async def generate(
                     log.warning(f"Job {job_id} rejected — file too large ({size} bytes)")
                     raise HTTPException(status_code=413, detail="File too large")
                 f.write(chunk)
-            f.flush()
-            os.fsync(f.fileno())
+            # D-038: no os.fsync here — it forced a blocking disk sync on the event
+            # loop for durability we don't need (a transient upload; if the server
+            # crashes the job is lost anyway). Closing the file (end of this `with`)
+            # flushes to the OS, which is all the worker subprocess needs to read it.
     except HTTPException:
         raise
     except Exception as e:
@@ -1167,13 +1183,12 @@ async def generate(
     log.info(f"Job {job_id} file saved | size={size} bytes")
 
     try:
-        # D-006: img.verify() only sniffs headers — a truncated JPEG/TIFF with
-        # valid markers passes and then fails inside the worker 5-30s later.
-        # Force a full pixel decode + the RGB conversion the pipeline uses so
-        # bad uploads are rejected with an immediate 400, not a doomed job spawn.
-        with Image.open(input_file) as img:
-            img.load()
-            img.convert("RGB")
+        # D-006: a header sniff (img.verify()) passes a truncated JPEG/TIFF that
+        # then fails inside the worker 5-30s later, so force a full pixel decode +
+        # RGB conversion to reject bad uploads with an immediate 400.
+        # D-038: run that decode in a worker thread — img.load() on an up-to-250 MB
+        # upload would otherwise block the event loop (every /health and /jobs poll).
+        await asyncio.to_thread(_validate_image, input_file)
     except Exception as e:
         log.warning(f"Job {job_id} rejected — invalid image: {type(e).__name__}: {e}")
         input_file.unlink(missing_ok=True)

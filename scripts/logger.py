@@ -48,6 +48,20 @@ if not logger.handlers:
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
+        # D-034: Main.py (and the scheduler/reconcile threads) log under the
+        # "laigo" name via logging.getLogger("laigo") — a SEPARATE tree from this
+        # "laigoLOG" logger, configured by Main's logging.basicConfig(stream=stdout)
+        # with NO file handler. So request/lifecycle/exception logs — including the
+        # global handler's request_id traceback that operators are told to grep for
+        # in laigo.log — went to stdout only, never the file. Attach the SAME
+        # file_handler instance (NOT a second RotatingFileHandler — that would open
+        # a second handle to the file and race rotation, the exact D-009 hazard) so
+        # "laigo" records also land in laigo.log. "laigo" keeps propagate=True, so
+        # stdout (via root's basicConfig handler) is unchanged; each record hits the
+        # file once, since "laigo" and "laigoLOG" are sibling trees under root.
+        app_logger = logging.getLogger("laigo")
+        app_logger.addHandler(file_handler)
+
     # Console logging (parent + worker; uvicorn captures worker stdout)
     console = logging.StreamHandler()
     console.setFormatter(formatter)

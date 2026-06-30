@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import List
 from .Util import log_info, log_debug
+from .mosaic_types import STUDS_PER_BLOCK  # D-035: single source of truth for the 16-stud block
 
 # D-013: the legacy CLI path (empty_instructions_folder + the
 # `if output_dir is None:` branches that fell back to GetOutputPathDir()) has
@@ -17,8 +18,13 @@ def count_colors(img_rgba):
     arr = np.asarray(img_rgba, dtype=np.uint8)
     if arr.shape[2] != 4:  # D-023: explicit raise, not assert (survives python -O)
         raise ValueError(f"count_colors expects RGBA, got {arr.shape[2]} channels")
-    rgb = arr[:, :, :3].reshape(-1, 3)
-    return len(np.unique(rgb, axis=0))
+    # D-043: pack each RGB into one uint32 and run a 1-D np.unique instead of the
+    # O(N log N) lexicographic sort np.unique(axis=0) does over ~400k pixel rows
+    # (twice per job, only to log "BG/FG unique RGB colors: N"). 8 bits/channel is
+    # a bijection, so the distinct count is identical.
+    rgb = arr[:, :, :3].reshape(-1, 3).astype(np.uint32)
+    keys = (rgb[:, 0] << 16) | (rgb[:, 1] << 8) | rgb[:, 2]
+    return len(np.unique(keys))
 
 
 
@@ -88,9 +94,9 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
         raise ValueError("output_dir is required")
     step = 1
     bg_w, bg_h = bg_rgba.size
-    blockWidth = (int)(bg_w / 16)
-    blockHeight = (int)(bg_h / 16)
-    #divide pixel width and height by 16 (length of backplate block) to determine row and column max
+    blockWidth = bg_w // STUDS_PER_BLOCK
+    blockHeight = bg_h // STUDS_PER_BLOCK
+    #divide pixel width and height by the block edge (studs) to determine row and column max
     log_debug(f"creating instructions for width {blockWidth} and height {blockHeight}")
     #convert fg and bg rgba into arrays for each block [width][height][16][16]
     if not fg_rgba is None:
@@ -109,8 +115,8 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
         raise ValueError(f"bg must have 4 channels (RGBA), got {C}")
     if W != bg_w or H != bg_h:
         raise ValueError(f"shape mismatch: numpy ({W},{H}) vs PIL ({bg_w},{bg_h})")
-    if W % 16 or H % 16:
-        raise ValueError(f"mosaic dims must be divisible by 16, got ({W},{H})")
+    if W % STUDS_PER_BLOCK or H % STUDS_PER_BLOCK:
+        raise ValueError(f"mosaic dims must be divisible by {STUDS_PER_BLOCK}, got ({W},{H})")
 
     bg_color_count = count_colors(bg_rgba)
     log_info(f"BG unique RGB colors: {bg_color_count}")
@@ -130,15 +136,15 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
             step, img = GenerateBasePlateInstructions(blockH, blockHeight, blockW, blockWidth, step, output_dir)
             draw = ImageDraw.Draw(img)
             #layer 1: background
-            y0, y1 = blockH*16, (blockH+1)*16
-            x0, x1 = blockW*16, (blockW+1)*16
-            bg_block = bg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
+            y0, y1 = blockH*STUDS_PER_BLOCK, (blockH+1)*STUDS_PER_BLOCK
+            x0, x1 = blockW*STUDS_PER_BLOCK, (blockW+1)*STUDS_PER_BLOCK
+            bg_block = bg[y0:y1, x0:x1, :]   # shape: (STUDS_PER_BLOCK, STUDS_PER_BLOCK, 4)
             for col in range(0, len(bg_block[0])):
-                #loop over columns of 16x16 block (each column is 16 plates)
+                #loop over columns of the block (each column is STUDS_PER_BLOCK plates)
                 to_reuse = img.copy()
                 draw2 = ImageDraw.Draw(to_reuse)
                 # take the column and convert to a list of 3-element tuples (R,G,B)
-                column_rgb = [tuple(c / 255.0 for c in bg_block[15 - y, col]) for y in range(16)]
+                column_rgb = [tuple(c / 255.0 for c in bg_block[STUDS_PER_BLOCK - 1 - y, col]) for y in range(STUDS_PER_BLOCK)]
                 draw_plate_column(draw, col, 0, column_rgb, False) #zero height no highlight
                 draw_plate_column(draw2, col, 0, column_rgb, True) #zero height with highlight
                 # legend of the pieces placed this step (opaque studs only)
@@ -148,12 +154,12 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
 
             #layer 2: foreground
             if not fg_rgba is None:
-                fg_block = fg[y0:y1, x0:x1, :]   # shape: (16, 16, 4)
+                fg_block = fg[y0:y1, x0:x1, :]   # shape: (STUDS_PER_BLOCK, STUDS_PER_BLOCK, 4)
                 for col in range(0, len(fg_block[0])):
                     to_reuse = img.copy()
                     draw2 = ImageDraw.Draw(to_reuse)
                     # take the column and convert to a list of 3-element tuples (R,G,B,A)
-                    column_rgba = [tuple(c / 255.0 for c in fg_block[15 - y, col]) for y in range(16)]
+                    column_rgba = [tuple(c / 255.0 for c in fg_block[STUDS_PER_BLOCK - 1 - y, col]) for y in range(STUDS_PER_BLOCK)]
                     if all(pixel[3] == 0 for pixel in column_rgba):
                         # Entire column is transparent, skip
                         continue
@@ -207,8 +213,8 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
 #helper test function
 def sample_column(img_np, blockW, blockH, col):
     return [
-        tuple(img_np[blockH*16 + row, blockW*16 + col][:3])
-        for row in range(16)
+        tuple(img_np[blockH*STUDS_PER_BLOCK + row, blockW*STUDS_PER_BLOCK + col][:3])
+        for row in range(STUDS_PER_BLOCK)
     ]
 
 

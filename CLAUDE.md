@@ -125,7 +125,9 @@ All runtime knobs live in `.env` (committed — no secrets):
 | `MAX_WORKERS` | `1` | `1` | Parallel processing workers. Read from env (D-028). Kept at 1: raising to 2 needs Render **Standard tier** (2 GB) — two workers ≈ 1.15 GB peak — and is only safe with the logging/worker-isolation fixes (D-009/D-010/D-011) already in place. |
 | `MAX_QUEUE_SIZE` | `20` | `20` | Max pending jobs before 429. Read from env (D-028). |
 | `MAX_MOSAIC_BLOCK_WIDTH` | 40 | 40 | Max blocks wide a mosaic can be |
-| `STUD_WIDTH_OF_BLOCK` | 16 | 16 | Studs per baseplate block side |
+| `MAX_PROCESSING_DIMENSION` | 2048 | 2048 | Max long-edge (px) the input is downscaled to (via `cap_processing_resolution`) before the heavy full-res ops (`adjust_lightness_lab` LAB round-trip, `remove_background` MediaPipe). Mosaic output is ≤640 studs, so 2048 oversamples >3× (no perceptible quality change) while bounding the float64 LAB arrays that OOM'd the worker on multi-megapixel uploads (D-012). |
+
+Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-06-29). The 16-stud block is now a fixed structural constant `STUDS_PER_BLOCK` in `scripts/mosaic_types.py`, imported by every module that needs it (the baseplate art is hand-built for 16×16, so it was never a safe runtime knob).
 | `JOB_TTL_SECONDS` | 600 | 3600 | Seconds before completed jobs are purged |
 | `JOB_TIMEOUT_SECONDS` | 1800 | — (not set, uses code default) | Max seconds a running job may take before forced failure |
 | `CLEANUP_INTERVAL` | 300 | — (not set, uses code default) | How often the cleanup thread runs (seconds) |
@@ -267,15 +269,15 @@ Main.py (FastAPI + scheduler + cleanup threads + ProcessPoolExecutor)
 
 - Imports (all package-relative): `.mosaic_types` (MosaicType), `.MosiacToOrder` (GenerateOrderList), `.MosiacToInstruction` (GenerateInstructions), `.preview_builder` (build_preview_payload, write_preview_atomic), `.Util` (GetPaletteRGBArray, load_project_env, log_*).
 - Module load: computes `LEGO_PALETTE_RGB`, `PALETTE_LAB`, `PALETTE_LAB_RESHAPED` once. (The legacy `sys.path.append(scripts/)` hack is gone — D-019/D-020 made every intra-package import relative.)
-- Public entry: `pic_to_mosaic(img_path, block_width, mosaic_type, background_color_percent, to_frame, output_dir=None, job_id=None, progress_callback=None)`. Drives the 2D vs 3D branch.
-- Helpers: `image_to_lego_mosaic(img, studs_w, alpha_mask=None)` (LANCZOS resize → UnsharpMask → CIEDE2000 Floyd-Steinberg → returns `(PIL.Image, idx_array)`), `remove_background(pil_img)` (MediaPipe SelfieSegmentation in a `with` block so its native graph is released — D-011; feeds PIL's native RGB straight in, no cv2 channel swap — D-007; threshold pinned as `_SEGMENTATION_FG_THRESHOLD` — D-016), `background_color_budget(bg_idx, fg_mask_np, pct)` (pure helper: distinct LEGO colors to keep, scaled over the **background** region `fg_mask_np==0` — D-001), `simplify_background_lego(bg_idx, palette_lab, k, alpha_mask)` (per-unique-index remap → vectorized substitution), `adjust_lightness_lab(img, delta_L)` (RGBA-preserving L* shift), `nearest_palette_index_lab(pixel_lab)`.
+- Public entry: `pic_to_mosaic(img_path, block_width, mosaic_type, background_color_percent, to_frame, output_dir=None, job_id=None, progress_callback=None)`. Drives the 2D vs 3D branch. Immediately after `open_image`, calls `cap_processing_resolution(img)` so the heavy full-res ops in **both** branches see a bounded-resolution image (D-012).
+- Helpers: `image_to_lego_mosaic(img, studs_w, alpha_mask=None, build_image=True)` (LANCZOS resize → UnsharpMask → CIEDE2000 Floyd-Steinberg → returns `(PIL.Image | None, idx_array)`; `build_image=False` skips the PIL image for callers that only need the index array — the 3D bg, D-045), `cap_processing_resolution(img, max_dim=None)` (shrink-only, aspect-preserving `Image.thumbnail` to `MAX_PROCESSING_DIMENSION`; no-op for images already within the cap — bounds the float64 LAB arrays that OOM'd the worker, D-012), `remove_background(pil_img)` (MediaPipe SelfieSegmentation in a `with` block so its native graph is released — D-011; feeds PIL's native RGB straight in, no cv2 channel swap — D-007; threshold pinned as `_SEGMENTATION_FG_THRESHOLD` — D-016), `background_color_budget(bg_idx, fg_mask_np, pct, unique_indices=None)` (pure helper: distinct LEGO colors to keep, scaled over the **background** region `fg_mask_np==0` — D-001), `simplify_background_lego(bg_idx, palette_lab, k, alpha_mask, unique_counts=None)` (per-unique-index remap → vectorized substitution; the optional `unique_indices`/`unique_counts` let the 3D call site share one `np.unique` between the two — D-042), `adjust_lightness_lab(img, delta_L)` (RGBA-preserving L* shift), `nearest_palette_index_lab(pixel_lab)`.
 - `MosaicType` is imported from `.mosaic_types` and re-exported (so `from .picToMosiac import MosaicType` still works).
-- Reads env on import: `MAX_MOSAIC_BLOCK_WIDTH` (40), `STUD_WIDTH_OF_BLOCK` (16).
+- Reads env on import: `MAX_MOSAIC_BLOCK_WIDTH` (40), `MAX_PROCESSING_DIMENSION` (2048). `STUDS_PER_BLOCK` (16) is imported from `.mosaic_types` (a fixed structural constant, re-exported here for back-compat — no longer the `STUD_WIDTH_OF_BLOCK` env var; D-035).
 
 #### `MosiacToOrder.py` — order-list JSON writer
 
 - Imports (package-relative): `from .Util import GetPaletteDict, SaveDictAsJsonsOptimized, log_info`.
-- Public: `GenerateOrderList(fg_out_rgba, bg_rgba, want_frame, output_dir)` — `output_dir` is **required** (the CLI fallback was removed, D-013). Counts unique RGB pixels per layer via `np.unique(axis=0, return_counts=True)`, looks them up in `LEGO_PALETTE_RGB_DICT`, adds baseplate + optional frame parts, calls `Util.SaveDictAsJsonsOptimized` to write `{output_dir}/OrderLists/order_list.json` (splits into `order_list_1.json`, etc. when any qty > 999). An off-palette pixel **raises** `RuntimeError` (D-008) — it never silently drops bricks.
+- Public: `GenerateOrderList(fg_idx, fg_visible_mask, bg_idx, want_frame, output_dir)` — `output_dir` is **required** (the CLI fallback was removed, D-013). Counts the palette-**index** arrays the pipeline already computed via `np.bincount` and maps index→element_id through `PALETTE_ELEMENT_IDS` (D-036 — no RGB round-trip / `np.unique(axis=0)` sort). `bg_idx` is counted in full; `fg_idx` only where `fg_visible_mask` is True (None in 2D). Adds baseplate + optional frame parts, calls `Util.SaveDictAsJsonsOptimized` to write `{output_dir}/OrderLists/order_list.json` (splits into `order_list_1.json`, etc. when any qty > 999). Off-palette is now structurally impossible (every index is a valid slot); an out-of-range **index** still **raises** `RuntimeError` (successor to the D-008 guard) — it never silently drops bricks.
 - Helpers: `GetBaseplatesForSize(width, height)`, `GetFrameForSize(width, height)` — return `{element_id: qty}` for structural parts.
 
 #### `MosiacToInstruction.py` — instruction PDF assembler
@@ -294,7 +296,7 @@ Main.py (FastAPI + scheduler + cleanup threads + ProcessPoolExecutor)
 
 #### `mosaic_types.py` — shared enum leaf module
 
-- Dependency-free. Defines `MosaicType.TWO_D = "2d"`, `MosaicType.THREE_D = "3d"`. Imported by `picToMosiac` (re-exported) and `preview_builder` (for `mosaic_type` validation), breaking what would otherwise be a circular import between those two (D-032).
+- Dependency-free. Defines `MosaicType.TWO_D = "2d"`, `MosaicType.THREE_D = "3d"`. Imported by `picToMosiac` (re-exported) and `preview_builder` (for `mosaic_type` validation), breaking what would otherwise be a circular import between those two (D-032). Also defines `STUDS_PER_BLOCK = 16` (D-035) — the fixed structural block edge, imported by `picToMosiac`/`Main`/`MosiacToOrder`/`MosiacToInstruction`/`VisualMaker` as the single source of truth (replacing the per-module literal `16` and the removed `STUD_WIDTH_OF_BLOCK` env var).
 
 #### `Util.py` — palette + utility helpers
 
@@ -349,26 +351,49 @@ verification, and cross-references — lives in
 `docs/MOSAIC_DEFECTS.md`. The table below is the index only; click an
 ID to jump to the entry.
 
-> **Status (2026-06-19):** the 24 fixed/subsumed defects from the
+> **Status (2026-06-29):** the 24 fixed/subsumed defects from the
 > `fix/mosaic-defects-sweep` work (merged to `main` in commit `6a3b1fa`) have
-> been **removed** from the ledger. **Open:** D-015, D-017, D-018, D-024, D-025,
-> D-026, D-029. **Deferred:** D-012 (visual-regression risk).
-> `docs/MOSAIC_DEFECTS.md` carries the authoritative per-defect detail; closed
-> defects live in git history.
+> been **removed** from the ledger. A full-codebase interface/efficiency review
+> on 2026-06-29 added **D-034 – D-052** (11 P2, 8 P3). **Open before review:**
+> D-015, D-017, D-018, D-024, D-025, D-026, D-029. **D-012:** memory aspect
+> MITIGATED via the input-resolution cap (`cap_processing_resolution` /
+> `MAX_PROCESSING_DIMENSION`); the CPU-fold optimization stays deferred
+> (visual-regression risk, now tracked as **D-044**). `docs/MOSAIC_DEFECTS.md`
+> carries the authoritative per-defect detail; closed defects live in git history.
 
 For the shelved checkout pipeline's historical defect ledger, see the SHELVED
 docs `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` and `docs/CHECKOUT_AUDIT.md`.
 
 | ID | Severity | Status | Title | File |
 |----|----------|--------|-------|------|
-| [D-012](docs/MOSAIC_DEFECTS.md#d-012) | **P2** | deferred | `adjust_lightness_lab` runs at full input resolution | picToMosiac.py |
-| [D-015](docs/MOSAIC_DEFECTS.md#d-015) | **P3** | open | `make_difference_transparent` doc/name describe the inverse of the code | picToMosiac.py |
+| [D-012](docs/MOSAIC_DEFECTS.md#d-012) | **P2** | memory mitigated; CPU-fold deferred | `adjust_lightness_lab` runs at full input resolution | picToMosiac.py |
+| [D-015](docs/MOSAIC_DEFECTS.md#d-015) | **P3** | FIXED 2026-06-29 | `make_difference_transparent` doc/name describe the inverse of the code (function deleted, D-037) | picToMosiac.py |
 | [D-017](docs/MOSAIC_DEFECTS.md#d-017) | **P3** | open | `pic_to_mosaic` returns `None`; caller masks with `or workspace` | picToMosiac.py / worker.py |
 | [D-018](docs/MOSAIC_DEFECTS.md#d-018) | **P3** | open | `give_exception_message` is in-band log-and-reraise | picToMosiac.py |
 | [D-024](docs/MOSAIC_DEFECTS.md#d-024) | **P3** | open | Inconsistent `step` return shape across instruction helpers | MosiacToInstruction.py + VisualMaker.py |
 | [D-025](docs/MOSAIC_DEFECTS.md#d-025) | **P3** | open | `step` counter threaded through every function as a return value | MosiacToInstruction.py + VisualMaker.py |
 | [D-026](docs/MOSAIC_DEFECTS.md#d-026) | **P3** | open | `_mark_submission_failed` does a redundant `rmtree(job_root)` | Main.py |
 | [D-029](docs/MOSAIC_DEFECTS.md#d-029) | **P3** | open | `FRONTEND_ORIGIN` env var set but never read | Main.py |
+| [D-034](docs/MOSAIC_DEFECTS.md#d-034) | **P2** | FIXED 2026-06-29 | Main.py/worker logs never reach `laigo.log` (split logger trees) | logger.py / Main.py |
+| [D-035](docs/MOSAIC_DEFECTS.md#d-035) | **P2** | FIXED 2026-06-29 | `STUD_WIDTH_OF_BLOCK` advertised configurable but `16` hardcoded in 4 modules | MosiacToInstruction / MosiacToOrder / VisualMaker |
+| [D-036](docs/MOSAIC_DEFECTS.md#d-036) | **P2** | FIXED 2026-06-29 | `GenerateOrderList` counts from RGB instead of the index arrays already computed | MosiacToOrder.py / picToMosiac.py |
+| [D-037](docs/MOSAIC_DEFECTS.md#d-037) | **P2** | FIXED 2026-06-29 | 3D `make_difference_transparent` leaks white background into FG; discards `fg_mask` | picToMosiac.py |
+| [D-038](docs/MOSAIC_DEFECTS.md#d-038) | **P2** | FIXED 2026-06-29 | `/generate` blocks the event loop on full-image decode + `fsync` | Main.py |
+| [D-039](docs/MOSAIC_DEFECTS.md#d-039) | **P2** | FIXED 2026-06-29 | `get_font()` re-parses the TTF on every call (no cache) | VisualMaker.py |
+| [D-040](docs/MOSAIC_DEFECTS.md#d-040) | **P2** | open | Timeout watchdog can't reclaim the pool worker (ghost slot) | Main.py |
+| [D-041](docs/MOSAIC_DEFECTS.md#d-041) | **P2** | deferred (bundle with D-025) | Per-step PNG written to disk then re-decoded for the PDF | VisualMaker / MosiacToInstruction |
+| [D-042](docs/MOSAIC_DEFECTS.md#d-042) | **P2** | FIXED 2026-06-29 | Background pixels run through `np.unique` twice | picToMosiac.py |
+| [D-043](docs/MOSAIC_DEFECTS.md#d-043) | **P2** | FIXED 2026-06-29 | `count_colors` sorts every pixel ×2 only to log two lines | MosiacToInstruction.py |
+| [D-044](docs/MOSAIC_DEFECTS.md#d-044) | **P2** | wontfix-by-design (A/B: 38–47% studs change) | Redundant LAB↔RGB round-trips (D-012 CPU-fold lever) | picToMosiac.py |
+| [D-045](docs/MOSAIC_DEFECTS.md#d-045) | **P3** | FIXED 2026-06-29 | No-op resizes + discarded background `out_img` | picToMosiac.py |
+| [D-046](docs/MOSAIC_DEFECTS.md#d-046) | **P3** | FIXED 2026-06-29 | Dead `import gc` in Main.py | Main.py |
+| [D-047](docs/MOSAIC_DEFECTS.md#d-047) | **P3** | open | `colorQuant.py` executes at import (no `__main__` guard) | colorQuant.py |
+| [D-048](docs/MOSAIC_DEFECTS.md#d-048) | **P3** | open | Scattered env reads; `RENDER` idiom diverges; `.env` loaded twice | Main.py / picToMosiac.py |
+| [D-049](docs/MOSAIC_DEFECTS.md#d-049) | **P3** | open | Job `settings` dict crosses 3 boundaries with no schema | Main.py / worker.py |
+| [D-050](docs/MOSAIC_DEFECTS.md#d-050) | **P3** | open | Page-geometry magic numbers duplicated (`612×792`) | VisualMaker / MosiacToInstruction |
+| [D-051](docs/MOSAIC_DEFECTS.md#d-051) | **P3** | open | `pic_to_mosaic(block_width=...)` actually carries studs | picToMosiac.py / worker.py |
+| [D-052](docs/MOSAIC_DEFECTS.md#d-052) | **P3** | open | Minor cluster (no-op / dead / duplication / taxonomy) | various |
+| [D-053](docs/MOSAIC_DEFECTS.md#d-053) | **P3** | FIXED 2026-06-29 | `simplify_background_lego` ran one `deltaE_ciede2000` call per unique index | picToMosiac.py |
 
 ### Adding a defect
 

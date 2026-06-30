@@ -8,7 +8,7 @@ import traceback
 # D-019/D-020: the sys.path.append hack that let MosiacToOrder/Util use bare
 # imports is gone — every intra-package import is now relative. Dead imports
 # (sys, copy, enum.Enum) removed; MosaicType moved to the leaf mosaic_types module.
-from .mosaic_types import MosaicType
+from .mosaic_types import MosaicType, STUDS_PER_BLOCK
 from .MosiacToOrder import GenerateOrderList
 from .MosiacToInstruction import GenerateInstructions
 from .preview_builder import build_preview_payload, write_preview_atomic
@@ -31,7 +31,16 @@ PALETTE_LAB = rgb_list_to_lab(LEGO_PALETTE_RGB)
 PALETTE_LAB_RESHAPED = PALETTE_LAB.reshape((-1, 1, 3))
 MAX_BLOCK_WIDTH = int(os.getenv("MAX_MOSAIC_BLOCK_WIDTH", 40))
 MIN_BLOCK_WIDTH = 1
-STUDS_PER_BLOCK = int(os.getenv("STUD_WIDTH_OF_BLOCK", 16))
+# D-035: STUDS_PER_BLOCK is now imported from .mosaic_types (a fixed structural
+# constant, re-exported here for back-compat) rather than read from the
+# STUD_WIDTH_OF_BLOCK env var, which the downstream instruction/order code never
+# honored — see mosaic_types.py.
+# Cap the resolution fed to the heavy full-res ops (adjust_lightness_lab's LAB
+# round-trip, remove_background's MediaPipe). The mosaic output is <=640 studs
+# (MAX_BLOCK_WIDTH * STUDS_PER_BLOCK), so 2048 still oversamples it >3x: no
+# perceptible quality change, but bounds the float64 LAB arrays that OOM'd the
+# worker on multi-megapixel uploads (D-012).
+MAX_PROCESSING_DIMENSION = int(os.getenv("MAX_PROCESSING_DIMENSION", 2048))
 
 
 #gets the index of the closest color to the pixel from the palette by visual distance
@@ -42,13 +51,19 @@ def nearest_palette_index_lab(pixel_lab):
 
 
 #optimizes the background to have a maximum number of k colors and returns array of indexes of colors
-def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
+def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None, unique_counts=None):
     log_info(f"simplifying background to top {k} lego colors...")
-    if alpha_mask is not None:
-        valid_pixels = bg_idx[alpha_mask == 255]
+    # D-042: accept a precomputed (unique, counts) so the 3D path doesn't run
+    # np.unique over the ~400k-pixel background region twice (the budget pass
+    # already did). When None we compute it ourselves (standalone / test path).
+    if unique_counts is None:
+        if alpha_mask is not None:
+            valid_pixels = bg_idx[alpha_mask == 255]
+        else:
+            valid_pixels = bg_idx.flatten()
+        unique, counts = np.unique(valid_pixels, return_counts=True)
     else:
-        valid_pixels = bg_idx.flatten()
-    unique, counts = np.unique(valid_pixels, return_counts=True)
+        unique, counts = unique_counts
     if len(unique) == 0:
         raise ValueError("No valid background pixels to simplify")
     freq = dict(zip(unique, counts))
@@ -57,13 +72,16 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
     log_info(f"background dominant LEGO colors: {top_colors.tolist()}")
     top_lab = palette_lab[top_colors]
 
-    # Compute nearest top-color for each unique palette index that appears in
-    # valid pixels (at most 43 iterations) then apply the remap in one vectorized op.
+    # Map each unique palette index that appears in valid pixels to its nearest
+    # top-color, then apply the remap in one vectorized op.
     index_remap = np.arange(len(palette_lab), dtype=np.int32)
-    for idx in unique:
-        lab = palette_lab[idx]
-        d = color.deltaE_ciede2000(top_lab.reshape(-1, 1, 3), lab.reshape(1, 1, 3))
-        index_remap[idx] = top_colors[int(np.argmin(d))]
+    # D-044-adjacent: one batched deltaE over (k top-colors) x (m unique indices)
+    # instead of m separate calls (m <= 43, but each call allocates skimage's pile
+    # of temporaries). argmin over the top-color axis with the same first-min
+    # tie-break as the old per-index np.argmin -> identical remap.
+    unique_lab = palette_lab[unique]                                        # (m, 3)
+    d = color.deltaE_ciede2000(top_lab[:, None, :], unique_lab[None, :, :])  # (k, m)
+    index_remap[unique] = top_colors[np.argmin(d, axis=0)]
 
     simplified_idx = index_remap[bg_idx]
     if alpha_mask is not None:
@@ -71,7 +89,7 @@ def simplify_background_lego(bg_idx, palette_lab, k=5, alpha_mask=None):
     return simplified_idx
 
 
-def background_color_budget(bg_idx, fg_mask_np, background_color_percent):
+def background_color_budget(bg_idx, fg_mask_np, background_color_percent, unique_indices=None):
     """How many distinct LEGO colors to keep in the simplified background.
 
     Scales the user's ``background_color_percent`` slider over the number of
@@ -83,13 +101,16 @@ def background_color_budget(bg_idx, fg_mask_np, background_color_percent):
     to a single color. ``fg_mask_np == 0`` is the visible background and mirrors
     the ``alpha_mask=(255 - fg_mask_np)`` passed to ``simplify_background_lego``.
     """
-    background_indices = bg_idx[fg_mask_np == 0]
-    unique_count = len(np.unique(background_indices))
+    # D-042: reuse the caller's np.unique over the background region when provided
+    # (simplify_background_lego computes the same one) instead of recomputing it.
+    if unique_indices is None:
+        unique_indices = np.unique(bg_idx[fg_mask_np == 0])
+    unique_count = len(unique_indices)
     return max(1, int((background_color_percent / 100) * unique_count))
 
 
 #takes an image and lego stud width and returns lego image and array of lego image pixel colors
-def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
+def image_to_lego_mosaic(img, studs_w, alpha_mask=None, build_image=True):
     #calculate stud height calculation such that it is always divisible by 16
     orig_w, orig_h = img.size
     aspect = orig_h / orig_w
@@ -129,8 +150,15 @@ def image_to_lego_mosaic(img, studs_w, alpha_mask=None):
                 if alpha_np[y+1,x]!=0: err[y+1,x]=np.clip(err[y+1,x]+e*5/16,-128,128)
                 if x+1<studs_w and alpha_np[y+1,x+1]!=0: err[y+1,x+1]=np.clip(err[y+1,x+1]+e*1/16,-128,128)
         err[y, alpha_np[y]==0] = 0
-    out_rgb = LEGO_PALETTE_RGB[out_idx].astype(np.uint8)
-    out_img = Image.fromarray(out_rgb).resize((studs_w, studs_h), Image.NEAREST)
+    # D-045: out_rgb is already (studs_h, studs_w), so Image.fromarray yields a
+    # (studs_w, studs_h) image — the old .resize((studs_w, studs_h), NEAREST) was a
+    # no-op identity copy. And callers that only need the index array (the 3D
+    # background, which rebuilds its image from the simplified indices) pass
+    # build_image=False so we skip the throwaway PIL image entirely.
+    if build_image:
+        out_img = Image.fromarray(LEGO_PALETTE_RGB[out_idx].astype(np.uint8))
+    else:
+        out_img = None
     return out_img, out_idx
 
 
@@ -198,13 +226,11 @@ def adjust_lightness_lab(img_pil, delta_L):
     return Image.fromarray(rgb_out)
 
 
-#makes the pixels that match on the original to the new one to be transparent
-def make_difference_transparent(orig, new):
-    orig = np.array(orig.convert("RGBA"))
-    fg = np.array(new.convert("RGBA"))
-    diff = np.any(fg[...,:3] != orig[...,:3], axis=-1)
-    fg[diff, 3] = 0   # modify fg in place
-    return Image.fromarray(fg)
+# D-037/D-015: make_difference_transparent was deleted. It recovered the
+# foreground alpha by diffing the white-filled fg_pil against the original, which
+# (a) leaked already-white background pixels into the foreground and (b) discarded
+# the exact fg_mask remove_background returns. The 3D path now builds fg_a straight
+# from fg_mask. (Its name/docstring were also inverted — the old D-015.)
 
 
 # MosaicType is imported from .mosaic_types (D-032). Re-exported here so existing
@@ -226,8 +252,24 @@ def give_exception_message(e):
 def open_image(image_path):
     if not image_path.exists():
         raise FileNotFoundError(f"Image file not found: {image_path}")
-   
+
     img = Image.open(image_path).convert("RGB")
+    return img
+
+
+#downscales oversized inputs (aspect-preserving, shrink-only) so the heavy
+#full-res ops never allocate float64 arrays sized to a multi-megapixel upload
+def cap_processing_resolution(img, max_dim=None):
+    """Bound the resolution fed to adjust_lightness_lab / remove_background.
+
+    The mosaic output is at most MAX_BLOCK_WIDTH*STUDS_PER_BLOCK studs wide, so a
+    2048px source still oversamples it >3x — no perceptible quality change. Uses
+    Image.thumbnail, which only shrinks and preserves aspect ratio, so images
+    already within the cap pass through untouched. Bounds the float64 LAB arrays
+    that OOM'd the worker on large uploads (D-012)."""
+    cap = max_dim or MAX_PROCESSING_DIMENSION
+    if max(img.size) > cap:
+        img.thumbnail((cap, cap), Image.LANCZOS)
     return img
 
 
@@ -239,6 +281,10 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
     try:
         report(1)
         img = open_image(img_path)
+        # Cap input resolution before the heavy full-res ops (both branches).
+        # Bounds peak memory regardless of upload size; the mosaic is downscaled
+        # to <=640 studs anyway, so this is imperceptible to output (D-012).
+        img = cap_processing_resolution(img)
         #image_folder = Path(__file__).resolve().parent.parent / "images"
 
         if mosiac_type == MosaicType.THREE_D:
@@ -247,23 +293,34 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             fg_pil, bg_pil, fg_mask = remove_background(img)
 
             report(10)
-            fg_alpha_pil = make_difference_transparent(img, fg_pil)
-            fg_rgba = fg_alpha_pil.convert("RGBA")
-            fg_a = fg_rgba.getchannel("A").point(lambda p:255 if p>0 else 0)
-    
+            # D-037: derive the foreground alpha straight from the segmentation mask
+            # remove_background already returned, instead of diffing the white-filled
+            # fg_pil against the original. The old diff marked any background pixel that
+            # was *already* white in the source as "unchanged" -> opaque -> leaked into
+            # the foreground layer (and got counted as foreground bricks). The mask is
+            # exact (255 = foreground, 0 = background) and cheaper (no full-res RGBA diff).
+            fg_a = Image.fromarray(fg_mask.astype(np.uint8) * 255, mode="L")
+
             report(15)
-            fg_filtered_image = adjust_lightness_lab(fg_rgba.convert("RGB"), delta_L=5)
+            # fg_pil already holds the original foreground pixels (white in the bg region,
+            # which fg_a masks out in image_to_lego_mosaic), so feed it straight in.
+            fg_filtered_image = adjust_lightness_lab(fg_pil, delta_L=5)
             report(25)
             bg_filtered_image = adjust_lightness_lab(bg_pil, delta_L=5)
 
             report(30)
             log_debug("converting processed image to lego mosiac...")
             fg_out_img, fg_idx = image_to_lego_mosaic(fg_filtered_image, block_width, alpha_mask=fg_a)
-            bg_out_img, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width)
+            # D-045: the background's PIL image is discarded below (rebuilt from the
+            # simplified indices), so only ask for the index array here.
+            _, bg_idx = image_to_lego_mosaic(bg_filtered_image, block_width, build_image=False)
             fg_mask_resized = fg_a.resize(bg_idx.shape[::-1], Image.NEAREST)
             fg_mask_np = np.array(fg_mask_resized)
-            color_quant = background_color_budget(bg_idx, fg_mask_np, background_color_percent)
-            bg_idx_simplified = simplify_background_lego(bg_idx, PALETTE_LAB, k=color_quant, alpha_mask=(255-fg_mask_np))
+            # D-042: one np.unique over the background region, shared by the budget
+            # (needs the distinct count) and the simplify pass (needs unique + counts).
+            bg_unique, bg_counts = np.unique(bg_idx[fg_mask_np == 0], return_counts=True)
+            color_quant = background_color_budget(bg_idx, fg_mask_np, background_color_percent, unique_indices=bg_unique)
+            bg_idx_simplified = simplify_background_lego(bg_idx, PALETTE_LAB, k=color_quant, alpha_mask=(255-fg_mask_np), unique_counts=(bg_unique, bg_counts))
             bg_rgb_simplified = LEGO_PALETTE_RGB[bg_idx_simplified]
             bg_out_img = Image.fromarray(bg_rgb_simplified.astype(np.uint8))
 
@@ -286,16 +343,22 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
                 except Exception as e:
                     log_error(f"preview.json build/write failed (non-fatal): {e}")
 
+            # fg_a is at the (capped) image resolution, so this resize to mosaic
+            # resolution is real and stays. The two below were no-ops — fg_out_img and
+            # bg_out_img are already (block_width, studs_h) — so they're dropped (D-045).
             fg_alpha_resized = fg_a.resize((block_width, fg_idx.shape[0]), Image.NEAREST)
-            fg_out_rgba = fg_out_img.convert("RGBA").resize((block_width, fg_idx.shape[0]), Image.NEAREST)
+            fg_out_rgba = fg_out_img.convert("RGBA")
             fg_out_rgba.putalpha(fg_alpha_resized)
-            bg_rgba = bg_out_img.convert("RGBA").resize(fg_out_rgba.size, Image.NEAREST)
+            bg_rgba = bg_out_img.convert("RGBA")
 
             composite = Image.alpha_composite(bg_rgba, fg_out_rgba)
 
             report(35)
             log_debug("generating order list...")
-            GenerateOrderList(fg_out_rgba, bg_rgba, to_frame, output_dir)
+            # D-036: count from the palette-index arrays directly. fg_mask_np (the
+            # mosaic-resolution foreground alpha, 0/255) is exactly fg_out_rgba's
+            # alpha, so fg_mask_np > 0 is the visible-stud mask.
+            GenerateOrderList(fg_idx, fg_mask_np > 0, bg_idx_simplified, to_frame, output_dir)
 
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir, progress_callback=report)
             log_debug("finished mosiac generation!")
@@ -331,7 +394,8 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
 
             log_debug("generating order list...")
             report(30)
-            GenerateOrderList(None, out_img_rgba, to_frame, output_dir)
+            # D-036: 2D has no foreground layer; count the single mosaic index array.
+            GenerateOrderList(None, None, img_idx, to_frame, output_dir)
 
             report(35)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir, progress_callback=report)
