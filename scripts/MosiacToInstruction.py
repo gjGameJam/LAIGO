@@ -1,4 +1,4 @@
-from .VisualMaker import draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction, draw_hook_assembly_instruction, draw_backhook_instruction, draw_step_piece_legend
+from .VisualMaker import draw_title_page, draw_final_view, generate_baseplate_setup, draw_plate_column, save_img_and_increment_step, draw_frame_instructions, draw_grid_setup_instruction, draw_hook_assembly_instruction, draw_backhook_instruction, draw_step_piece_legend
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas as rl_canvas
 import numpy as np
@@ -92,7 +92,10 @@ def GenerateInstructions(fg_rgba, bg_rgba, composite, want_frame, output_dir, pr
     # D-013: output_dir is required (CLI fallback removed).
     if output_dir is None:
         raise ValueError("output_dir is required")
-    step = 1
+    # Cover/title page is step 0 (unnumbered) so it sorts first while the build
+    # steps below keep their existing 1..N numbering; the sequence stays contiguous.
+    step = 0
+    step = draw_title_page(step, composite, want_frame, output_dir)
     bg_w, bg_h = bg_rgba.size
     blockWidth = bg_w // STUDS_PER_BLOCK
     blockHeight = bg_h // STUDS_PER_BLOCK

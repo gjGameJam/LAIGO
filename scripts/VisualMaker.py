@@ -55,15 +55,16 @@ def get_font(size=32):
         except TypeError:
             return ImageFont.load_default()        # very old Pillow: bitmap fallback
 
-def save_img_and_increment_step(img, step, output_dir=None, copy=True):
+def save_img_and_increment_step(img, step, output_dir=None, copy=True, draw_step_number=True):
     save_target = img.copy() if copy else img
-    width, height = save_target.size
-    draw = ImageDraw.Draw(save_target)
-    font = get_font(32)
-    x_middle = width / 2
-    x_offset = -len(str(step)) * 5
-    offset = 50
-    draw.text((x_middle + x_offset, height - offset), str(step), fill="black", font=font)
+    if draw_step_number:  # the cover/title page (step 0) opts out — no number stamp
+        width, height = save_target.size
+        draw = ImageDraw.Draw(save_target)
+        font = get_font(32)
+        x_middle = width / 2
+        x_offset = -len(str(step)) * 5
+        offset = 50
+        draw.text((x_middle + x_offset, height - offset), str(step), fill="black", font=font)
     saveName = get_file_name(step, output_dir)
     save_target.convert("RGB").save(saveName, format="PNG", compress_level=1)
     return (step + 1)
@@ -3005,42 +3006,90 @@ def draw_backhook_instruction(width, height, step, output_dir=None):
     return step
 
 
-#draws final views of completed mosiac (all put together) with frame if applicable
-def draw_final_view(step, composite, want_frame, output_dir=None):
-    img, draw = get_img_and_draw(step, True, output_dir)
-    log_info("drawing final view...")
-    black = to_rgb((.2, .2, .2))
-    #aspect ratio of image
-    composite_aspect_ratio = composite.height / composite.width
-    #desired width of composite
-    desired_comp_width = 400
-    comp_h = int(round(desired_comp_width * (composite_aspect_ratio)))
-    #scale such that the composite/frame always take up certain portion of canvas
-    composite_resized = composite.resize((desired_comp_width, comp_h), Image.Resampling.NEAREST)
-    #half heights to center drawings
-    half_comp_w = desired_comp_width / 2
-    half_comp_h = composite_resized.height / 2
-    frame_thickness = 15
-    start_y = (int)(img.height / 2)
-    start_x = (int)(img.width / 2)
+#shared renderer for the finished-mosaic image used by both the title page and the
+#final view: scale the (stud-resolution) composite to fit within a max_w x max_h box
+#preserving aspect (NEAREST for the crisp LEGO look), optionally draw a dark frame
+#border around it, and paste it centered at (center_x, center_y).
+def _paste_framed_composite(img, draw, composite, want_frame, center_x, center_y,
+                            max_w, max_h, frame_thickness=15):
+    #reserve room for the frame border so nothing is clipped at the box edge
+    pad = frame_thickness if want_frame else 0
+    avail_w = max_w - 2 * pad
+    avail_h = max_h - 2 * pad
+    scale = min(avail_w / composite.width, avail_h / composite.height)
+    comp_w = max(1, int(round(composite.width * scale)))
+    comp_h = max(1, int(round(composite.height * scale)))
+    composite_resized = composite.resize((comp_w, comp_h), Image.Resampling.NEAREST)
+    half_w = comp_w / 2
+    half_h = comp_h / 2
     #draw box before composite to simulate frame
     if want_frame:
-        y1 = start_y - half_comp_h - frame_thickness
-        y2 = start_y + half_comp_h + frame_thickness
-        x1 = start_x - frame_thickness - half_comp_w
-        x2 = start_x + frame_thickness + half_comp_w
+        black = to_rgb((.2, .2, .2))
+        x1 = center_x - half_w - frame_thickness
+        x2 = center_x + half_w + frame_thickness
+        y1 = center_y - half_h - frame_thickness
+        y2 = center_y + half_h + frame_thickness
         frame = [
             (x1, y1), #top left
             (x2, y1), #top right
             (x2, y2), #bottom right
-            (x1, y2) #bottom left
+            (x1, y2)  #bottom left
         ]
-        draw.polygon(frame, black, outline=(10,10,10))
-    #draw composite at start_x, start_y
-    composite_x = (int)(start_x - half_comp_w)
-    composite_y = (int)(start_y - half_comp_h)
-    img.paste(composite_resized, (composite_x, composite_y))
+        draw.polygon(frame, black, outline=(10, 10, 10))
+    img.paste(composite_resized, (int(center_x - half_w), int(center_y - half_h)))
 
+
+#draws the cover/title page: product title, a preview of the finished mosaic, and the
+#LEGO non-affiliation disclaimer along the bottom. Saved as step 0 (unnumbered) so it
+#sorts first in the PDF while the build steps keep their existing 1..N numbering.
+def draw_title_page(step, composite, want_frame, output_dir=None):
+    img, draw = get_img_and_draw(step, True, output_dir)
+    log_info("drawing title page...")
+
+    #title — large, horizontally centered near the top
+    title_font = get_font(48)
+    title = "LAIGO Mosaic Maker"
+    tw = _text_width(draw, title, title_font)
+    draw.text(((img.width - tw) / 2, 60), title, fill="black", font=title_font)
+
+    #finished-mosaic preview — same renderer as the final view so cover + closing
+    #page match; fit within a box that clears the title above and disclaimer below
+    _paste_framed_composite(
+        img, draw, composite, want_frame,
+        center_x=img.width / 2, center_y=380,
+        max_w=380, max_h=470,
+    )
+
+    #disclaimer — small, centered, along the bottom. Pre-split into lines that fit the
+    #page width (kept on the _text_width convention, no anchor= so the bitmap-font
+    #fallback still works).
+    disc_font = get_font(15)
+    disclaimer_lines = [
+        "LAIGO is an independent product and is not affiliated with, authorized,",
+        "endorsed, or sponsored by the LEGO Group. LEGO® is a registered",
+        "trademark of the LEGO Group, which does not sponsor, authorize, or",
+        "endorse this product.",
+    ]
+    y = 700
+    for line in disclaimer_lines:
+        lw = _text_width(draw, line, disc_font)
+        draw.text(((img.width - lw) / 2, y), line, fill="black", font=disc_font)
+        y += 22
+
+    log_debug("finished drawing title page!")
+    return save_img_and_increment_step(img, step, output_dir, draw_step_number=False)
+
+
+#draws final views of completed mosiac (all put together) with frame if applicable
+def draw_final_view(step, composite, want_frame, output_dir=None):
+    img, draw = get_img_and_draw(step, True, output_dir)
+    log_info("drawing final view...")
+    #render the finished mosaic centered on the page (shared with the title page)
+    _paste_framed_composite(
+        img, draw, composite, want_frame,
+        center_x=img.width / 2, center_y=img.height / 2,
+        max_w=400, max_h=600,
+    )
 
     font = get_font()
     margin = 50
