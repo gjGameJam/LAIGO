@@ -351,49 +351,33 @@ verification, and cross-references — lives in
 `docs/MOSAIC_DEFECTS.md`. The table below is the index only; click an
 ID to jump to the entry.
 
-> **Status (2026-06-29):** the 24 fixed/subsumed defects from the
-> `fix/mosaic-defects-sweep` work (merged to `main` in commit `6a3b1fa`) have
-> been **removed** from the ledger. A full-codebase interface/efficiency review
-> on 2026-06-29 added **D-034 – D-052** (11 P2, 8 P3). **Open before review:**
-> D-015, D-017, D-018, D-024, D-025, D-026, D-029. **D-012:** memory aspect
-> MITIGATED via the input-resolution cap (`cap_processing_resolution` /
-> `MAX_PROCESSING_DIMENSION`); the CPU-fold optimization stays deferred
-> (visual-regression risk, now tracked as **D-044**). `docs/MOSAIC_DEFECTS.md`
-> carries the authoritative per-defect detail; closed defects live in git history.
+> **Status (2026-06-30):** The 24 defects closed in `fix/mosaic-defects-sweep`
+> (commit `6a3b1fa`) plus 14 more fixed in the 2026-06-29 performance &
+> interface-redundancy sweep have been **pruned** from the ledger per its
+> open-only convention (git history is the archive — `git log -p -- docs/MOSAIC_DEFECTS.md`).
+> The table below is the remaining open / deferred / wontfix work;
+> `docs/MOSAIC_DEFECTS.md` carries the authoritative per-defect detail.
 
 For the shelved checkout pipeline's historical defect ledger, see the SHELVED
 docs `docs/PRE_RELEASE_PAYMENT_CHECKLIST.md` and `docs/CHECKOUT_AUDIT.md`.
 
 | ID | Severity | Status | Title | File |
 |----|----------|--------|-------|------|
-| [D-012](docs/MOSAIC_DEFECTS.md#d-012) | **P2** | memory mitigated; CPU-fold deferred | `adjust_lightness_lab` runs at full input resolution | picToMosiac.py |
-| [D-015](docs/MOSAIC_DEFECTS.md#d-015) | **P3** | FIXED 2026-06-29 | `make_difference_transparent` doc/name describe the inverse of the code (function deleted, D-037) | picToMosiac.py |
+| [D-040](docs/MOSAIC_DEFECTS.md#d-040) | **P2** | open | Timeout watchdog can't reclaim the pool worker (ghost slot) | Main.py |
+| [D-041](docs/MOSAIC_DEFECTS.md#d-041) | **P2** | deferred (bundle with D-025) | Per-step PNG written to disk then re-decoded for the PDF | VisualMaker / MosiacToInstruction |
+| [D-044](docs/MOSAIC_DEFECTS.md#d-044) | **P2** | wontfix-by-design (A/B: 38–47% studs change) | Redundant LAB↔RGB round-trips (the deferred CPU-fold lever) | picToMosiac.py |
 | [D-017](docs/MOSAIC_DEFECTS.md#d-017) | **P3** | open | `pic_to_mosaic` returns `None`; caller masks with `or workspace` | picToMosiac.py / worker.py |
 | [D-018](docs/MOSAIC_DEFECTS.md#d-018) | **P3** | open | `give_exception_message` is in-band log-and-reraise | picToMosiac.py |
 | [D-024](docs/MOSAIC_DEFECTS.md#d-024) | **P3** | open | Inconsistent `step` return shape across instruction helpers | MosiacToInstruction.py + VisualMaker.py |
 | [D-025](docs/MOSAIC_DEFECTS.md#d-025) | **P3** | open | `step` counter threaded through every function as a return value | MosiacToInstruction.py + VisualMaker.py |
 | [D-026](docs/MOSAIC_DEFECTS.md#d-026) | **P3** | open | `_mark_submission_failed` does a redundant `rmtree(job_root)` | Main.py |
 | [D-029](docs/MOSAIC_DEFECTS.md#d-029) | **P3** | open | `FRONTEND_ORIGIN` env var set but never read | Main.py |
-| [D-034](docs/MOSAIC_DEFECTS.md#d-034) | **P2** | FIXED 2026-06-29 | Main.py/worker logs never reach `laigo.log` (split logger trees) | logger.py / Main.py |
-| [D-035](docs/MOSAIC_DEFECTS.md#d-035) | **P2** | FIXED 2026-06-29 | `STUD_WIDTH_OF_BLOCK` advertised configurable but `16` hardcoded in 4 modules | MosiacToInstruction / MosiacToOrder / VisualMaker |
-| [D-036](docs/MOSAIC_DEFECTS.md#d-036) | **P2** | FIXED 2026-06-29 | `GenerateOrderList` counts from RGB instead of the index arrays already computed | MosiacToOrder.py / picToMosiac.py |
-| [D-037](docs/MOSAIC_DEFECTS.md#d-037) | **P2** | FIXED 2026-06-29 | 3D `make_difference_transparent` leaks white background into FG; discards `fg_mask` | picToMosiac.py |
-| [D-038](docs/MOSAIC_DEFECTS.md#d-038) | **P2** | FIXED 2026-06-29 | `/generate` blocks the event loop on full-image decode + `fsync` | Main.py |
-| [D-039](docs/MOSAIC_DEFECTS.md#d-039) | **P2** | FIXED 2026-06-29 | `get_font()` re-parses the TTF on every call (no cache) | VisualMaker.py |
-| [D-040](docs/MOSAIC_DEFECTS.md#d-040) | **P2** | open | Timeout watchdog can't reclaim the pool worker (ghost slot) | Main.py |
-| [D-041](docs/MOSAIC_DEFECTS.md#d-041) | **P2** | deferred (bundle with D-025) | Per-step PNG written to disk then re-decoded for the PDF | VisualMaker / MosiacToInstruction |
-| [D-042](docs/MOSAIC_DEFECTS.md#d-042) | **P2** | FIXED 2026-06-29 | Background pixels run through `np.unique` twice | picToMosiac.py |
-| [D-043](docs/MOSAIC_DEFECTS.md#d-043) | **P2** | FIXED 2026-06-29 | `count_colors` sorts every pixel ×2 only to log two lines | MosiacToInstruction.py |
-| [D-044](docs/MOSAIC_DEFECTS.md#d-044) | **P2** | wontfix-by-design (A/B: 38–47% studs change) | Redundant LAB↔RGB round-trips (D-012 CPU-fold lever) | picToMosiac.py |
-| [D-045](docs/MOSAIC_DEFECTS.md#d-045) | **P3** | FIXED 2026-06-29 | No-op resizes + discarded background `out_img` | picToMosiac.py |
-| [D-046](docs/MOSAIC_DEFECTS.md#d-046) | **P3** | FIXED 2026-06-29 | Dead `import gc` in Main.py | Main.py |
 | [D-047](docs/MOSAIC_DEFECTS.md#d-047) | **P3** | open | `colorQuant.py` executes at import (no `__main__` guard) | colorQuant.py |
 | [D-048](docs/MOSAIC_DEFECTS.md#d-048) | **P3** | open | Scattered env reads; `RENDER` idiom diverges; `.env` loaded twice | Main.py / picToMosiac.py |
 | [D-049](docs/MOSAIC_DEFECTS.md#d-049) | **P3** | open | Job `settings` dict crosses 3 boundaries with no schema | Main.py / worker.py |
 | [D-050](docs/MOSAIC_DEFECTS.md#d-050) | **P3** | open | Page-geometry magic numbers duplicated (`612×792`) | VisualMaker / MosiacToInstruction |
 | [D-051](docs/MOSAIC_DEFECTS.md#d-051) | **P3** | open | `pic_to_mosaic(block_width=...)` actually carries studs | picToMosiac.py / worker.py |
 | [D-052](docs/MOSAIC_DEFECTS.md#d-052) | **P3** | open | Minor cluster (no-op / dead / duplication / taxonomy) | various |
-| [D-053](docs/MOSAIC_DEFECTS.md#d-053) | **P3** | FIXED 2026-06-29 | `simplify_background_lego` ran one `deltaE_ciede2000` call per unique index | picToMosiac.py |
 
 ### Adding a defect
 
@@ -414,7 +398,7 @@ Current single-job CPU load on Render: **~70% of 1 vCPU**. Goal: ≤50% per job 
 |---|---|---|---|
 | 1 | `picToMosiac.py` Floyd-Steinberg loop | Pure Python O(W×H), sequential by design; inner loop allocates a tiny numpy array per pixel via `np.clip(err[y,x+1]+e*7/16,-128,128)` × 4 neighbors |
 | 2 | `picToMosiac.py:nearest_palette_index_lab` | Called per pixel; full `deltaE_ciede2000` against all 43 palette entries |
-| 3 | `picToMosiac.py:adjust_lightness_lab` | Full-res RGB→LAB→RGB round-trip before resize |
+| 3 | `picToMosiac.py:adjust_lightness_lab` | Full-res RGB→LAB→RGB round-trip before resize. Memory now bounded by `MAX_PROCESSING_DIMENSION`; removing the round-trip (the CPU-fold) is **wontfix** — D-044 A/B changed 38–47% of studs. |
 | 4 | `picToMosiac.py:remove_background` | MediaPipe SelfieSegmentation on megapixel image; mask only needs mosaic resolution |
 | 5 | `MosiacToInstruction.py` instruction loop | Each column drawn TWICE (unhighlighted + highlighted) |
 | 6 | `Main.py` `max_tasks_per_child=1` | Worker cold-starts every job. The FastAPI/checkout/asyncpg re-import is **fixed** (D-010 moved `run_job` to the leaf `worker.py`); residual cost is the `picToMosiac`/mediapipe import. Remaining lever: raise `max_tasks_per_child` so one worker serves several jobs. |
@@ -423,23 +407,27 @@ Current single-job CPU load on Render: **~70% of 1 vCPU**. Goal: ≤50% per job 
 ### Open items — fixes + estimated impact
 
 - **#1 Floyd-Steinberg:** KDTree over palette LAB (Euclidean ≈ deltaE76) → 25–35% total. Numba JIT → 50–60% total (200 MB dep). KDTree first; Numba only if insufficient. Cheap micro-optimization available before either: hoist the inner-loop error diffusion to plain Python floats and only `np.clip` in chunks — `np.clip` on a 1-element scalar is dominated by numpy's per-call overhead.
-- **#2 `adjust_lightness_lab`:** Add `delta_L=0` param to `image_to_lego_mosaic`, fold into post-resize LAB. → 8–12% total. Risk: prior attempt caused visual regression; re-test.
+- **#2 `adjust_lightness_lab`:** **wontfix (D-044).** Folding the +5 L\* shift into the post-resize LAB was implemented + A/B-tested (2026-06-29) and changed 38–47% of studs — dithering is chaotically sensitive to the reordered nonlinear shift. The full-res round-trip stays; its memory is bounded by the `MAX_PROCESSING_DIMENSION` cap.
 - **#3 MediaPipe:** Downscale input to ~2× mosaic resolution before segmentation, upscale mask back. → 10–20% total.
 - **#4 Double `draw_plate_column`:** Draw once, copy, apply only highlight outline to the copy via a new `draw_highlight_column` helper. → 12–18% total.
 - **#5 Worker cold-start:** The structural fix shipped — `run_job` is now in the leaf `scripts/worker.py` (D-010), and the process-safe logging prerequisite is done (D-009 parent-only file handler). Remaining lever: raise `max_tasks_per_child` to 3–5 so one worker serves several jobs (memory bounded by `MAX_WORKERS × peak-RSS`; Python 3.12+ enforced by the boot guard).
 - **#6 Single-worker concurrency:** Raise `MAX_WORKERS` (now read from env — D-028) to 2. Memory ≈ 1.15 GB peak. Requires Render Standard tier (2 GB). Logging prerequisite (D-009) already satisfied.
 - **(shipped) preview grid materialization:** `_grid_to_python_ints` now returns `remapped.tolist()` (D-003) — a single C-level call, 10–50× faster than the old double-comprehension on 640×640 grids.
+- **(shipped 2026-06-29) smaller per-job wins:** `get_font` is `lru_cache`d (D-039 — was 1000+ TTF parses/job); `count_colors` uses a packed 1-D `np.unique` instead of the `axis=0` lexsort ×2/job (D-043); `simplify_background_lego` batches its per-index ΔE into one call (D-053). All byte-identical-verified.
 
 ### CPU reduction estimates (cumulative)
 
 | Changes applied | Estimated single-job CPU |
 |-----------------|--------------------------|
-| Baseline (today before fixes) | ~70% |
-| + `adjust_lightness_lab` fix (item #2) | ~58–62% |
-| + MediaPipe resolution fix (item #3) | ~46–52% |
-| + Double draw_plate_column fix (item #4) | ~35–42% |
-| + KDTree nearest-color (item #1 partial) | ~22–30% |
+| Baseline | ~70% |
+| + MediaPipe resolution fix (item #3) | ~55–62% |
+| + Double draw_plate_column fix (item #4) | ~42–52% |
+| + KDTree nearest-color (item #1 partial) | ~28–38% |
 | + max_workers=2 + max_tasks_per_child=3 | two jobs at ~25–35% each |
+
+> Note: the old top row "+ `adjust_lightness_lab` fix (item #2) → ~58–62%" was
+> removed — that fold is **wontfix** (D-044). Figures above are rough, independent
+> estimates re-baselined off ~70%.
 
 ---
 
