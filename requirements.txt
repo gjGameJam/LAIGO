@@ -2,7 +2,13 @@ fastapi~=0.128.0
 uvicorn[standard]~=0.39.0
 
 numpy~=1.26
-pillow~=11.0
+# Pillow >=11.3 for NATIVE AVIF decode (wheels bundle libavif on manylinux +
+# Windows). HEIC/HEIF is handled by the pillow-heif plugin below.
+pillow~=11.3
+# HEIC/HEIF decode: libheif-bundled Pillow plugin. Wheels ship libheif for
+# manylinux (Render) and Windows (dev) — no system libheif needed. AVIF is
+# native to Pillow >=11.3, so pillow-heif 1.x no longer registers an AVIF opener.
+pillow-heif~=1.4
 scikit-image~=0.24
 
 opencv-python-headless~=4.11.0

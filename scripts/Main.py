@@ -1078,7 +1078,9 @@ def _validate_image(path: Path) -> None:
     front (D-006: a header sniff alone passes a truncated JPEG that then fails in
     the worker 5-30s later). Synchronous and potentially slow — img.load() decodes
     the entire upload — so callers must run it via asyncio.to_thread (D-038), never
-    inline on the event loop."""
+    inline on the event loop. HEIC/HEIF decode here comes from the pillow-heif
+    opener registered at import in picToMosiac (imported at module load); AVIF is
+    native to Pillow (>=11.3)."""
     with Image.open(path) as img:
         img.load()
         img.convert("RGB")

@@ -1,5 +1,14 @@
 import os
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
+# HEIC/HEIF support via pillow-heif; AVIF is decoded natively by Pillow (>=11.3),
+# so no separate registration is needed (pillow-heif 1.x dropped its AVIF opener).
+# picToMosiac is imported at load in BOTH the API parent (Main.py ->
+# _validate_image) and the worker subprocess (worker.py -> open_image), so
+# registering here — process-global and idempotent — covers every Image.open()
+# in each process with a single change. Hard import: pillow-heif is required;
+# a missing wheel should fail loudly at boot.
+import pillow_heif
+pillow_heif.register_heif_opener()
 import numpy as np
 from skimage import color
 from pathlib import Path
@@ -253,7 +262,13 @@ def open_image(image_path):
     if not image_path.exists():
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
-    img = Image.open(image_path).convert("RGB")
+    img = Image.open(image_path)
+    # Apply EXIF orientation BEFORE convert("RGB"). iPhone HEIC (and many JPEG)
+    # photos store sensor-native pixels plus an Orientation tag that convert()
+    # ignores, so portrait shots would mosaic sideways. exif_transpose returns a
+    # NEW image (or the unchanged image when no tag / orientation==1).
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
     return img
 
 
