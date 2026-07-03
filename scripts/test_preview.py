@@ -326,7 +326,7 @@ def test_endpoint_404_when_no_file():
 
     with tempfile.TemporaryDirectory() as tmp:
         original = Main.OUTPUT_DIR
-        Main.OUTPUT_DIR = Path(tmp)
+        Main.OUTPUT_DIR = Path(tmp).resolve()
         try:
             try:
                 asyncio.run(Main.get_job_preview("missing-job"))
@@ -345,7 +345,7 @@ def test_endpoint_200_when_file_present():
 
     with tempfile.TemporaryDirectory() as tmp:
         original = Main.OUTPUT_DIR
-        Main.OUTPUT_DIR = Path(tmp)
+        Main.OUTPUT_DIR = Path(tmp).resolve()
         try:
             job_dir = Main.OUTPUT_DIR / "job-200"
             job_dir.mkdir(parents=True)
@@ -367,7 +367,7 @@ def test_endpoint_500_on_corruption():
 
     with tempfile.TemporaryDirectory() as tmp:
         original = Main.OUTPUT_DIR
-        Main.OUTPUT_DIR = Path(tmp)
+        Main.OUTPUT_DIR = Path(tmp).resolve()
         try:
             job_dir = Main.OUTPUT_DIR / "job-500"
             job_dir.mkdir(parents=True)

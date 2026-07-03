@@ -18,7 +18,7 @@ import traceback
 # imports is gone — every intra-package import is now relative. Dead imports
 # (sys, copy, enum.Enum) removed; MosaicType moved to the leaf mosaic_types module.
 from .mosaic_types import MosaicType, STUDS_PER_BLOCK
-from .MosiacToOrder import GenerateOrderList
+from .MosiacToOrder import GenerateOrderList, BuildStatsPayload
 from .MosiacToInstruction import GenerateInstructions
 from .preview_builder import build_preview_payload, write_preview_atomic
 from .Util import GetPaletteRGBArray, load_project_env
@@ -373,7 +373,13 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             # D-036: count from the palette-index arrays directly. fg_mask_np (the
             # mosaic-resolution foreground alpha, 0/255) is exactly fg_out_rgba's
             # alpha, so fg_mask_np > 0 is the visible-stud mask.
-            GenerateOrderList(fg_idx, fg_mask_np > 0, bg_idx_simplified, to_frame, output_dir)
+            order = GenerateOrderList(fg_idx, fg_mask_np > 0, bg_idx_simplified, to_frame, output_dir)
+
+            if output_dir is not None:
+                try:
+                    write_preview_atomic(BuildStatsPayload(order), Path(output_dir) / "stats.json")
+                except Exception as e:
+                    log_error(f"stats.json build/write failed (non-fatal): {e}")
 
             GenerateInstructions(fg_out_rgba, bg_rgba, composite, to_frame, output_dir, progress_callback=report)
             log_debug("finished mosiac generation!")
@@ -410,7 +416,13 @@ def pic_to_mosaic(img_path, block_width, mosiac_type, background_color_percent, 
             log_debug("generating order list...")
             report(30)
             # D-036: 2D has no foreground layer; count the single mosaic index array.
-            GenerateOrderList(None, None, img_idx, to_frame, output_dir)
+            order = GenerateOrderList(None, None, img_idx, to_frame, output_dir)
+
+            if output_dir is not None:
+                try:
+                    write_preview_atomic(BuildStatsPayload(order), Path(output_dir) / "stats.json")
+                except Exception as e:
+                    log_error(f"stats.json build/write failed (non-fatal): {e}")
 
             report(35)
             GenerateInstructions(None, out_img_rgba, out_img_rgba, to_frame, output_dir, progress_callback=report)

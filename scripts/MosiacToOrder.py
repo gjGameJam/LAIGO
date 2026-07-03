@@ -90,6 +90,21 @@ def GenerateOrderList(fg_idx, fg_visible_mask, bg_idx, want_frame, output_dir):
     log_info(f"Sum of all pieces: {sum(order.values())}")
     return order
 
+def BuildStatsPayload(order):
+    """Build the stats.json payload from the full order dict GenerateOrderList
+    returns. This — not order_list.json — is the authoritative piece count:
+    SaveDictAsJsonsOptimized splits any element over 999 across order_list_N.json
+    files, and only the first (999-capped) file is copied to the stable path,
+    so summing it undercounts. Keys become strings to match JSON / the price
+    table in scripts/piece_prices.json; non-positive quantities are dropped,
+    mirroring the order-list writer's active_items filter."""
+    counts = {str(k): int(v) for k, v in order.items() if v > 0}
+    return {
+        "piece_counts": counts,
+        "total_pieces": sum(counts.values()),
+    }
+
+
 def GetBaseplatesForSize(width, height):
     """Calculates structural baseplate components."""
     # Floor division (//) is faster than float division + int() cast

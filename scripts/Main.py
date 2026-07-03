@@ -65,6 +65,7 @@ from .Util import load_project_env
 # no longer imported or mounted. The build pack is now a pay-what-you-want
 # digital product served by pay_router; see scripts/pay_router.py.
 from .pay_router import pay_router, webhook_router, donate_router
+from .pricing import load_price_table, estimate_cost_cents
 from .checkout.gate_router import checkout_gate_router
 from .checkout.cache import start_cache_sweeper
 from .checkout.gate import compute_decision, is_truthy, CheckoutMode
@@ -1354,6 +1355,64 @@ async def get_job_preview(job_id: str):
             },
         )
     return Response(content=data, media_type="application/json")
+
+
+@app.get("/jobs/{job_id}/stats")
+async def get_job_stats(job_id: str):
+    """Authoritative piece count + optional static-price cost estimate.
+
+    Reads outputs/{job_id}/stats.json (full per-element counts written at
+    generation time — the stable order_list.json can NOT be summed instead:
+    it is 999-capped per element when the order splits). File existence is
+    the readiness signal, same as /preview; jobs completed before stats.json
+    shipped simply 404, which the frontend renders as "stats unavailable".
+
+    Pricing is joined at request time from scripts/piece_prices.json, so
+    editing the table retroactively fixes estimates. estimated_cost_cents is
+    null unless every element in the order has a price; a broken/missing
+    price table degrades to null rather than failing the count.
+    """
+    stats_path = _job_dir(job_id) / "stats.json"
+    try:
+        stats = json.loads(stats_path.read_bytes())
+        piece_counts = stats["piece_counts"]
+        piece_count = int(stats["total_pieces"])
+    except FileNotFoundError:
+        log.info(f"Stats requested for job {job_id} but file not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Stats are not available for this job.",
+                "code": "STATS_NOT_AVAILABLE",
+            },
+        )
+    except Exception as e:
+        log.error(f"Stats file unreadable for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Stats file is unreadable.",
+                "code": "STATS_CORRUPTED",
+            },
+        )
+
+    estimated_cost_cents = None
+    currency = None
+    pricing_as_of = None
+    try:
+        table = load_price_table()
+        currency = table.get("currency")
+        pricing_as_of = table.get("as_of")
+        estimated_cost_cents = estimate_cost_cents(piece_counts, table)
+    except Exception as e:
+        log.error(f"Price table unavailable, serving null estimate: {e}")
+
+    return {
+        "piece_count": piece_count,
+        "estimated_cost_cents": estimated_cost_cents,
+        "currency": currency,
+        "pricing_as_of": pricing_as_of,
+    }
 
 
 @app.get("/jobs/{job_id}/download")

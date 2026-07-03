@@ -201,6 +201,15 @@ def run_job(job_id: str,
         except Exception as e:
             wlog.warning(f"Job {job_id} could not copy preview.json: {e}")
 
+    # Copy stats.json (authoritative piece counts for GET /jobs/{id}/stats) to
+    # the stable location before workspace deletion. Mirrors the handoffs above.
+    _stats_src = workspace / "stats.json"
+    if _stats_src.exists():
+        try:
+            shutil.copy2(_stats_src, job_root / "stats.json")
+        except Exception as e:
+            wlog.warning(f"Job {job_id} could not copy stats.json: {e}")
+
     # --- Success cleanup ---
     shutil.rmtree(workspace, ignore_errors=True)
 

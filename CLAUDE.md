@@ -82,7 +82,8 @@ python colorQuant.py <num_colors>
 Automated tests are runnable as bare modules from project root:
 `.venv\Scripts\python.exe -m scripts.test_<name>`. Live PWYW coverage:
 `test_pay_router`, `test_donate_router`. Mosaic pipeline: `test_preview`,
-`test_background_budget`, `test_order_list`, `test_piece_specs`. Mosaic jobs
+`test_background_budget`, `test_order_list`, `test_piece_specs`,
+`test_stats_endpoint`. Mosaic jobs
 store (json mode): `test_jobs_store_json`, `test_jobs_store_edge`. The remaining
 suites exercise the
 **shelved** checkout pipeline: `test_optimizer`, `test_gate_bypass`,
@@ -143,7 +144,7 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 
 ### Processing pipeline
 
-`POST /generate` → upload saved to `inputs/` → job queued → worker process runs `pic_to_mosaic()` → outputs zipped to `outputs/{job_id}/artifact.zip` (plus stable `order_list.json` + `preview.json` alongside) → poll `GET /jobs/{job_id}` → download via `GET /jobs/{job_id}/download`; 3D-renderable mosaic via `GET /jobs/{job_id}/preview`
+`POST /generate` → upload saved to `inputs/` → job queued → worker process runs `pic_to_mosaic()` → outputs zipped to `outputs/{job_id}/artifact.zip` (plus stable `order_list.json` + `preview.json` + `stats.json` alongside) → poll `GET /jobs/{job_id}` → download via `GET /jobs/{job_id}/download`; 3D-renderable mosaic via `GET /jobs/{job_id}/preview`; piece count + cost estimate via `GET /jobs/{job_id}/stats`
 
 ### Module layout (`LAIGO/scripts/`)
 
@@ -157,6 +158,7 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 | `MosiacToInstruction.py` | Sequences instruction PNG steps → PDF |
 | `VisualMaker.py` | Draws isometric LEGO stud visuals for each instruction step |
 | `preview_builder.py` | Pure `build_preview_payload(...)` + atomic `write_preview_atomic(...)` for the 3D preview JSON. Consumed by `GET /jobs/{id}/preview`. See `docs/PREVIEW_API.md`. |
+| `pricing.py` | Stdlib-only leaf: loads the static price table `scripts/piece_prices.json` (element_id → US cents, null = unknown; refresh = edit file + bump `as_of` — a running server picks it up via mtime-checked cache, no restart) and computes the all-or-null `estimate_cost_cents(...)` for `GET /jobs/{id}/stats`. Static by design — no live LEGO.com fetch (Cloudflare-fronted, drifting fields, non-PaB structural parts). |
 | `Util.py` | LEGO palette (43 RGB colors → element IDs), logging wrappers, JSON serialization |
 | `logger.py` | Rotating file logger (`laigo.log`, 10 MB cap, 1 backup; tunable via `MAX_LOG_SIZE_MB`). Parent process owns the file handler; worker subprocesses log to stdout only (D-009). `propagate=False` (D-002). |
 | `colorQuant.py` | Standalone KMeans color quantization demo (not used by the pipeline) |
@@ -193,6 +195,9 @@ outputs/{job_id}/
       instructions.pdf
     manifest.json         # written on success; ends up inside artifact.zip
   artifact.zip            # zip of workspace contents, served for download
+  order_list.json         # stable copy of the FIRST order-list file (999-capped per element when split — do not sum it)
+  preview.json            # stable copy; served by GET /jobs/{id}/preview
+  stats.json              # full per-element piece counts + total; served by GET /jobs/{id}/stats
   manifest_failed.json    # written on failure (outside workspace, persists)
 ```
 
@@ -249,15 +254,15 @@ Main.py (FastAPI + scheduler + cleanup threads + ProcessPoolExecutor)
 
 #### `Main.py` — FastAPI app + job lifecycle
 
-- Imports: `.picToMosiac` (MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH), `.worker` (run_job, _write_error_manifest), `.Util` (load_project_env), `.pay_router` (pay_router, webhook_router, donate_router), `.checkout.gate_router` (checkout_gate_router), `.checkout.cache` (start_cache_sweeper), `.checkout.gate` (compute_decision, is_truthy, CheckoutMode), `.jobs_store_dispatch`; lazy-imports `.db` + `.checkout.payment.{registry,base,stripe_provider}` inside lifespan. The shelved `.checkout.router` / `.checkout.debug_router` / `.checkout.saga_resume` are **not** imported or mounted.
-- HTTP routes (mosaic): `GET /health`, `GET /`, `GET /queue`, `POST /generate`, `GET /jobs/{job_id}`, `GET /jobs/{job_id}/preview` (3D preview JSON — see `docs/PREVIEW_API.md`), `GET /jobs/{job_id}/download` (ungated — $0 is allowed so there's nothing to protect). Static mount: `/artifacts` → `OUTPUT_DIR`.
+- Imports: `.picToMosiac` (MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH), `.worker` (run_job, _write_error_manifest), `.Util` (load_project_env), `.pricing` (load_price_table, estimate_cost_cents), `.pay_router` (pay_router, webhook_router, donate_router), `.checkout.gate_router` (checkout_gate_router), `.checkout.cache` (start_cache_sweeper), `.checkout.gate` (compute_decision, is_truthy, CheckoutMode), `.jobs_store_dispatch`; lazy-imports `.db` + `.checkout.payment.{registry,base,stripe_provider}` inside lifespan. The shelved `.checkout.router` / `.checkout.debug_router` / `.checkout.saga_resume` are **not** imported or mounted.
+- HTTP routes (mosaic): `GET /health`, `GET /`, `GET /queue`, `POST /generate`, `GET /jobs/{job_id}`, `GET /jobs/{job_id}/preview` (3D preview JSON — see `docs/PREVIEW_API.md`), `GET /jobs/{job_id}/stats` (authoritative piece count from `stats.json` + optional static-price estimate — `{piece_count, estimated_cost_cents, currency, pricing_as_of}`; cost is null unless every element is priced in `piece_prices.json`; 404 `STATS_NOT_AVAILABLE` when the file is absent, which the frontend renders as "no chip"), `GET /jobs/{job_id}/download` (ungated — $0 is allowed so there's nothing to protect). Static mount: `/artifacts` → `OUTPUT_DIR`.
 - HTTP routes (payment, via mounted routers): `POST /jobs/{job_id}/pay` (`pay_router`, prefix `/jobs`), `POST /donate` (`donate_router`), `POST /webhooks/stripe` (`webhook_router`), `GET /checkout/gate` (`checkout_gate_router` — operational visibility only, always 200). See the PWYW section at the top of this file.
 - Lifespan startup (in order — see "Boot invariants" below): alembic-head check → `init_pool()` (no-op on json) → `verify_schema()` (no-op on json) → capture event loop → StripeProvider registration (powers `pay`/`donate`) → gate computation (DISABLED under PWYW) → L1 boot invariants (incl. B47) → `resume_in_flight_sagas()` (no-op on json) → version-conditional `ProcessPoolExecutor` (`max_tasks_per_child=1` on Python 3.12+, omitted with a `respawn=off` warning on ≤3.11 — D-030) + scheduler + cleanup threads + cache sweeper → `start_reconcile_task()` (no-op on json).
 - Runtime-only side tables on `app.state` (persistent state lives in `jobs_store_dispatch`): `futures` (job_id → Future, also the arbitration sentinel for done-callback vs watchdog), `deadlines` (job_id → wallclock deadline), `intake` (job_id → full settings dict; preserves `to_frame` until TTL eviction), `progress` (job_id → .progress Path), `event_loop`. Plus `executor`, `active_jobs`, `progress_lock`, `scheduler_cv`, `scheduler_shutdown`.
 - Scheduler tick: timeout watchdog → progress mirroring (`.progress` file → store) → `dequeue_next()` (atomic `SELECT FOR UPDATE SKIP LOCKED` on PG; single-lock scan-and-flip on JSON) → executor.submit.
 - `_drop_runtime_state(app, jid, drop_intake=False)` is the single helper for clearing transient refs. Terminal callers use the default (intake preserved until TTL); cleanup_loop passes `drop_intake=True`.
 - `run_job` (the worker entry point) and `_write_error_manifest` are **imported from `.worker`** (D-010) — `Main.py` no longer defines them. `Main.py`'s own error paths (timeout watchdog, submission-failure) call the imported `_write_error_manifest`.
-- Order list handoff: after a successful job, `run_job` (in `worker.py`) copies `workspace/OrderLists/order_list.json` → `outputs/{job_id}/order_list.json` (a stable path; bundled into `artifact.zip` for download, and read by the shelved checkout pipeline if re-enabled).
+- Order list handoff: after a successful job, `run_job` (in `worker.py`) copies `workspace/OrderLists/order_list.json` → `outputs/{job_id}/order_list.json` (a stable path; bundled into `artifact.zip` for download, and read by the shelved checkout pipeline if re-enabled). It copies `workspace/stats.json` → `outputs/{job_id}/stats.json` the same way (full per-element counts for `GET /jobs/{id}/stats` — the stable `order_list.json` must NOT be summed instead: when the order splits, it holds only the first 999-capped chunk of each element).
 
 #### `worker.py` — worker-subprocess entry point
 
@@ -267,7 +272,7 @@ Main.py (FastAPI + scheduler + cleanup threads + ProcessPoolExecutor)
 
 #### `picToMosiac.py` — core image-to-mosaic transformation
 
-- Imports (all package-relative): `.mosaic_types` (MosaicType), `.MosiacToOrder` (GenerateOrderList), `.MosiacToInstruction` (GenerateInstructions), `.preview_builder` (build_preview_payload, write_preview_atomic), `.Util` (GetPaletteRGBArray, load_project_env, log_*).
+- Imports (all package-relative): `.mosaic_types` (MosaicType), `.MosiacToOrder` (GenerateOrderList, BuildStatsPayload), `.MosiacToInstruction` (GenerateInstructions), `.preview_builder` (build_preview_payload, write_preview_atomic), `.Util` (GetPaletteRGBArray, load_project_env, log_*).
 - Module load: computes `LEGO_PALETTE_RGB`, `PALETTE_LAB`, `PALETTE_LAB_RESHAPED` once. (The legacy `sys.path.append(scripts/)` hack is gone — D-019/D-020 made every intra-package import relative.)
 - Public entry: `pic_to_mosaic(img_path, block_width, mosaic_type, background_color_percent, to_frame, output_dir=None, job_id=None, progress_callback=None)`. Drives the 2D vs 3D branch. Immediately after `open_image`, calls `cap_processing_resolution(img)` so the heavy full-res ops in **both** branches see a bounded-resolution image (D-012).
 - Helpers: `image_to_lego_mosaic(img, studs_w, alpha_mask=None, build_image=True)` (LANCZOS resize → UnsharpMask → CIEDE2000 Floyd-Steinberg → returns `(PIL.Image | None, idx_array)`; `build_image=False` skips the PIL image for callers that only need the index array — the 3D bg, D-045), `cap_processing_resolution(img, max_dim=None)` (shrink-only, aspect-preserving `Image.thumbnail` to `MAX_PROCESSING_DIMENSION`; no-op for images already within the cap — bounds the float64 LAB arrays that OOM'd the worker, D-012), `remove_background(pil_img)` (MediaPipe SelfieSegmentation in a `with` block so its native graph is released — D-011; feeds PIL's native RGB straight in, no cv2 channel swap — D-007; threshold pinned as `_SEGMENTATION_FG_THRESHOLD` — D-016), `background_color_budget(bg_idx, fg_mask_np, pct, unique_indices=None)` (pure helper: distinct LEGO colors to keep, scaled over the **background** region `fg_mask_np==0` — D-001), `simplify_background_lego(bg_idx, palette_lab, k, alpha_mask, unique_counts=None)` (per-unique-index remap → vectorized substitution; the optional `unique_indices`/`unique_counts` let the 3D call site share one `np.unique` between the two — D-042), `adjust_lightness_lab(img, delta_L)` (RGBA-preserving L* shift), `nearest_palette_index_lab(pixel_lab)`.
@@ -278,7 +283,7 @@ Main.py (FastAPI + scheduler + cleanup threads + ProcessPoolExecutor)
 
 - Imports (package-relative): `from .Util import GetPaletteDict, SaveDictAsJsonsOptimized, log_info`.
 - Public: `GenerateOrderList(fg_idx, fg_visible_mask, bg_idx, want_frame, output_dir)` — `output_dir` is **required** (the CLI fallback was removed, D-013). Counts the palette-**index** arrays the pipeline already computed via `np.bincount` and maps index→element_id through `PALETTE_ELEMENT_IDS` (D-036 — no RGB round-trip / `np.unique(axis=0)` sort). `bg_idx` is counted in full; `fg_idx` only where `fg_visible_mask` is True (None in 2D). Adds baseplate + optional frame parts, calls `Util.SaveDictAsJsonsOptimized` to write `{output_dir}/OrderLists/order_list.json` (splits into `order_list_1.json`, etc. when any qty > 999). Off-palette is now structurally impossible (every index is a valid slot); an out-of-range **index** still **raises** `RuntimeError` (successor to the D-008 guard) — it never silently drops bricks.
-- Helpers: `GetBaseplatesForSize(width, height)`, `GetFrameForSize(width, height)` — return `{element_id: qty}` for structural parts.
+- Helpers: `GetBaseplatesForSize(width, height)`, `GetFrameForSize(width, height)` — return `{element_id: qty}` for structural parts. `BuildStatsPayload(order)` — pure: full order dict → `{"piece_counts": {element_id_str: qty}, "total_pieces": N}`, the stats.json body (written by `pic_to_mosaic`, non-fatally, right after `GenerateOrderList` in both branches).
 
 #### `MosiacToInstruction.py` — instruction PDF assembler
 
@@ -508,6 +513,7 @@ in the SHELVED docs below. Do not treat them as current behavior.
 **Active (current product):**
 
 - **3D preview API + payload schema (frontend-facing):** `docs/PREVIEW_API.md`.
+- **Piece price table (powers `GET /jobs/{id}/stats`):** `scripts/piece_prices.json` — element_id → US cents, `null` = unknown (estimate goes null until all 62 are filled). To refresh: edit the values + bump `as_of`; no code change and no server restart (`load_price_table` invalidates its cache on the file's mtime — uvicorn `--reload` only watches `.py` files). Deliberately static — no cron/live fetch (LEGO's price API is Cloudflare-fronted with drifting field names, and structural parts aren't on Pick-a-Brick).
 - **Backend switch runbook (JSON <-> Neon):** `docs/BACKEND_SWITCHING.md` -- how to flip `DB_BACKEND` in both directions, locally and on Render (env vars, pre-deploy command, the `override=False` precedence gotcha, B47, verification signals).
 - **Mosaic pipeline defects ledger:** `docs/MOSAIC_DEFECTS.md` -- per-defect root cause, reproduction, fix sketch, verification. Index mirrored in "Known defects (mosaic pipeline)" above.
 
