@@ -18,7 +18,7 @@ Flow:
   GET  /jobs/{id}        (poll)        until status == complete | failed
   GET  /jobs/{id}/download             saves artifact.zip, lists its contents
   GET  /jobs/{id}/preview              3D preview JSON (3d mosaics only)
-  POST /jobs/{id}/pay   {amount:0}     pay-what-you-want, free path -> "free"
+  POST /jobs/{id}/pay   {amount:0, email}  pay-what-you-want, free path -> "free"
   POST /donate          {amount:500}   tip intent (503 if Stripe unconfigured)
 
 Exit code: 0 if the core flow (health -> generate -> complete -> download)
@@ -179,7 +179,10 @@ def main() -> int:
                 log(INFO, f"GET /preview -> {r.status_code} {r.text[:160]}")
 
         # 9. pay-what-you-want, free path --------------------------------------
-        r = c.post(f"{base}/jobs/{job_id}/pay", json={"amount_cents": 0})
+        # email is REQUIRED (build-pack delivery); with no RESEND_API_KEY the
+        # send is skipped server-side, so this is safe to run anywhere.
+        r = c.post(f"{base}/jobs/{job_id}/pay",
+                   json={"amount_cents": 0, "email": "driver-smoke@example.com"})
         if r.status_code == 200 and r.json().get("status") == "free":
             log(OK, f"POST /pay (amount=0) -> free download recorded")
         else:

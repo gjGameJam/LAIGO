@@ -335,12 +335,17 @@ class StripeProvider:
         payment_method_id: str,
         idempotency_key: str,
         metadata: dict | None = None,
+        receipt_email: str | None = None,
     ) -> dict:
         """Create + confirm an immediate-capture PaymentIntent.
 
         `metadata` is attached to the PaymentIntent (e.g. {"job_id": ...}) so a
         later `payment_intent.succeeded` webhook can map the charge back to the
         job that produced it. Stripe metadata values must be strings.
+
+        `receipt_email`, when given, makes Stripe email its own payment receipt
+        on capture (live mode only — test mode sends nothing). The build-pack
+        delivery email is separate (scripts/emailer.py).
 
         Returns a dict:
           {"status": "succeeded" | "requires_action",
@@ -371,6 +376,7 @@ class StripeProvider:
                 confirm=True,
                 idempotency_key=idempotency_key,
                 metadata=metadata or {},
+                receipt_email=receipt_email,
             )
         except Exception as exc:
             self._raise_classified(exc, op="charge")

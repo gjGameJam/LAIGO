@@ -13,14 +13,30 @@ LAIGO converts photos into LEGO mosaic building kits. Given an image, it:
 
 The build pack is now a **digital product sold pay-what-you-want**, not an
 automated physical-brick order. When the user clicks "Download build pack",
-the frontend modal asks them to name a price (≥ $0, zero allowed). The new
-endpoint `POST /jobs/{job_id}/pay` (see `scripts/pay_router.py`) charges that
-amount once via Stripe (immediate-capture PaymentIntent, `job_id` in metadata)
+the frontend modal asks them to name a price (≥ $0, zero allowed) **and a
+required email address**. The endpoint `POST /jobs/{job_id}/pay` (see
+`scripts/pay_router.py`) charges that
+amount once via Stripe (immediate-capture PaymentIntent; `job_id`, `source`,
+and `email` in metadata; `receipt_email` set)
 and records it to `outputs/{job_id}/payment.json`. `POST /webhooks/stripe`
 (signature-verified with `STRIPE_WEBHOOK_SECRET`) is the authoritative recorder
 — it catches 3DS completions and charges whose sync response was lost.
 `GET /jobs/{job_id}/download` stays **ungated** — since $0 is allowed there is
 nothing to protect. `pay`/`charge` are covered by `scripts/test_pay_router.py`.
+
+**Email delivery (2026-07-05):** every completed checkout ($0 or paid) also
+emails the build pack (instructions PDF extracted from `artifact.zip` +
+`order_list.json`) to the given address via `scripts/emailer.py` (Resend REST
+API over httpx; leaf module; fire-and-forget through FastAPI BackgroundTasks —
+a send failure never fails a charge). The webhook path emails too (3DS / lost
+responses), reading the address back from PaymentIntent metadata — LAIGO
+stores nothing; the `outputs/{job_id}/email.json` sentinel (atomic `open(x)`
+claim) dedupes sync-vs-webhook races and Stripe event redelivery, and is
+purged with the job dir at TTL. Tips (`/donate`, `type=tip`) never trigger a
+build-pack email. Oversize packs (> ~35 MB encoded) fall back to
+order-list-only + an expiring download link. Full design + go-live runbook:
+`docs/EMAIL_DELIVERY.md`. Covered by `scripts/test_emailer.py` and the
+send-trigger tests in `test_pay_router.py`.
 
 A second, simpler endpoint `POST /donate` (global, no job scope — `donate_router`
 in `scripts/pay_router.py`) uses the **client-confirm** Stripe pattern instead:
@@ -81,7 +97,7 @@ python colorQuant.py <num_colors>
 
 Automated tests are runnable as bare modules from project root:
 `.venv\Scripts\python.exe -m scripts.test_<name>`. Live PWYW coverage:
-`test_pay_router`, `test_donate_router`. Mosaic pipeline: `test_preview`,
+`test_pay_router`, `test_donate_router`, `test_emailer`. Mosaic pipeline: `test_preview`,
 `test_background_budget`, `test_order_list`, `test_piece_specs`,
 `test_stats_endpoint`. Mosaic jobs
 store (json mode): `test_jobs_store_json`, `test_jobs_store_edge`. The remaining
@@ -139,6 +155,10 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 | `DB_BACKEND` | `json` | `json` | `json` keeps the in-memory jobs store + JSON checkout_store; `postgres` activates the (now-shelved) Neon-backed saga/holds/reconcile path. Reverted to `json` 2026-06-13 alongside the pay-what-you-want pivot. To flip backends, see `docs/BACKEND_SWITCHING.md`. |
 | `CHECKOUT_ENABLED` | — | `false` | Master gate (L0) for the SHELVED checkout saga. The pay-what-you-want endpoint does NOT consult it (it checks the payment registry directly). Kept `false`; setting `true` while `DB_BACKEND=json` trips the B47 boot refusal. |
 | `DATABASE_URL` | — | (none in committed .env; belongs in `.env.secrets`) | Neon **pooler** DSN (host must contain `-pooler`). Read only when `DB_BACKEND=postgres`. Direct endpoint is reserved for `alembic upgrade head` + psql debugging. |
+| `EMAIL_ENABLED` | `false` (unset) | `true` | Master switch for build-pack emails (`scripts/emailer.py`). With no `RESEND_API_KEY`, sends are skipped (per-job log + boot warning) — never a boot failure. |
+| `EMAIL_FROM` | `LAIGO <onboarding@resend.dev>` | same | Sender identity. The resend.dev sender is dev-mode (delivers only to the Resend account owner). Production switch = verify a domain in Resend + change only this var. |
+| `PUBLIC_API_BASE_URL` | — | (empty) | Origin for the `/jobs/{id}/download` link inside emails (oversize/link-only fallback). Falls back to Render's auto-set `RENDER_EXTERNAL_URL`. |
+| `RESEND_API_KEY` | — | (belongs in `.env.secrets`) | Resend API key. Read at send time, not import time. |
 
 ## Architecture
 
@@ -159,6 +179,7 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 | `VisualMaker.py` | Draws isometric LEGO stud visuals for each instruction step |
 | `preview_builder.py` | Pure `build_preview_payload(...)` + atomic `write_preview_atomic(...)` for the 3D preview JSON. Consumed by `GET /jobs/{id}/preview`. See `docs/PREVIEW_API.md`. |
 | `pricing.py` | Stdlib-only leaf: loads the static price table `scripts/piece_prices.json` (element_id → US cents, null = unknown; refresh = edit file + bump `as_of` — a running server picks it up via mtime-checked cache, no restart) and computes the all-or-null `estimate_cost_cents(...)` for `GET /jobs/{id}/stats`. Static by design — no live LEGO.com fetch (Cloudflare-fronted, drifting fields, non-PaB structural parts). |
+| `emailer.py` | Leaf module (stdlib + httpx): emails the build pack after a PWYW checkout via Resend. Extracts the PDF from `artifact.zip`, attaches `order_list.json`, dedupes with the `email.json` sentinel. Never raises. See `docs/EMAIL_DELIVERY.md`. |
 | `Util.py` | LEGO palette (43 RGB colors → element IDs), logging wrappers, JSON serialization |
 | `logger.py` | Rotating file logger (`laigo.log`, 10 MB cap, 1 backup; tunable via `MAX_LOG_SIZE_MB`). Parent process owns the file handler; worker subprocesses log to stdout only (D-009). `propagate=False` (D-002). |
 | `colorQuant.py` | Standalone KMeans color quantization demo (not used by the pipeline) |
@@ -478,10 +499,12 @@ methods. Still load-bearing for the live product:
 - Stripe key validation (test/live + >=8 chars beyond the prefix) lives in
   `checkout/payment/key_format.py:key_mode(key)`; `gate.py`, `stripe_provider.py`,
   and the `Main.py` L1 boot block all import it -- do not add a fourth divergent check.
-- Secrets live in `.env.secrets` (gitignored): `STRIPE_SECRET_KEY` and
-  `STRIPE_WEBHOOK_SECRET`. The `whsec_...` signing secret is required by
+- Secrets live in `.env.secrets` (gitignored): `STRIPE_SECRET_KEY`,
+  `STRIPE_WEBHOOK_SECRET`, and `RESEND_API_KEY` (build-pack emails). The
+  `whsec_...` signing secret is required by
   `POST /webhooks/stripe` (get it from the Stripe dashboard, or from
-  `stripe listen` for local testing).
+  `stripe listen` for local testing) — and the webhook is also what emails
+  the build pack after 3DS completions, so it matters even under PWYW.
 
 ## Boot invariants (`scripts/Main.py` lifespan, in order)
 
@@ -513,6 +536,7 @@ in the SHELVED docs below. Do not treat them as current behavior.
 **Active (current product):**
 
 - **3D preview API + payload schema (frontend-facing):** `docs/PREVIEW_API.md`.
+- **Build-pack email delivery (Resend) — design, email.json schema, go-live runbook:** `docs/EMAIL_DELIVERY.md`.
 - **Piece price table (powers `GET /jobs/{id}/stats`):** `scripts/piece_prices.json` — element_id → US cents, `null` = unknown (estimate goes null until all 62 are filled). To refresh: edit the values + bump `as_of`; no code change and no server restart (`load_price_table` invalidates its cache on the file's mtime — uvicorn `--reload` only watches `.py` files). Deliberately static — no cron/live fetch (LEGO's price API is Cloudflare-fronted with drifting field names, and structural parts aren't on Pick-a-Brick).
 - **Backend switch runbook (JSON <-> Neon):** `docs/BACKEND_SWITCHING.md` -- how to flip `DB_BACKEND` in both directions, locally and on Render (env vars, pre-deploy command, the `override=False` precedence gotcha, B47, verification signals).
 - **Mosaic pipeline defects ledger:** `docs/MOSAIC_DEFECTS.md` -- per-defect root cause, reproduction, fix sketch, verification. Index mirrored in "Known defects (mosaic pipeline)" above.

@@ -150,6 +150,8 @@ log.info(f"JOB_TIMEOUT:      {JOB_TIMEOUT_SECONDS}s")
 log.info(f"JOB_SAGA_RETENTION_DAYS: {JOB_SAGA_RETENTION_DAYS}")
 log.info(f"MAX_UPLOAD_MB:    {upload_mbs}")
 log.info(f"STUDS_PER_BLOCK:  {STUDS_PER_BLOCK}")
+log.info(f"EMAIL_ENABLED:    {os.getenv('EMAIL_ENABLED', 'false')}")
+log.info(f"EMAIL_FROM:       {os.getenv('EMAIL_FROM', '(default)')}")
 
 
 # -----------------------------
@@ -230,6 +232,16 @@ async def lifespan(app: FastAPI):
     except PaymentProviderUnavailable as exc:
         log.warning(f"Payment provider not registered: {exc}")
         # Continue boot — the gate's L1 block decides if this is fatal.
+
+    # Build-pack email (scripts/emailer.py) — non-fatal config check. A
+    # misconfigured emailer must never block boot: sends are fire-and-forget
+    # and every skip is logged per-job, but a boot-time warning makes the
+    # "why is nobody getting emails" case obvious in the startup log.
+    if is_truthy(os.getenv("EMAIL_ENABLED")) and not os.getenv("RESEND_API_KEY", "").strip():
+        log.warning(
+            "EMAIL_ENABLED is true but RESEND_API_KEY is not set "
+            "(.env.secrets / Render env) — build-pack emails will be skipped."
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # CHECKOUT GATE — Layer 1: refuse to boot if checkout is misconfigured.

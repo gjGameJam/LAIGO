@@ -20,6 +20,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scripts import emailer
 from scripts import pay_router as pr
 from scripts.checkout.payment import registry as reg
 from scripts.checkout.payment.base import (
@@ -49,12 +50,13 @@ class _FakeChargeProvider:
         return self._mode
 
     async def charge(self, *, amount_cents, payment_method_id, idempotency_key,
-                     metadata=None):
+                     metadata=None, receipt_email=None):
         self.calls.append({
             "amount_cents": amount_cents,
             "payment_method_id": payment_method_id,
             "idempotency_key": idempotency_key,
             "metadata": metadata,
+            "receipt_email": receipt_email,
         })
         if self._error is not None:
             raise self._error
@@ -78,7 +80,19 @@ class _FakeChargeProvider:
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_JOB = "valid-job-123"
+EMAIL = "buyer@example.com"
 _CLIENT: TestClient = None  # set in main()
+
+# Build-pack email recorder. pay_router hands emailer.send_build_pack_email to
+# BackgroundTasks at request time, so patching the emailer module attribute
+# (done in main()) is enough; TestClient runs background tasks synchronously
+# before the response returns, so asserts right after the POST are safe.
+_SENT = []
+
+
+def _fake_send(**kw):
+    _SENT.append(kw)
+    return "sent"
 
 
 def _use(provider) -> None:
@@ -86,6 +100,7 @@ def _use(provider) -> None:
     reg._reset_for_tests()
     if provider is not None:
         reg.register(provider)
+    _SENT.clear()
 
 
 def _payment_path(job: str) -> Path:
@@ -110,7 +125,8 @@ def _read_payment_json(job: str) -> dict:
 def test_free_path():
     _use(None)  # free path never touches the registry
     _clear_payment_json(VALID_JOB)
-    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay", json={"amount_cents": 0})
+    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay",
+                     json={"amount_cents": 0, "email": EMAIL})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "free" and body["amount_cents"] == 0, body
@@ -118,31 +134,41 @@ def test_free_path():
     assert rec["status"] == "free"
     assert rec["amount_cents"] == 0
     assert rec["payment_intent_id"] is None
-    print("OK: free path -> {status:free} and records a free payment.json")
+    # $0 downloads are emailed too — email is the delivery mechanism.
+    assert len(_SENT) == 1, _SENT
+    assert _SENT[0]["to_email"] == EMAIL
+    assert _SENT[0]["amount_cents"] == 0
+    assert _SENT[0]["job_id"] == VALID_JOB
+    assert _SENT[0]["job_dir"] == pr.OUTPUT_DIR / VALID_JOB
+    print("OK: free path -> {status:free}, records payment.json, emails the pack")
 
 
 def test_below_min():
-    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay", json={"amount_cents": 25})
+    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay",
+                     json={"amount_cents": 25, "email": EMAIL})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "AMOUNT_BELOW_MINIMUM", r.text
     print("OK: 1-49c -> 422 AMOUNT_BELOW_MINIMUM")
 
 
 def test_negative_amount():
-    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay", json={"amount_cents": -5})
+    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay",
+                     json={"amount_cents": -5, "email": EMAIL})
     assert r.status_code == 422, r.text  # pydantic ge=0
     print("OK: negative amount -> 422 (pydantic ge=0)")
 
 
 def test_over_max_amount():
-    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay", json={"amount_cents": 100_000_000})
+    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay",
+                     json={"amount_cents": 100_000_000, "email": EMAIL})
     assert r.status_code == 422, r.text  # pydantic le
     print("OK: over-max amount -> 422 (pydantic le)")
 
 
 def test_missing_payment_method():
     _use(_FakeChargeProvider())
-    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay", json={"amount_cents": 500})
+    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay",
+                     json={"amount_cents": 500, "email": EMAIL})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "PAYMENT_METHOD_REQUIRED", r.text
     print("OK: paying with no payment_method_id -> 422 PAYMENT_METHOD_REQUIRED")
@@ -152,7 +178,7 @@ def test_provider_unavailable():
     _use(None)  # no provider registered
     r = _CLIENT.post(
         f"/jobs/{VALID_JOB}/pay",
-        json={"amount_cents": 500, "payment_method_id": "pm_x"},
+        json={"amount_cents": 500, "payment_method_id": "pm_x", "email": EMAIL},
     )
     assert r.status_code == 503, r.text
     assert r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE", r.text
@@ -170,7 +196,8 @@ def test_charge_success():
     _clear_payment_json(VALID_JOB)
     r = _CLIENT.post(
         f"/jobs/{VALID_JOB}/pay",
-        json={"amount_cents": 500, "payment_method_id": "pm_card_visa"},
+        json={"amount_cents": 500, "payment_method_id": "pm_card_visa",
+              "email": EMAIL},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -182,13 +209,20 @@ def test_charge_success():
     assert prov.calls[0]["amount_cents"] == 500
     assert prov.calls[0]["payment_method_id"] == "pm_card_visa"
     assert prov.calls[0]["idempotency_key"] == f"charge-{VALID_JOB}-500"
-    # job_id carried in metadata so the webhook can map the charge back.
+    # job_id + email carried in metadata so the webhook can map the charge
+    # back AND email the pack after a 3DS completion (no server-side storage).
     assert prov.calls[0]["metadata"]["job_id"] == VALID_JOB
+    assert prov.calls[0]["metadata"]["email"] == EMAIL
+    assert prov.calls[0]["receipt_email"] == EMAIL
     rec = _read_payment_json(VALID_JOB)
     assert rec["status"] == "paid"
     assert rec["amount_cents"] == 500
     assert rec["payment_intent_id"] == "pi_fake_123"
-    print("OK: charge success -> 200 paid, correct charge args, payment.json recorded")
+    # Build pack emailed from the sync success path.
+    assert len(_SENT) == 1, _SENT
+    assert _SENT[0]["to_email"] == EMAIL
+    assert _SENT[0]["amount_cents"] == 500
+    print("OK: charge success -> 200 paid, charge args incl. email, pack emailed")
 
 
 def test_requires_action():
@@ -202,7 +236,8 @@ def test_requires_action():
     _clear_payment_json(VALID_JOB)
     r = _CLIENT.post(
         f"/jobs/{VALID_JOB}/pay",
-        json={"amount_cents": 500, "payment_method_id": "pm_3ds"},
+        json={"amount_cents": 500, "payment_method_id": "pm_3ds",
+              "email": EMAIL},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -212,14 +247,19 @@ def test_requires_action():
     assert not _payment_path(VALID_JOB).exists(), (
         "requires_action must NOT write payment.json (not captured yet)"
     )
-    print("OK: requires_action -> 200 client_secret, no premature payment.json")
+    # No email yet either — the webhook sends it after 3DS completes, using
+    # the address stamped into the PaymentIntent metadata.
+    assert len(_SENT) == 0, _SENT
+    assert prov.calls[0]["metadata"]["email"] == EMAIL
+    assert prov.calls[0]["receipt_email"] == EMAIL
+    print("OK: requires_action -> 200 client_secret, no premature payment.json/email")
 
 
 def test_retryable_error():
     _use(_FakeChargeProvider(error=PaymentRetryableError("transient boom")))
     r = _CLIENT.post(
         f"/jobs/{VALID_JOB}/pay",
-        json={"amount_cents": 500, "payment_method_id": "pm_x"},
+        json={"amount_cents": 500, "payment_method_id": "pm_x", "email": EMAIL},
     )
     assert r.status_code == 503, r.text
     assert r.json()["detail"]["code"] == "PAYMENT_RETRYABLE", r.text
@@ -230,7 +270,7 @@ def test_permanent_error():
     _use(_FakeChargeProvider(error=PaymentPermanentError("card declined")))
     r = _CLIENT.post(
         f"/jobs/{VALID_JOB}/pay",
-        json={"amount_cents": 500, "payment_method_id": "pm_x"},
+        json={"amount_cents": 500, "payment_method_id": "pm_x", "email": EMAIL},
     )
     assert r.status_code == 402, r.text
     assert r.json()["detail"]["code"] == "PAYMENT_FAILED", r.text
@@ -240,7 +280,8 @@ def test_permanent_error():
 def test_invalid_job_id():
     # 'bad.name' routes to the handler (single path segment) but fails the
     # charset guard -> 400 before any filesystem / charge work.
-    r = _CLIENT.post("/jobs/bad.name/pay", json={"amount_cents": 0})
+    r = _CLIENT.post("/jobs/bad.name/pay",
+                     json={"amount_cents": 0, "email": EMAIL})
     assert r.status_code == 400, r.text
     assert r.json()["detail"]["code"] == "INVALID_JOB_ID", r.text
     print("OK: unsafe job_id -> 400 INVALID_JOB_ID")
@@ -248,10 +289,30 @@ def test_invalid_job_id():
 
 def test_job_not_found():
     # Charset-valid id, but no artifact.zip on disk -> 404.
-    r = _CLIENT.post("/jobs/ghost-job-xyz/pay", json={"amount_cents": 0})
+    r = _CLIENT.post("/jobs/ghost-job-xyz/pay",
+                     json={"amount_cents": 0, "email": EMAIL})
     assert r.status_code == 404, r.text
     assert r.json()["detail"]["code"] == "JOB_NOT_FOUND", r.text
     print("OK: nonexistent build pack -> 404 JOB_NOT_FOUND")
+
+
+def test_email_required_and_validated():
+    # Missing email -> 422 (pydantic required field).
+    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay", json={"amount_cents": 0})
+    assert r.status_code == 422, r.text
+    # Malformed email -> 422 (field_validator).
+    for bad in ("not-an-email", "a@b", "a b@c.com", " "):
+        r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay",
+                         json={"amount_cents": 0, "email": bad})
+        assert r.status_code == 422, f"{bad!r}: {r.text}"
+    # Surrounding whitespace is tolerated (stripped by the validator).
+    _use(None)
+    _clear_payment_json(VALID_JOB)
+    r = _CLIENT.post(f"/jobs/{VALID_JOB}/pay",
+                     json={"amount_cents": 0, "email": f"  {EMAIL}  "})
+    assert r.status_code == 200, r.text
+    assert _SENT[0]["to_email"] == EMAIL
+    print("OK: email required; malformed -> 422; whitespace stripped")
 
 
 # ── Webhook ──────────────────────────────────────────────────────────────────
@@ -291,6 +352,7 @@ def test_webhook_records_paid():
     secret = "whsec_test_secret"
     os.environ["STRIPE_WEBHOOK_SECRET"] = secret
     _clear_payment_json(VALID_JOB)
+    _SENT.clear()
     try:
         event = {
             "id": "evt_1",
@@ -313,7 +375,79 @@ def test_webhook_records_paid():
         assert rec["status"] == "paid"
         assert rec["amount_cents"] == 700
         assert rec["payment_intent_id"] == "pi_wh_1"
+        # metadata has no email/source (pre-email-era intent) -> recorded but
+        # no build-pack send.
+        assert len(_SENT) == 0, _SENT
         print("OK: webhook payment_intent.succeeded -> records paid payment.json")
+    finally:
+        os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
+
+def test_webhook_emails_build_pack():
+    secret = "whsec_test_secret"
+    os.environ["STRIPE_WEBHOOK_SECRET"] = secret
+    _clear_payment_json(VALID_JOB)
+    _SENT.clear()
+    try:
+        # The metadata shape /pay stamps at charge time — this is the 3DS /
+        # lost-sync-response recovery path.
+        event = {
+            "id": "evt_3ds",
+            "type": "payment_intent.succeeded",
+            "data": {"object": {
+                "id": "pi_wh_3ds",
+                "amount": 900,
+                "amount_received": 900,
+                "metadata": {"job_id": VALID_JOB, "source": "laigo_pay",
+                             "email": EMAIL},
+            }},
+        }
+        payload = json.dumps(event).encode()
+        header = _stripe_sig(payload, secret)
+        r = _CLIENT.post("/webhooks/stripe", content=payload,
+                         headers={"stripe-signature": header,
+                                  "content-type": "application/json"})
+        assert r.status_code == 200, r.text
+        assert len(_SENT) == 1, _SENT
+        assert _SENT[0]["to_email"] == EMAIL
+        assert _SENT[0]["amount_cents"] == 900
+        assert _SENT[0]["job_id"] == VALID_JOB
+        assert _SENT[0]["job_dir"] == pr.OUTPUT_DIR / VALID_JOB
+        print("OK: webhook with laigo_pay metadata email -> build pack emailed")
+    finally:
+        os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
+
+def test_webhook_tip_never_emails():
+    secret = "whsec_test_secret"
+    os.environ["STRIPE_WEBHOOK_SECRET"] = secret
+    _SENT.clear()
+    try:
+        for metadata in (
+            # A /donate tip attributed to a job must never trigger the
+            # build-pack email, even if an email somehow rides along.
+            {"job_id": VALID_JOB, "type": "tip", "email": EMAIL,
+             "source": "laigo_pay"},
+            # laigo_pay intent with a malformed email -> no send.
+            {"job_id": VALID_JOB, "source": "laigo_pay", "email": "not-valid"},
+            # email present but source missing -> no send.
+            {"job_id": VALID_JOB, "email": EMAIL},
+        ):
+            event = {
+                "id": "evt_x",
+                "type": "payment_intent.succeeded",
+                "data": {"object": {"id": "pi_x", "amount": 500,
+                                    "amount_received": 500,
+                                    "metadata": metadata}},
+            }
+            payload = json.dumps(event).encode()
+            header = _stripe_sig(payload, secret)
+            r = _CLIENT.post("/webhooks/stripe", content=payload,
+                             headers={"stripe-signature": header,
+                                      "content-type": "application/json"})
+            assert r.status_code == 200, r.text
+            assert len(_SENT) == 0, (metadata, _SENT)
+        print("OK: webhook tips / bad / unsourced emails never trigger a send")
     finally:
         os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
 
@@ -364,6 +498,12 @@ def main() -> int:
         app.include_router(pr.webhook_router)
         _CLIENT = TestClient(app)
 
+        # Intercept the build-pack sender. pay_router resolves
+        # emailer.send_build_pack_email at request time, so patching the
+        # module attribute is sufficient.
+        saved_send = emailer.send_build_pack_email
+        emailer.send_build_pack_email = _fake_send
+
         try:
             test_free_path()
             test_below_min()
@@ -377,12 +517,16 @@ def main() -> int:
             test_permanent_error()
             test_invalid_job_id()
             test_job_not_found()
+            test_email_required_and_validated()
             test_webhook_no_secret()
             test_webhook_bad_signature()
             test_webhook_records_paid()
+            test_webhook_emails_build_pack()
+            test_webhook_tip_never_emails()
             test_webhook_ignores_other_events()
             test_record_no_downgrade()
         finally:
+            emailer.send_build_pack_email = saved_send
             reg._reset_for_tests()
             os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
 

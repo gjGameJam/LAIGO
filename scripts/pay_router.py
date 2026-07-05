@@ -11,13 +11,19 @@ types. It does not touch saga.py / optimizer.py / clients/ / gate.py — those
 are shelved.
 
 Flow (the modal + Stripe Elements live in the separate laigo-frontend repo):
-  1. User clicks "Download build pack" → modal asks for an amount.
-  2. amount == 0  → POST {amount_cents: 0}; we record a free download.
+  1. User clicks "Download build pack" → modal asks for an amount + email.
+  2. amount == 0  → POST {amount_cents: 0, email}; we record a free download.
   3. amount  > 0  → frontend collects the card with Stripe Elements, creates a
-     PaymentMethod, POSTs {amount_cents, payment_method_id}; we charge it.
+     PaymentMethod, POSTs {amount_cents, payment_method_id, email}; we charge it.
      If Stripe needs 3DS we return {status: "requires_action", client_secret}
      for the frontend to finish, then it proceeds to download.
   4. Frontend calls GET /jobs/{job_id}/download (which is ungated).
+  5. Every completed checkout ($0 or paid) also emails the build pack to the
+     given address via scripts/emailer.py (fire-and-forget BackgroundTasks —
+     a send failure never fails the charge). For card payments the address
+     rides in the PaymentIntent metadata so the webhook can email after 3DS
+     completions without any server-side storage; the emailer's email.json
+     sentinel dedupes when both the sync and webhook paths fire.
 """
 
 from __future__ import annotations
@@ -30,8 +36,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
+
+from . import emailer
 
 from .checkout.payment import registry as payment_registry
 from .checkout.payment.base import (
@@ -62,6 +70,11 @@ _MAX_CHARGE_CENTS = 99_999_999
 # crafted value (e.g. containing '..' or separators) can't escape OUTPUT_DIR.
 _SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+# Deliberately loose shape check (something@something.tld). Resend/Stripe are
+# the real validators; pydantic's EmailStr would pull in the email-validator
+# dependency for no additional guarantee of deliverability.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 pay_router = APIRouter()
 
 
@@ -75,6 +88,19 @@ class PayRequest(BaseModel):
         description="Stripe PaymentMethod id (pm_...) from Stripe Elements. "
                     "Required when amount_cents > 0.",
     )
+    email: str = Field(
+        ..., max_length=254,
+        description="Where the build pack is sent. Required, including for $0 "
+                    "downloads.",
+    )
+
+    @field_validator("email")
+    @classmethod
+    def _check_email(cls, v: str) -> str:
+        v = v.strip()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("must be a valid email address")
+        return v
 
 
 def _record_payment(
@@ -118,7 +144,7 @@ def _record_payment(
 
 
 @pay_router.post("/{job_id}/pay")
-async def pay(job_id: str, body: PayRequest):
+async def pay(job_id: str, body: PayRequest, background_tasks: BackgroundTasks):
     # ── Validate job_id (path-traversal guard) ───────────────────────────────
     if not _SAFE_JOB_ID.match(job_id):
         raise HTTPException(
@@ -141,6 +167,11 @@ async def pay(job_id: str, body: PayRequest):
     # ── Free download ────────────────────────────────────────────────────────
     if amount == 0:
         _record_payment(job_id, amount_cents=0, status="free", payment_intent_id=None)
+        background_tasks.add_task(
+            emailer.send_build_pack_email,
+            job_id=job_id, to_email=body.email, amount_cents=0,
+            job_dir=OUTPUT_DIR / job_id,
+        )
         logger.info("pay.free job_id=%s", job_id)
         return {"status": "free", "amount_cents": 0}
 
@@ -188,8 +219,13 @@ async def pay(job_id: str, body: PayRequest):
             # charge instead of failing with a confusing IdempotencyError.
             idempotency_key=f"charge-{job_id}-{amount}",
             # Carried on the PaymentIntent so the webhook can map a later
-            # payment_intent.succeeded back to this job.
-            metadata={"job_id": job_id, "source": "laigo_pay"},
+            # payment_intent.succeeded back to this job — including the
+            # address to email the build pack to (the PaymentIntent is the
+            # only place it is stored).
+            metadata={"job_id": job_id, "source": "laigo_pay",
+                      "email": body.email},
+            # Stripe's own payment receipt (live mode only).
+            receipt_email=body.email,
         )
     except PaymentRetryableError as exc:
         logger.warning("pay.retryable job_id=%s err=%s", job_id, exc)
@@ -227,6 +263,11 @@ async def pay(job_id: str, body: PayRequest):
     _record_payment(
         job_id, amount_cents=amount, status="paid",
         payment_intent_id=result["payment_intent_id"],
+    )
+    background_tasks.add_task(
+        emailer.send_build_pack_email,
+        job_id=job_id, to_email=body.email, amount_cents=amount,
+        job_dir=OUTPUT_DIR / job_id,
     )
     logger.info(
         "pay.succeeded job_id=%s pi=%s amount=%d",
@@ -348,7 +389,7 @@ webhook_router = APIRouter()
 
 
 @webhook_router.post("/webhooks/stripe")
-async def stripe_webhook(request: Request):
+async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
     secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
     if not secret:
         logger.error("stripe webhook hit but STRIPE_WEBHOOK_SECRET is not set")
@@ -384,6 +425,20 @@ async def stripe_webhook(request: Request):
                 job_id, amount_cents=int(amount), status="paid",
                 payment_intent_id=pi_id,
             )
+            # Email the build pack for /pay charges (3DS completions and
+            # charges whose sync response was lost). Gated on the metadata
+            # /pay stamps at charge time: tips (/donate, type=tip) carry no
+            # email and must never trigger a build-pack send. The emailer's
+            # sentinel dedupes against the sync path and event redelivery.
+            email = (metadata.get("email") or "").strip()
+            if (email and _EMAIL_RE.match(email)
+                    and metadata.get("source") == "laigo_pay"
+                    and metadata.get("type") != "tip"):
+                background_tasks.add_task(
+                    emailer.send_build_pack_email,
+                    job_id=job_id, to_email=email, amount_cents=int(amount),
+                    job_dir=OUTPUT_DIR / job_id,
+                )
             logger.info(
                 "webhook.recorded job_id=%s pi=%s amount=%s", job_id, pi_id, amount,
             )
