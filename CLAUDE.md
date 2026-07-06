@@ -25,8 +25,9 @@ and records it to `outputs/{job_id}/payment.json`. `POST /webhooks/stripe`
 nothing to protect. `pay`/`charge` are covered by `scripts/test_pay_router.py`.
 
 **Email delivery (2026-07-05):** every completed checkout ($0 or paid) also
-emails the build pack (instructions PDF extracted from `artifact.zip` +
-`order_list.json`) to the given address via `scripts/emailer.py` (Resend REST
+emails the build pack (instructions PDF + **every** `order_list*.json`, splits
+included, all extracted from `artifact.zip`; the stable job-root copy is only
+the zip-missing fallback) to the given address via `scripts/emailer.py` (Resend REST
 API over httpx; leaf module; fire-and-forget through FastAPI BackgroundTasks —
 a send failure never fails a charge). The webhook path emails too (3DS / lost
 responses), reading the address back from PaymentIntent metadata — LAIGO
@@ -37,6 +38,16 @@ build-pack email. Oversize packs (> ~35 MB encoded) fall back to
 order-list-only + an expiring download link. Full design + go-live runbook:
 `docs/EMAIL_DELIVERY.md`. Covered by `scripts/test_emailer.py` and the
 send-trigger tests in `test_pay_router.py`.
+
+**Rollout state as of 2026-07-05** (live checklist at the top of
+`docs/EMAIL_DELIVERY.md` — update it there as steps complete): backend
+pushed; local dev-mode delivery verified to the owner's inbox; Stripe
+test-mode webhook destination created (`laigo.onrender.com/webhooks/stripe`,
+`payment_intent.succeeded`); **laigo-frontend required-email field shipped
+and live** (verified in the deployed bundle 2026-07-05 — checkout no longer
+422s). Still pending: `RESEND_API_KEY` + `STRIPE_WEBHOOK_SECRET` as **Render
+env vars** (they're only in local `.env.secrets`, which never deploys), and
+a verified custom domain in Resend before real customers can receive mail.
 
 A second, simpler endpoint `POST /donate` (global, no job scope — `donate_router`
 in `scripts/pay_router.py`) uses the **client-confirm** Stripe pattern instead:
@@ -179,7 +190,7 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 | `VisualMaker.py` | Draws isometric LEGO stud visuals for each instruction step |
 | `preview_builder.py` | Pure `build_preview_payload(...)` + atomic `write_preview_atomic(...)` for the 3D preview JSON. Consumed by `GET /jobs/{id}/preview`. See `docs/PREVIEW_API.md`. |
 | `pricing.py` | Stdlib-only leaf: loads the static price table `scripts/piece_prices.json` (element_id → US cents, null = unknown; refresh = edit file + bump `as_of` — a running server picks it up via mtime-checked cache, no restart) and computes the all-or-null `estimate_cost_cents(...)` for `GET /jobs/{id}/stats`. Static by design — no live LEGO.com fetch (Cloudflare-fronted, drifting fields, non-PaB structural parts). |
-| `emailer.py` | Leaf module (stdlib + httpx): emails the build pack after a PWYW checkout via Resend. Extracts the PDF from `artifact.zip`, attaches `order_list.json`, dedupes with the `email.json` sentinel. Never raises. See `docs/EMAIL_DELIVERY.md`. |
+| `emailer.py` | Leaf module (stdlib + httpx): emails the build pack after a PWYW checkout via Resend. Extracts the PDF and every `order_list*.json` (splits included) from `artifact.zip`, dedupes with the `email.json` sentinel. Never raises. See `docs/EMAIL_DELIVERY.md`. |
 | `Util.py` | LEGO palette (43 RGB colors → element IDs), logging wrappers, JSON serialization |
 | `logger.py` | Rotating file logger (`laigo.log`, 10 MB cap, 1 backup; tunable via `MAX_LOG_SIZE_MB`). Parent process owns the file handler; worker subprocesses log to stdout only (D-009). `propagate=False` (D-002). |
 | `colorQuant.py` | Standalone KMeans color quantization demo (not used by the pipeline) |

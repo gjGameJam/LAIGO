@@ -37,7 +37,8 @@ No database, Neon, or marketplace creds are needed: `.env` ships
 `DB_BACKEND=json` and `CHECKOUT_ENABLED=false`, so the DB pool / saga / reconcile
 paths all no-op at boot. `.env.secrets` (gitignored) holds a Stripe **test** key
 on this machine — present, the tip/paid endpoints work; absent, only those
-return 503 (the whole mosaic flow + free `$0` pay still work).
+return 503 (the whole mosaic flow + free `$0` pay still work). It also holds a
+**real `RESEND_API_KEY`** — see the email gotcha below before driving `/pay`.
 
 ## Run (agent path) — background server + driver
 
@@ -86,7 +87,9 @@ launch the server — it drives the one you just started:
 
 This uploads `images/stella1.jpg` to `POST /generate`, polls `GET /jobs/{id}`
 0→100 %, downloads the artifact zip, fetches the 3D preview, and exercises
-`POST /jobs/{id}/pay` ($0 free path) + `POST /donate`. Last line on success:
+`POST /jobs/{id}/pay` ($0 free path, with the now-required `email` field —
+the driver sends `driver-smoke@example.com`) + `POST /donate`. Last line on
+success:
 
 ```
 [PASS] core flow green: health -> generate -> complete -> download -> pay
@@ -175,6 +178,19 @@ entry points.
   test card. The gate still reports DISABLED (that gates the *shelved* saga, not
   these endpoints). Delete/rename `.env.secrets` to simulate the no-Stripe case
   → tip/paid endpoints 503, free `$0` pay + mosaic flow unaffected.
+- **`/pay` requires `email` and REALLY SENDS EMAIL on this machine.**
+  `POST /jobs/{id}/pay` needs `{"amount_cents": N, "email": "..."}` (422
+  without it — including $0), and after any completed checkout the server
+  emails the build pack via Resend (`scripts/emailer.py`,
+  `docs/EMAIL_DELIVERY.md`). `.env.secrets` here holds a REAL `RESEND_API_KEY`
+  in dev mode: sends to the account owner's own address (grantjbenson@icloud.com)
+  actually deliver to his inbox; sends to any other address are accepted by
+  the API route (200) but rejected by Resend — recorded as `"failed"` in
+  `outputs/{id}/email.json`, which is fine for smoke tests. The driver uses
+  `driver-smoke@example.com` for exactly this reason. Duplicate sends are
+  suppressed per job via the `email.json` sentinel (`"duplicate"` in the log);
+  delete that file to force a resend. To silence email entirely, set
+  `EMAIL_ENABLED=false` in the process env before launching.
 
 ## Troubleshooting
 
@@ -184,6 +200,8 @@ entry points.
 | Boot log shows `[Errno 10048] ... bind on address` | Port taken by a leftover instance. Pick a free port (step 1). A server answering `/health` on that port is the *old* one, not yours. |
 | Driver prints `Is the server up?` / connection refused | Server not booted yet (mediapipe import is slow) or wrong `--base-url` port. Re-run the health curl (step 3) first. |
 | `POST /generate` → 422 | Bad params — `mosaic_block_width` out of 1–40, or `mosaic_type` not `2d`/`3d`. |
+| `POST /pay` → 422 with `loc: ["body","email"]` | The `email` field is required for all amounts (incl. $0) since 2026-07-05. Add `"email": "driver-smoke@example.com"` to the body. |
+| Paid $0 but no email arrived | Expected unless the recipient is the Resend account owner (dev mode) — check `outputs/{id}/email.json` for `sent`/`failed`/`skipped` and the server log for `email.*` lines. |
 | `POST /donate` / paid `/pay` → 503 `PAYMENTS_UNAVAILABLE` | No Stripe key. Add `STRIPE_SECRET_KEY=sk_test_…` to `.env.secrets`. Free `$0` pay and the mosaic flow don't need it. |
 | `pip install` → `SSLCertVerificationError` | Corporate TLS proxy. Add `--trusted-host pypi.org --trusted-host files.pythonhosted.org` to the pip command. |
 | Job stuck at low % then fails ~30 min later | Width too large for the input; keep `--width` small. The 30-min timeout watchdog force-fails runaway jobs. |

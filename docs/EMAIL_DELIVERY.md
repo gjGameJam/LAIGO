@@ -1,10 +1,44 @@
 # Build-Pack Email Delivery (ACTIVE — PWYW product)
 
+> **Rollout status (2026-07-05):**
+> - ✅ Backend code complete, tested, pushed. Verified end-to-end locally:
+>   a real $0 checkout delivered the pack (both attachments) to the owner's
+>   inbox via Resend dev mode; duplicate suppression and failure/retry
+>   confirmed live.
+> - ✅ Local `.env.secrets` has `RESEND_API_KEY` and `STRIPE_WEBHOOK_SECRET`
+>   (dashboard destination secret) set.
+> - ✅ Stripe **test-mode** event destination created:
+>   `https://laigo.onrender.com/webhooks/stripe`, event
+>   `payment_intent.succeeded` only, snapshot payloads.
+> - ❌ **Render env vars NOT set yet**: `RESEND_API_KEY` and
+>   `STRIPE_WEBHOOK_SECRET` must be added to the `laigo` service (the local
+>   `.env.secrets` never deploys — it's gitignored). Until then, production
+>   skips email sends (fails soft) and answers the webhook 503 (Stripe will
+>   retry, and eventually pauses the destination).
+> - ✅ **laigo-frontend email field shipped and LIVE** (verified 2026-07-05:
+>   the deployed bundle at laigo-frontend.onrender.com contains the email
+>   input and sends `email` in both the $0 and paid `/pay` bodies —
+>   frontend repo commit `041cb6a`). Production checkout no longer 422s.
+>   Spec remains in "Frontend contract" below. One cosmetic deviation:
+>   buttons validate email on click rather than being disabled until valid.
+> - ❌ Custom domain not verified — dev-mode Resend delivers ONLY to the
+>   Resend account owner's own address; customers receive nothing until a
+>   domain is verified and `EMAIL_FROM` is updated.
+> - ⏳ Live-mode Stripe: when switching off `sk_test_`, create a second
+>   live-mode event destination (its own `whsec_`) and update Render.
+
 After a pay-what-you-want checkout — including $0 — the customer is emailed
-their build pack (instructions PDF + Pick-a-Brick order list) via
-[Resend](https://resend.com). The email **is** the delivery: files are read
-from `outputs/{job_id}/` at send time and attached, so nothing (including the
-customer's address) is retained beyond the existing job TTL (~1h).
+their build pack (instructions PDF + every Pick-a-Brick order list, splits
+included) via [Resend](https://resend.com). The email **is** the delivery:
+files are read from `outputs/{job_id}/` at send time and attached, so nothing
+(including the customer's address) is retained beyond the existing job TTL
+(~1h). Subject: "Your LAIGO Mosaic Maker build pack is ready" (appears only
+as the subject, never in the body); the body carries step-by-step Pick a
+Brick ordering instructions — sign-in optional, upload the list, then the
+exact button flow "View All Pieces" → "Pick Selected Pieces" → "Add To Bag" →
+"View Bag" → checkout, plus the multi-file note for split orders (all pieces
+are assumed available; the PDF is flagged as the build guide only) — and ends
+with the job id as its very last element.
 
 Module: `scripts/emailer.py` (leaf — stdlib + httpx; the Resend API is one
 JSON POST, no SDK dependency). Tests: `python -m scripts.test_emailer`,
@@ -57,13 +91,17 @@ by the TTL cleanup.
 
 ## Attachments and the oversize fallback
 
-- `order_list.json` — stable copy at the job root.
+- Order lists — **all** `OrderLists/order_list*.json` members of
+  `artifact.zip`, extracted in-memory at send time and sorted numerically
+  (`order_list.json`, `order_list_1.json`, …; large mosaics split when any
+  element exceeds 999). Falls back to the stable job-root `order_list.json`
+  (first 999-capped chunk only) when the zip is missing or unreadable.
 - `instructions.pdf` — exists **only inside `artifact.zip`** (the workspace is
   deleted after zipping); extracted in-memory from the
   `Instructions/instructions.pdf` member at send time.
 - Resend caps the message at 40 MB **after base64** (×4/3 inflation). If the
   raw bytes would exceed `_ENCODED_CAP_BYTES` (35 MB encoded), or the PDF
-  member is missing, the email attaches the order list only and carries the
+  member is missing, the email attaches the order lists only and carries the
   `GET /jobs/{id}/download` link with an "expires in about an hour" note
   (`link_only_fallback: true`).
 - Link origin: `PUBLIC_API_BASE_URL` env, falling back to Render's auto-set
@@ -103,7 +141,50 @@ effect on the next send after a restart; no code change for any of this.
 
 ## Frontend contract (laigo-frontend repo)
 
-The pay modal must collect a required email and include it in the
-`POST /jobs/{id}/pay` body for both $0 and paid flows; missing/malformed
-email now returns 422. **Deploy the frontend change before or together with
-the backend** — after the backend lands, email-less `/pay` calls fail.
+The pay modal must collect a **required** email and include it in the
+`POST /jobs/{id}/pay` body for both $0 and paid flows. The backend with this
+requirement is already pushed — email-less `/pay` calls 422, so this is the
+blocking frontend task.
+
+Request body:
+
+```json
+{"amount_cents": 0, "payment_method_id": "pm_…", "email": "customer@example.com"}
+```
+
+- `email`: required for ALL amounts including 0; max length 254; trimmed
+  server-side; must match `^[^@\s]+@[^@\s]+\.[^@\s]+$` (loose by design —
+  the frontend should mirror this, not be stricter).
+- `payment_method_id`: unchanged — only required when `amount_cents > 0`.
+
+**Two distinct 422 shapes** the frontend must handle:
+
+1. Field validation (missing/malformed email, pydantic) — `detail` is an
+   **array**; find entries whose `loc` contains `"email"` and render inline
+   on the email input:
+   ```json
+   {"detail": [{"type": "missing", "loc": ["body", "email"], "msg": "Field required"}]}
+   {"detail": [{"type": "value_error", "loc": ["body", "email"],
+                "msg": "Value error, must be a valid email address"}]}
+   ```
+2. Business rules (existing behavior) — `detail` is an **object**:
+   `{"detail": {"error": "…", "code": "AMOUNT_BELOW_MINIMUM", "min_cents": 50}}`
+   (also `PAYMENT_METHOD_REQUIRED`, `INVALID_JOB_ID` 400, `JOB_NOT_FOUND` 404,
+   `PAYMENTS_UNAVAILABLE`/`PAYMENT_RETRYABLE` 503, `PAYMENT_FAILED` 402).
+
+Validation order: body shape (422) → job_id charset (400) → artifact exists
+(404) — a bad email wins over a bad job id.
+
+Success responses are unchanged (`free` / `paid` / `requires_action`).
+**3DS:** after `requires_action`, run Stripe.js confirmation with the
+returned `client_secret` as today and do NOT re-call `/pay` — the backend
+webhook detects the completion and sends the email itself (the address rides
+in the PaymentIntent metadata).
+
+UX requirements: email input required before both the free-download button
+and the card submit; success states should say the pack was emailed (mention
+checking spam); keep the existing ungated download button — email is a
+parallel channel, not a replacement. `/pay` responses never surface email
+send success/failure (fire-and-forget by design), so "no email arrived at a
+test address" in dev mode is expected, not a bug. `POST /donate` is
+unchanged (no email, never emailed).

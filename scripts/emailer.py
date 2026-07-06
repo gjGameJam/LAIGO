@@ -1,8 +1,8 @@
 """Build-pack email delivery via Resend.
 
 After a pay-what-you-want checkout (including $0), the customer is emailed
-their build pack — the instructions PDF and the Pick-a-Brick order list — as
-attachments. The files are read from outputs/{job_id}/ at send time and
+their build pack — the instructions PDF and the Pick-a-Brick order list(s) —
+as attachments. The files are read from outputs/{job_id}/ at send time and
 nothing is retained beyond the existing job TTL: the email IS the delivery,
 and email.json (which holds the recipient address) is purged with the job dir.
 
@@ -27,6 +27,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -51,6 +52,11 @@ _SEND_TIMEOUT_S = 60.0
 # after zipping). This is its member path; _load_attachments falls back to
 # scanning the namelist in case the layout ever shifts.
 _PDF_MEMBER = "Instructions/instructions.pdf"
+
+# Order-list zip members, matched by basename: order_list.json plus the
+# order_list_N.json splits SaveDictAsJsonsOptimized writes when any element
+# exceeds 999. The capture group is the split index (None for the first file).
+_ORDER_LIST_RE = re.compile(r"order_list(?:_(\d+))?\.json")
 
 _DEFAULT_FROM = "LAIGO <onboarding@resend.dev>"
 
@@ -101,7 +107,7 @@ def send_build_pack_email(
             logger.info("email.duplicate job_id=%s", job_id)
             return "duplicate"
 
-        attachments, link_only = _load_attachments(job_dir)
+        attachments, link_only, order_list_names = _load_attachments(job_dir)
         url = _download_url(job_id)
 
         if not attachments:
@@ -120,10 +126,11 @@ def send_build_pack_email(
         body = {
             "from": os.getenv("EMAIL_FROM", "").strip() or _DEFAULT_FROM,
             "to": [to_email],
-            "subject": "Your LEGO build pack is ready",
+            "subject": "Your LAIGO Mosaic Maker build pack is ready",
             "html": _build_html(
                 job_id=job_id, amount_cents=amount_cents,
                 link_only=link_only, url=url,
+                order_list_names=order_list_names,
             ),
             "attachments": [
                 {"filename": name, "content": base64.b64encode(data).decode("ascii")}
@@ -218,50 +225,70 @@ def _claim_send(job_dir: Path) -> bool:
         return prior.get("status") == "failed"
 
 
-def _load_attachments(job_dir: Path) -> tuple[list[tuple[str, bytes]], bool]:
+def _load_attachments(
+    job_dir: Path,
+) -> tuple[list[tuple[str, bytes]], bool, list[str]]:
     """Gather (filename, bytes) attachments for the build pack.
 
-    order_list.json comes from its stable copy at the job root; the
-    instructions PDF is extracted in-memory from artifact.zip (its only home).
-    Returns (attachments, link_only_fallback) — link_only is True when the PDF
-    could not be included (missing, or would push the encoded message over
-    Resend's cap), in which case the email body points at the download URL.
-    An empty attachments list means nothing usable exists on disk.
+    Order lists and the instructions PDF are both extracted in-memory from
+    artifact.zip — the zip is the only place ALL order-list files live (large
+    mosaics split into order_list_1.json, …; the stable job-root copy holds
+    only the first 999-capped chunk, and is used here only as a fallback when
+    the zip is missing or unreadable).
+
+    Returns (attachments, link_only_fallback, order_list_names) — link_only is
+    True when the PDF could not be included (missing, or would push the
+    encoded message over Resend's cap), in which case the email body points at
+    the download URL. An empty attachments list means nothing usable exists
+    on disk.
     """
     attachments: list[tuple[str, bytes]] = []
     link_only = False
 
-    order_path = job_dir / "order_list.json"
-    if order_path.is_file():
-        attachments.append(("order_list.json", order_path.read_bytes()))
-
+    order_lists: list[tuple[int, str, bytes]] = []  # (split_index, name, data)
     pdf_bytes: bytes | None = None
     zip_path = job_dir / "artifact.zip"
     if zip_path.is_file():
         try:
             with zipfile.ZipFile(zip_path) as zf:
-                member = _PDF_MEMBER if _PDF_MEMBER in zf.namelist() else next(
-                    (n for n in zf.namelist() if n.endswith("instructions.pdf")),
+                names = zf.namelist()
+                for n in names:
+                    m = _ORDER_LIST_RE.fullmatch(n.rsplit("/", 1)[-1])
+                    if m:
+                        idx = int(m.group(1)) if m.group(1) else 0
+                        order_lists.append((idx, m.group(0), zf.read(n)))
+                member = _PDF_MEMBER if _PDF_MEMBER in names else next(
+                    (n for n in names if n.endswith("instructions.pdf")),
                     None,
                 )
                 if member is not None:
                     pdf_bytes = zf.read(member)
         except Exception as exc:
-            logger.warning("email.pdf_extract_failed zip=%s err=%s", zip_path, exc)
+            logger.warning("email.zip_extract_failed zip=%s err=%s", zip_path, exc)
+
+    if order_lists:
+        order_lists.sort()  # numeric split order: order_list, _1, _2, … _10
+        attachments.extend((name, data) for _, name, data in order_lists)
+    else:
+        order_path = job_dir / "order_list.json"
+        if order_path.is_file():
+            attachments.append(("order_list.json", order_path.read_bytes()))
+
+    order_list_names = [name for name, _ in attachments]
 
     if pdf_bytes is None:
         link_only = True
     else:
         raw_total = len(pdf_bytes) + sum(len(d) for _, d in attachments)
         if raw_total * 4 / 3 > _ENCODED_CAP_BYTES:
-            # Attach the small order list only; the body carries the download
+            # Attach the small order lists only; the body carries the download
             # link for the full pack. Base64 inflates by 4/3, and Resend's
             # 40 MB limit applies to the encoded message.
             link_only = True
         else:
             attachments.append(("instructions.pdf", pdf_bytes))
 
-    return attachments, link_only
+    return attachments, link_only, order_list_names
 
 
 def _download_url(job_id: str) -> str | None:
@@ -279,12 +306,16 @@ def _download_url(job_id: str) -> str | None:
 
 def _build_html(
     *, job_id: str, amount_cents: int, link_only: bool, url: str | None,
+    order_list_names: list[str],
 ) -> str:
-    parts = ["<h2>Your LEGO build pack is ready!</h2>"]
+    # The subject already says the pack is ready — don't repeat it here.
+    n_lists = len(order_list_names)
+    list_word = "brick order lists" if n_lists > 1 else "brick order list"
+    parts = ["<h2>Time to build!</h2>"]
 
     if link_only:
         parts.append(
-            "<p>Attached is your brick order list. Your step-by-step "
+            f"<p>Attached is your {list_word}. Your step-by-step "
             "instructions PDF could not be attached (it may be too large "
             "for email)."
         )
@@ -301,8 +332,11 @@ def _build_html(
             )
     else:
         parts.append(
-            "<p>Attached are your step-by-step building instructions and "
-            "the brick order list for your mosaic.</p>"
+            "<p>We've attached your step-by-step building instructions "
+            f"(instructions.pdf) and the {list_word} for your mosaic. "
+            "The instructions PDF covers assembling the LEGO set only. "
+            "To get the pieces themselves, follow the ordering steps "
+            "below.</p>"
         )
         if url:
             parts.append(
@@ -310,15 +344,40 @@ def _build_html(
                 "for about an hour after your mosaic was generated.</p>"
             )
 
-    parts.append(
-        "<p>The order list JSON can be uploaded straight to LEGO.com "
-        "Pick-a-Brick to buy exactly the bricks you need.</p>"
-    )
+    if n_lists:
+        steps = [
+            '<li>Go to <a href="https://www.lego.com/en-us/pick-and-build/'
+            'pick-a-brick">LEGO&reg; Pick a Brick</a>. Signing in to your '
+            "LEGO account is optional.</li>",
+            "<li>Choose &ldquo;Upload a list&rdquo; and select the attached "
+            "<b>order_list.json</b>.</li>",
+        ]
+        if n_lists > 1:
+            files = ", ".join(order_list_names)
+            steps.append(
+                "<li>Your mosaic needs more than 999 of some pieces, so the "
+                f"order is split across {n_lists} files ({files}). Pick a "
+                "Brick caps each piece at 999 per order &mdash; upload and "
+                "check out each file as a separate order.</li>"
+            )
+        steps.append(
+            "<li>Click &ldquo;View All Pieces&rdquo;, then &ldquo;Pick "
+            "Selected Pieces&rdquo;, then &ldquo;Add To Bag&rdquo;.</li>"
+        )
+        steps.append("<li>Click &ldquo;View Bag&rdquo; and check out.</li>")
+        steps.append(
+            "<li>When your bricks arrive, follow instructions.pdf step by "
+            "step to build your mosaic.</li>"
+        )
+        parts.append("<h3>How to order your bricks</h3>")
+        parts.append("<ol>\n" + "\n".join(steps) + "\n</ol>")
+
     if amount_cents > 0:
         parts.append(
             f"<p>Thank you for your contribution of "
             f"${amount_cents / 100:.2f} &mdash; it keeps LAIGO running!</p>"
         )
+    # Keep the job id as the very last element of the body.
     parts.append(f'<p style="color:#888;font-size:12px">Job {job_id}</p>')
     return "\n".join(parts)
 

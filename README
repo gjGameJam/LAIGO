@@ -4,7 +4,10 @@ LAIGO — LEGO Mosaic Builder
 Converts a photo into a LEGO mosaic: a color-quantized brick layout,
 a Pick-a-Brick order list (uploadable to lego.com), and a step-by-step
 PDF build guide. The finished build pack is sold pay-what-you-want
-(name your price; $0 is allowed).
+(name your price; $0 is allowed) and is emailed to the customer after
+every checkout — the pay modal collects a required email address, and
+the pack (instructions PDF + order list) arrives as attachments via
+Resend (docs/EMAIL_DELIVERY.md).
 
 Full project guide: CLAUDE.md
 
@@ -30,7 +33,10 @@ First-time setup
 1. Create the venv and install deps (project root).
 2. Copy `.env` (committed defaults) and create `.env.secrets` (gitignored).
    For the pay-what-you-want endpoints, set `STRIPE_SECRET_KEY` and
-   `STRIPE_WEBHOOK_SECRET` (see CLAUDE.md "Payment provider"). The default
+   `STRIPE_WEBHOOK_SECRET` (see CLAUDE.md "Payment provider"). For
+   build-pack email delivery, set `RESEND_API_KEY`
+   (docs/EMAIL_DELIVERY.md; without it, checkouts still work and email
+   sends are skipped with a boot warning). The default
    `DB_BACKEND=json` needs no database — there is nothing to migrate.
 
 The automated checkout / marketplace-ordering pipeline is shelved; its setup
@@ -46,7 +52,10 @@ GET  /jobs/{job_id}                            — poll job status.
 GET  /jobs/{job_id}/preview                    — 3D-renderable mosaic JSON (docs/PREVIEW_API.md).
 GET  /jobs/{job_id}/download                   — download the artifact zip when complete (ungated).
 POST /jobs/{job_id}/pay                         — pay-what-you-want charge for the build pack.
-POST /donate                                   — standalone tip (client-confirm Stripe).
+                                                 Body requires amount_cents AND email (all
+                                                 amounts, incl. $0); the build pack is emailed
+                                                 to that address after the checkout completes.
+POST /donate                                   — standalone tip (client-confirm Stripe; no email).
 
 The zip contains:
   - order_list.json       (upload to lego.com Pick-a-Brick)
@@ -62,6 +71,7 @@ Live product:
 
     scripts.test_pay_router
     scripts.test_donate_router
+    scripts.test_emailer
     scripts.test_preview
     scripts.test_background_budget
     scripts.test_order_list

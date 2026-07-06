@@ -55,8 +55,14 @@ _ORDER_BYTES = b'{"3005": 42, "302426": 7}'
 _TMP: Path = None  # set in main()
 
 
+def _split_bytes(i: int) -> bytes:
+    """Distinct payload per order_list_{i}.json split, so round-trip
+    assertions prove each file's bytes came from the right zip member."""
+    return b'{"split": %d}' % i
+
+
 def _make_job(job_id, *, with_zip=True, with_pdf=True, with_order=True,
-              pdf_bytes=_PDF_BYTES) -> Path:
+              pdf_bytes=_PDF_BYTES, extra_order_lists=0) -> Path:
     job_dir = _TMP / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     if with_order:
@@ -65,6 +71,8 @@ def _make_job(job_id, *, with_zip=True, with_pdf=True, with_order=True,
         with zipfile.ZipFile(job_dir / "artifact.zip", "w") as zf:
             zf.writestr("manifest.json", "{}")
             zf.writestr("OrderLists/order_list.json", _ORDER_BYTES)
+            for i in range(1, extra_order_lists + 1):
+                zf.writestr(f"OrderLists/order_list_{i}.json", _split_bytes(i))
             if with_pdf:
                 zf.writestr("Instructions/instructions.pdf", pdf_bytes)
     return job_dir
@@ -104,11 +112,27 @@ def test_happy_path():
     body = post["json_body"]
     assert body["from"] == "LAIGO Test <onboarding@resend.dev>", body["from"]
     assert body["to"] == ["buyer@example.com"], body["to"]
-    assert body["subject"] == "Your LEGO build pack is ready"
+    assert body["subject"] == "Your LAIGO Mosaic Maker build pack is ready"
     atts = _attachment_map(post)
     assert atts["order_list.json"] == _ORDER_BYTES, "order list must round-trip"
     assert atts["instructions.pdf"] == _PDF_BYTES, "pdf must round-trip from zip"
-    assert "$7.50" in body["html"], body["html"]
+    html = body["html"]
+    assert "$7.50" in html, html
+    assert body["subject"] not in html, "subject must appear only as the subject"
+    assert html.rstrip().endswith("Job job-happy</p>"), (
+        "job id must be the very last element of the body"
+    )
+    assert "Pick a Brick" in html, "body must carry the ordering instructions"
+    assert "Signing in to your LEGO account is optional" in html, html
+    for button in ("View All Pieces", "Pick Selected Pieces", "Add To Bag",
+                   "View Bag"):
+        assert button in html, f"ordering steps must walk through {button!r}"
+    assert "assembling the LEGO set only" in html, (
+        "must clarify the PDF is the build guide, not the ordering guide"
+    )
+    assert "Bricks &amp; Pieces" not in html, (
+        "availability caveat was removed — all pieces are assumed available"
+    )
     rec = _email_json(job_dir)
     assert rec["status"] == "sent", rec
     assert rec["to"] == "buyer@example.com"
@@ -222,6 +246,43 @@ def test_missing_pdf_member_sends_link_only():
         os.environ.pop("RENDER_EXTERNAL_URL", None)
 
 
+def test_split_order_lists_all_attached():
+    job_dir = _make_job("job-split", extra_order_lists=2)
+    # Make the stable job-root copy stale to prove the zip is the source.
+    (job_dir / "order_list.json").write_bytes(b'{"stale": true}')
+    out = _send("job-split", job_dir)
+    assert out == "sent", out
+    post = _POSTS[-1]
+    atts = _attachment_map(post)
+    assert list(atts) == [
+        "order_list.json", "order_list_1.json", "order_list_2.json",
+        "instructions.pdf",
+    ], atts.keys()
+    assert atts["order_list.json"] == _ORDER_BYTES, "first list must come from the zip"
+    assert atts["order_list_1.json"] == _split_bytes(1)
+    assert atts["order_list_2.json"] == _split_bytes(2)
+    html = post["json_body"]["html"]
+    assert "separate order" in html, "must tell the customer to order each file"
+    assert "order_list_2.json" in html, "must name the split files"
+    rec = _email_json(job_dir)
+    assert sorted(rec["attachments"]) == [
+        "instructions.pdf", "order_list.json", "order_list_1.json",
+        "order_list_2.json",
+    ], rec
+    print("OK: split order -> all order_list_N.json attached from zip + noted in body")
+
+
+def test_zip_missing_falls_back_to_stable_copy():
+    job_dir = _make_job("job-nozip", with_zip=False)
+    out = _send("job-nozip", job_dir)
+    assert out == "sent", out
+    atts = _attachment_map(_POSTS[-1])
+    assert list(atts) == ["order_list.json"], atts.keys()
+    assert atts["order_list.json"] == _ORDER_BYTES
+    assert _email_json(job_dir)["link_only_fallback"] is True
+    print("OK: no zip -> stable job-root order_list.json still attached, link-only")
+
+
 def test_nothing_usable_fails():
     job_dir = _make_job("job-empty", with_zip=False, with_order=False)
     before = len(_POSTS)
@@ -276,6 +337,8 @@ def main() -> int:
             test_oversize_falls_back_to_link()
             test_disabled_or_keyless_skips()
             test_missing_pdf_member_sends_link_only()
+            test_split_order_lists_all_attached()
+            test_zip_missing_falls_back_to_stable_copy()
             test_nothing_usable_fails()
             test_download_url_none_without_origin()
     finally:
