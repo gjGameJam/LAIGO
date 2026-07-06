@@ -7,7 +7,8 @@
 >   confirmed live.
 > - ✅ Local `.env.secrets` has `RESEND_API_KEY` and `STRIPE_WEBHOOK_SECRET`
 >   (dashboard destination secret) set.
-> - ✅ Stripe **test-mode** event destination created:
+> - ✅ Stripe **live-mode** event destination created (`we_1TppjIHz…` — it
+>   was live-mode from the start, despite earlier drafts calling it test):
 >   `https://laigo.onrender.com/webhooks/stripe`, event
 >   `payment_intent.succeeded` only, snapshot payloads.
 > - ✅ **Render env vars set (2026-07-05)**: `RESEND_API_KEY`,
@@ -33,8 +34,12 @@
 > - ❌ Custom domain not verified — dev-mode Resend delivers ONLY to the
 >   Resend account owner's own address; customers receive nothing until a
 >   domain is verified and `EMAIL_FROM` is updated.
-> - ⏳ Live-mode Stripe: when switching off `sk_test_`, create a second
->   live-mode event destination (its own `whsec_`) and update Render.
+> - ✅ **Live-mode Stripe active (2026-07-05)**: Render runs `sk_live_`, the
+>   deployed frontend bundle carries the matching `pk_live_`, and the (live)
+>   webhook destination's secret is what's on Render (its dashboard test
+>   event delivered 200). Consequence: test cards no longer work against
+>   prod — paid-path testing means a real charge + refund; the $0 path never
+>   touches Stripe and stays the free end-to-end email test.
 
 After a pay-what-you-want checkout — including $0 — the customer is emailed
 their build pack (instructions PDF + every Pick-a-Brick order list, splits
@@ -147,7 +152,8 @@ change for any of this.
    Render dashboard env var** (the committed `.env` never loads on Render).
    That's the whole switch.
 3. **3DS coverage prerequisite:** the webhook path only works once
-   `STRIPE_WEBHOOK_SECRET` is set (currently empty ⇒ webhook returns 503).
+   `STRIPE_WEBHOOK_SECRET` is set (done on Render 2026-07-05; missing ⇒
+   webhook returns 503).
    Local: `stripe listen --forward-to localhost:8000/webhooks/stripe`. Prod:
    Stripe Dashboard → Webhooks → endpoint for `payment_intent.succeeded`.
 4. **Pricing guardrail:** free tier is 3,000 emails/mo (100/day); next tier

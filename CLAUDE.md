@@ -47,10 +47,13 @@ live**; Render env vars set (`RESEND_API_KEY`, `STRIPE_WEBHOOK_SECRET`, and
 `Main.py` skips `load_project_env()` when `RENDER` is set (D-048), so any
 email knob prod needs must be a dashboard env var); **prod end-to-end
 verified** — Stripe test event delivered 200 and a real $0 checkout sent the
-pack via Resend (sentinel `status: "sent"`, both attachments). Still pending:
-a verified custom domain in Resend before real customers can receive mail
-(dev-mode sender delivers only to the owner), and `EMAIL_FROM` on Render at
-that switch.
+pack via Resend (sentinel `status: "sent"`, both attachments). **Stripe is in
+live mode** (2026-07-05): `sk_live_` on Render, `pk_live_` in the deployed
+frontend, and the webhook destination is live-mode with its secret on Render
+— so test cards no longer work against prod (paid-path tests = real charge +
+refund; the $0 path never touches Stripe). Still pending: a verified custom
+domain in Resend before real customers can receive mail (dev-mode sender
+delivers only to the owner), and `EMAIL_FROM` on Render at that switch.
 
 A second, simpler endpoint `POST /donate` (global, no job scope — `donate_router`
 in `scripts/pay_router.py`) uses the **client-confirm** Stripe pattern instead:
