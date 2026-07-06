@@ -41,13 +41,16 @@ send-trigger tests in `test_pay_router.py`.
 
 **Rollout state as of 2026-07-05** (live checklist at the top of
 `docs/EMAIL_DELIVERY.md` — update it there as steps complete): backend
-pushed; local dev-mode delivery verified to the owner's inbox; Stripe
-test-mode webhook destination created (`laigo.onrender.com/webhooks/stripe`,
-`payment_intent.succeeded`); **laigo-frontend required-email field shipped
-and live** (verified in the deployed bundle 2026-07-05 — checkout no longer
-422s). Still pending: `RESEND_API_KEY` + `STRIPE_WEBHOOK_SECRET` as **Render
-env vars** (they're only in local `.env.secrets`, which never deploys), and
-a verified custom domain in Resend before real customers can receive mail.
+deployed (`40a3c91`); **laigo-frontend required-email field shipped and
+live**; Render env vars set (`RESEND_API_KEY`, `STRIPE_WEBHOOK_SECRET`, and
+`EMAIL_ENABLED=true` — the committed `.env` **never loads on Render** because
+`Main.py` skips `load_project_env()` when `RENDER` is set (D-048), so any
+email knob prod needs must be a dashboard env var); **prod end-to-end
+verified** — Stripe test event delivered 200 and a real $0 checkout sent the
+pack via Resend (sentinel `status: "sent"`, both attachments). Still pending:
+a verified custom domain in Resend before real customers can receive mail
+(dev-mode sender delivers only to the owner), and `EMAIL_FROM` on Render at
+that switch.
 
 A second, simpler endpoint `POST /donate` (global, no job scope — `donate_router`
 in `scripts/pay_router.py`) uses the **client-confirm** Stripe pattern instead:
@@ -166,7 +169,7 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 | `DB_BACKEND` | `json` | `json` | `json` keeps the in-memory jobs store + JSON checkout_store; `postgres` activates the (now-shelved) Neon-backed saga/holds/reconcile path. Reverted to `json` 2026-06-13 alongside the pay-what-you-want pivot. To flip backends, see `docs/BACKEND_SWITCHING.md`. |
 | `CHECKOUT_ENABLED` | — | `false` | Master gate (L0) for the SHELVED checkout saga. The pay-what-you-want endpoint does NOT consult it (it checks the payment registry directly). Kept `false`; setting `true` while `DB_BACKEND=json` trips the B47 boot refusal. |
 | `DATABASE_URL` | — | (none in committed .env; belongs in `.env.secrets`) | Neon **pooler** DSN (host must contain `-pooler`). Read only when `DB_BACKEND=postgres`. Direct endpoint is reserved for `alembic upgrade head` + psql debugging. |
-| `EMAIL_ENABLED` | `false` (unset) | `true` | Master switch for build-pack emails (`scripts/emailer.py`). With no `RESEND_API_KEY`, sends are skipped (per-job log + boot warning) — never a boot failure. |
+| `EMAIL_ENABLED` | `false` (unset) | `true` | Master switch for build-pack emails (`scripts/emailer.py`). With no `RESEND_API_KEY`, sends are skipped (per-job log + boot warning) — never a boot failure. **On Render this must be a dashboard env var** — the committed `.env` is never loaded there (D-048 `RENDER` idiom), which silently disabled all prod sends until set (2026-07-05). |
 | `EMAIL_FROM` | `LAIGO <onboarding@resend.dev>` | same | Sender identity. The resend.dev sender is dev-mode (delivers only to the Resend account owner). Production switch = verify a domain in Resend + change only this var. |
 | `PUBLIC_API_BASE_URL` | — | (empty) | Origin for the `/jobs/{id}/download` link inside emails (oversize/link-only fallback). Falls back to Render's auto-set `RENDER_EXTERNAL_URL`. |
 | `RESEND_API_KEY` | — | (belongs in `.env.secrets`) | Resend API key. Read at send time, not import time. |

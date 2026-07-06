@@ -10,11 +10,20 @@
 > - ✅ Stripe **test-mode** event destination created:
 >   `https://laigo.onrender.com/webhooks/stripe`, event
 >   `payment_intent.succeeded` only, snapshot payloads.
-> - ❌ **Render env vars NOT set yet**: `RESEND_API_KEY` and
->   `STRIPE_WEBHOOK_SECRET` must be added to the `laigo` service (the local
->   `.env.secrets` never deploys — it's gitignored). Until then, production
->   skips email sends (fails soft) and answers the webhook 503 (Stripe will
->   retry, and eventually pauses the destination).
+> - ✅ **Render env vars set (2026-07-05)**: `RESEND_API_KEY`,
+>   `STRIPE_WEBHOOK_SECRET` (the dashboard destination's signing secret),
+>   **and `EMAIL_ENABLED=true`**. ⚠️ That third one was a debugging find: the
+>   committed `.env` **never loads on Render** — `Main.py` skips
+>   `load_project_env()` whenever the `RENDER` env var is set (the D-048
+>   idiom) — so every email knob production needs (`EMAIL_ENABLED` now,
+>   `EMAIL_FROM` at domain switch) must be a **dashboard env var**, not just
+>   the secrets. Symptom when missing: boot log `EMAIL_ENABLED: false` and
+>   per-job `email.skipped`, no sentinel written.
+> - ✅ **Production end-to-end verified (2026-07-05)**: webhook probe returns
+>   400 INVALID_SIGNATURE (secret loaded) and the Stripe dashboard test event
+>   delivered 200; a real $0 checkout on Render (job `955774e6`) produced an
+>   `email.json` sentinel with `status: "sent"` (Resend id `69d6408f…`), both
+>   attachments, no link-only fallback, to the owner's address.
 > - ✅ **laigo-frontend email field shipped and LIVE** (verified 2026-07-05:
 >   the deployed bundle at laigo-frontend.onrender.com contains the email
 >   input and sends `email` in both the $0 and paid `/pay` bodies —
@@ -110,16 +119,22 @@ by the TTL cleanup.
 
 ## Configuration
 
-| Variable | Where | Meaning |
-|---|---|---|
-| `EMAIL_ENABLED` | `.env` | Master switch. `true` in the committed .env. |
-| `EMAIL_FROM` | `.env` | Sender identity. Dev default `LAIGO <onboarding@resend.dev>`. |
-| `PUBLIC_API_BASE_URL` | `.env` | Origin for download links; empty on Render (fallback below). |
-| `RESEND_API_KEY` | `.env.secrets` / Render env | Secret. Empty ⇒ sends skipped + boot warning. |
-| `RENDER_EXTERNAL_URL` | set by Render | Automatic link-origin fallback. |
+| Variable | Where (local) | Where (Render) | Meaning |
+|---|---|---|---|
+| `EMAIL_ENABLED` | `.env` | **Render env var (required)** | Master switch. `true` in the committed .env, but see below. |
+| `EMAIL_FROM` | `.env` | Render env var (needed at domain switch) | Sender identity. Dev default `LAIGO <onboarding@resend.dev>`. |
+| `PUBLIC_API_BASE_URL` | `.env` | not needed (fallback below) | Origin for download links. |
+| `RESEND_API_KEY` | `.env.secrets` | **Render env var (required)** | Secret. Empty ⇒ sends skipped + boot warning. |
+| `RENDER_EXTERNAL_URL` | — | set automatically by Render | Automatic link-origin fallback. |
 
-All env reads happen at call time — a key added to `.env.secrets` takes
-effect on the next send after a restart; no code change for any of this.
+⚠️ **The committed `.env` does not exist as far as production is concerned**:
+`Main.py` only calls `load_project_env()` when the `RENDER` env var is unset
+(D-048). Anything the emailer must see on Render — including plain non-secret
+switches like `EMAIL_ENABLED` — has to be a dashboard env var.
+
+All env reads happen at call time — a key added to `.env.secrets` (or the
+Render dashboard) takes effect on the next send after a restart; no code
+change for any of this.
 
 ## Resend account / go-live
 
@@ -128,8 +143,9 @@ effect on the next send after a restart; no code change for any of this.
    **only to the account owner's own address** — perfect for testing, useless
    for customers.
 2. **Production:** verify a custom domain in Resend (add its SPF + DKIM DNS
-   records), then set `EMAIL_FROM=LAIGO <builds@yourdomain.com>`. That's the
-   whole switch.
+   records), then set `EMAIL_FROM=LAIGO <builds@yourdomain.com>` — **as a
+   Render dashboard env var** (the committed `.env` never loads on Render).
+   That's the whole switch.
 3. **3DS coverage prerequisite:** the webhook path only works once
    `STRIPE_WEBHOOK_SECRET` is set (currently empty ⇒ webhook returns 503).
    Local: `stripe listen --forward-to localhost:8000/webhooks/stripe`. Prod:
