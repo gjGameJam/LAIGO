@@ -130,6 +130,11 @@ def test_happy_path():
     assert "assembling the LEGO set only" in html, (
         "must clarify the PDF is the build guide, not the ordering guide"
     )
+    assert ("LAIGO Mosaic Maker is an independent product" in html
+            and "LEGO Group" in html), (
+        "must carry the non-affiliation disclaimer spelling the product name "
+        "in full (bare 'LAIGO' reads too close to 'LEGO')"
+    )
     assert "Bricks &amp; Pieces" not in html, (
         "availability caveat was removed — all pieces are assumed available"
     )

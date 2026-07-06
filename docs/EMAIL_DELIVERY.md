@@ -52,7 +52,8 @@ Brick ordering instructions — sign-in optional, upload the list, then the
 exact button flow "View All Pieces" → "Pick Selected Pieces" → "Add To Bag" →
 "View Bag" → checkout, plus the multi-file note for split orders (all pieces
 are assumed available; the PDF is flagged as the build guide only) — and ends
-with the job id as its very last element.
+with a LEGO® non-affiliation / trademark disclaimer followed by the job id as
+its very last element.
 
 Module: `scripts/emailer.py` (leaf — stdlib + httpx; the Resend API is one
 JSON POST, no SDK dependency). Tests: `python -m scripts.test_emailer`,

@@ -58,7 +58,7 @@ _PDF_MEMBER = "Instructions/instructions.pdf"
 # exceeds 999. The capture group is the split index (None for the first file).
 _ORDER_LIST_RE = re.compile(r"order_list(?:_(\d+))?\.json")
 
-_DEFAULT_FROM = "LAIGO <onboarding@resend.dev>"
+_DEFAULT_FROM = "LAIGO Mosaic Maker <onboarding@resend.dev>"
 
 
 def is_enabled() -> bool:
@@ -375,8 +375,20 @@ def _build_html(
     if amount_cents > 0:
         parts.append(
             f"<p>Thank you for your contribution of "
-            f"${amount_cents / 100:.2f} &mdash; it keeps LAIGO running!</p>"
+            f"${amount_cents / 100:.2f} &mdash; it keeps LAIGO Mosaic Maker "
+            "running!</p>"
         )
+    # Trademark / non-affiliation disclaimer. LEGO is a registered trademark of
+    # the LEGO Group; LAIGO Mosaic Maker is an independent product with no LEGO
+    # affiliation. Always spell the product name in full here — bare "LAIGO"
+    # reads too close to "LEGO".
+    parts.append(
+        '<p style="color:#888;font-size:12px">LAIGO Mosaic Maker is an '
+        "independent product and is not affiliated with, authorized by, "
+        "sponsored by, or endorsed by the LEGO Group. LEGO&reg; is a trademark "
+        "of the LEGO Group, which does not sponsor, authorize, or endorse this "
+        "product.</p>"
+    )
     # Keep the job id as the very last element of the body.
     parts.append(f'<p style="color:#888;font-size:12px">Job {job_id}</p>')
     return "\n".join(parts)
