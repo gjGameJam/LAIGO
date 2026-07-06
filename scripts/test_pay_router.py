@@ -104,7 +104,7 @@ def _use(provider) -> None:
 
 
 def _payment_path(job: str) -> Path:
-    return pr.OUTPUT_DIR / job / "payment.json"
+    return pr.PRIVATE_DIR / job / "payment.json"
 
 
 def _clear_payment_json(job: str) -> None:
@@ -490,6 +490,9 @@ def main() -> int:
         # Redirect OUTPUT_DIR (read as a module global inside the handler at
         # call time) and seed a dummy build pack for the valid job.
         pr.OUTPUT_DIR = Path(td)
+        # payment.json / email.json now live under PRIVATE_DIR (never web-served);
+        # redirect it into the tempdir too so the test doesn't touch ./private.
+        pr.PRIVATE_DIR = Path(td) / "_private"
         (pr.OUTPUT_DIR / VALID_JOB).mkdir(parents=True)
         (pr.OUTPUT_DIR / VALID_JOB / "artifact.zip").write_text("dummy")
 

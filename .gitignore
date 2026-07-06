@@ -182,6 +182,10 @@ cython_debug/
 
 # LAIGO secrets — never commit
 .env.secrets
+# .env is intentionally committed (vars only, no secrets). But .env.local /
+# .env.production etc. are where devs put REAL DSNs/keys — never commit those.
+.env.local
+.env.*.local
 
 # LAIGO runtime data — never commit. Contains customer-uploaded images, generated
 # build packs (artifact.zip / order_list.json / preview.json), pay-what-you-want
@@ -191,3 +195,9 @@ cython_debug/
 # rotate any leaked LEGO session in outputs/lego_debug/_verify_storage_state.json.
 inputs/
 outputs/
+# Per-job PII / financial sidecars (payment.json, email.json) — written OUTSIDE
+# the web-served outputs/ tree. Never commit.
+private/
+# Rotating log + its backups (laigo.log, laigo.log.1). The generic `*.log` rule
+# above does NOT match the `.log.1` rotation backup, which slipped into git.
+laigo.log*

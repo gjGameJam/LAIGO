@@ -9,6 +9,21 @@ from PIL import Image, ImageFilter, ImageOps
 # a missing wheel should fail loudly at boot.
 import pillow_heif
 pillow_heif.register_heif_opener()
+# Decompression-bomb hard cap (security). Pillow's default only *warns* at
+# ~89.5M px and errors at ~178M, so a small crafted file that declares ~178M px
+# can still force a ~0.5 GB decode in whichever process opens it. This module is
+# imported in BOTH the API parent (Main._validate_image) and the worker
+# subprocess (worker.open_image), so setting the process-global cap here — and
+# promoting the warning to an error so the limit bites at 1x, not 2x — enforces
+# one hard ceiling everywhere: Image.open()/load() raises above the cap, which is
+# already caught (-> HTTP 400 in the parent, -> job failure in the worker). 80 MP
+# clears essentially every consumer camera while bounding the shared parent's
+# decode; env-overridable via MAX_IMAGE_PIXELS. Mosaic output is <=640 studs, so
+# nothing legitimate needs anywhere near this many pixels.
+import warnings
+_MAX_DECODE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", 80_000_000))
+Image.MAX_IMAGE_PIXELS = _MAX_DECODE_PIXELS
+warnings.filterwarnings("error", category=Image.DecompressionBombWarning)
 import numpy as np
 from skimage import color
 from pathlib import Path

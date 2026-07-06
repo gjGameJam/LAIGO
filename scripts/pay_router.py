@@ -52,9 +52,16 @@ from .checkout.payment.stripe_provider import construct_webhook_event
 
 logger = logging.getLogger("laigo")
 
-# Mirror Main.py's OUTPUT_DIR resolution so payment.json lands beside the
-# job's artifact.zip / order_list.json.
+# Mirror Main.py's OUTPUT_DIR resolution — this is where the (web-served)
+# build-pack artifacts live and is used ONLY for the artifact.zip existence gate.
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
+
+# payment.json (amount + PaymentIntent id) and email.json (the emailer's
+# sentinel, holding the recipient address) are written HERE, not under
+# OUTPUT_DIR. OUTPUT_DIR is web-served via Main.py's /artifacts mount, so these
+# financial/PII records must live outside it. Must match Main.PRIVATE_DIR; the
+# cleanup thread purges PRIVATE_DIR/{job_id} on the same TTL as the job.
+PRIVATE_DIR = Path(os.getenv("PRIVATE_DIR", "./private")).resolve()
 
 # Stripe's minimum charge for USD is 50 cents. Amounts of 1–49 cents are
 # rejected with a clear message; 0 is free.
@@ -110,14 +117,15 @@ def _record_payment(
     status: str,
     payment_intent_id: Optional[str],
 ) -> None:
-    """Best-effort revenue log at outputs/{job_id}/payment.json.
+    """Best-effort revenue log at private/{job_id}/payment.json.
 
     Never raises — a failed write must not fail the customer's charge. Mirrors
     the per-job JSON pattern used by checkout/checkout_store.py. This is a log,
-    NOT a download gate (GET /download stays ungated).
+    NOT a download gate (GET /download stays ungated). Written under PRIVATE_DIR
+    (not OUTPUT_DIR) so it is never reachable through the /artifacts static mount.
     """
     try:
-        job_dir = OUTPUT_DIR / job_id
+        job_dir = PRIVATE_DIR / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         record_path = job_dir / "payment.json"
         # Never downgrade an authoritative paid record. Guards against a $0
@@ -170,7 +178,7 @@ async def pay(job_id: str, body: PayRequest, background_tasks: BackgroundTasks):
         background_tasks.add_task(
             emailer.send_build_pack_email,
             job_id=job_id, to_email=body.email, amount_cents=0,
-            job_dir=OUTPUT_DIR / job_id,
+            job_dir=OUTPUT_DIR / job_id, sentinel_dir=PRIVATE_DIR / job_id,
         )
         logger.info("pay.free job_id=%s", job_id)
         return {"status": "free", "amount_cents": 0}
@@ -267,7 +275,7 @@ async def pay(job_id: str, body: PayRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(
         emailer.send_build_pack_email,
         job_id=job_id, to_email=body.email, amount_cents=amount,
-        job_dir=OUTPUT_DIR / job_id,
+        job_dir=OUTPUT_DIR / job_id, sentinel_dir=PRIVATE_DIR / job_id,
     )
     logger.info(
         "pay.succeeded job_id=%s pi=%s amount=%d",
@@ -437,7 +445,7 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(
                     emailer.send_build_pack_email,
                     job_id=job_id, to_email=email, amount_cents=int(amount),
-                    job_dir=OUTPUT_DIR / job_id,
+                    job_dir=OUTPUT_DIR / job_id, sentinel_dir=PRIVATE_DIR / job_id,
                 )
             logger.info(
                 "webhook.recorded job_id=%s pi=%s amount=%s", job_id, pi_id, amount,

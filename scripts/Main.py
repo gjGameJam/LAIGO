@@ -95,6 +95,11 @@ if not is_truthy(os.getenv("RENDER")):
 
 INPUT_DIR = Path(os.getenv("INPUT_DIR", "./inputs")).resolve()
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs")).resolve()
+# Per-job PII / financial sidecars (payment.json, email.json) live HERE, never
+# in OUTPUT_DIR: OUTPUT_DIR is web-served via the /artifacts mount, so customer
+# email + payment records must not sit inside it. pay_router.py and emailer.py
+# resolve the same dir from PRIVATE_DIR; cleanup_loop purges it at job TTL.
+PRIVATE_DIR = Path(os.getenv("PRIVATE_DIR", "./private")).resolve()
 
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", 600))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))
@@ -123,10 +128,57 @@ MAX_UPLOAD_SIZE = upload_mbs * 1024 * 1024
 # unchanged from the customer's perspective.
 SCHEDULER_IDLE_POLL_SECONDS = 0.5
 
+# -----------------------------
+# RATE LIMITING (per-IP, /generate only)
+# -----------------------------
+# /generate is the one heavy endpoint — it spawns a worker holding
+# mediapipe+numpy+PIL. /pay and /donate are light Stripe calls and are
+# deliberately NOT limited. One request per GENERATE_RATE_LIMIT_SECONDS per IP.
+#
+# State is in-process, which is correct ONLY because the web layer is a single
+# uvicorn process (LAIGO runs one web process + a ProcessPoolExecutor for jobs;
+# its own docs warn multi-worker breaks in-process state). If the Render start
+# command ever grows `--workers N`, move this to a shared store (Redis). The key
+# is the real client IP (resolved by real_ip_middleware) — there is no auth
+# product, so IP is the only stable per-caller key available.
+GENERATE_RATE_LIMIT_SECONDS = int(os.getenv("GENERATE_RATE_LIMIT_SECONDS", "20"))
+_generate_rl_lock = threading.Lock()
+_last_generate_by_ip: dict[str, float] = {}
+
+
+def _enforce_generate_rate_limit(ip: str | None) -> None:
+    """Raise 429 (+ Retry-After) if `ip` did an allowed /generate within the
+    cooldown. The cooldown runs from the last ALLOWED request, so a caller who is
+    rejected does not extend their own lockout. No-op when `ip` is unknown (can't
+    key it) — on Render X-Forwarded-For is always present so this is rare."""
+    if not ip:
+        return
+    now = time.monotonic()
+    with _generate_rl_lock:
+        # Opportunistic sweep so the dict stays bounded by IPs-seen-in-the-window,
+        # not total distinct IPs ever seen.
+        expired = [k for k, t in _last_generate_by_ip.items()
+                   if now - t >= GENERATE_RATE_LIMIT_SECONDS]
+        for k in expired:
+            del _last_generate_by_ip[k]
+        last = _last_generate_by_ip.get(ip)
+        if last is not None:
+            retry_after = max(1, int(GENERATE_RATE_LIMIT_SECONDS - (now - last)) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Rate limit: one image per {GENERATE_RATE_LIMIT_SECONDS}s. "
+                    f"Try again in {retry_after}s."
+                ),
+                headers={"Retry-After": str(retry_after)},
+            )
+        _last_generate_by_ip[ip] = now
+
 # Fail loudly on startup if directories can't be created or written to
 try:
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    PRIVATE_DIR.mkdir(parents=True, exist_ok=True)
 except Exception as e:
     log.critical(f"Failed to create required directories: {e}")
     raise
@@ -518,8 +570,36 @@ app.include_router(webhook_router)
 app.include_router(donate_router)  # global POST /donate (client-confirm tip)
 app.include_router(checkout_gate_router)
 
+class _AllowlistStaticFiles(StaticFiles):
+    """Serve ONLY public build-pack files from OUTPUT_DIR.
+
+    The output dir also holds per-job sidecars that must never be web-served —
+    payment.json (amount + PaymentIntent id) and email.json (customer email
+    PII), plus manifest_failed.json (tracebacks + the full settings dict). A raw
+    StaticFiles mount served all of them to anyone holding a job_id. This
+    allowlists known-safe basenames and 404s everything else, so any NEW sidecar
+    added under outputs/ later is denied by default (fail closed). Traversal is
+    already blocked by StaticFiles; this narrows *which* in-tree files are served.
+    """
+
+    _ALLOWED_NAMES = {"artifact.zip", "preview.json", "stats.json", "manifest.json"}
+
+    @classmethod
+    def _is_allowed(cls, rel_path: str) -> bool:
+        name = Path(rel_path).name
+        if name in cls._ALLOWED_NAMES:
+            return True
+        # order_list.json plus split order_list_1.json, order_list_2.json, ...
+        return name.startswith("order_list") and name.endswith(".json")
+
+    async def get_response(self, path, scope):
+        if not self._is_allowed(path):
+            return Response("Not Found", status_code=404)
+        return await super().get_response(path, scope)
+
+
 try:
-    app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
+    app.mount("/artifacts", _AllowlistStaticFiles(directory=OUTPUT_DIR), name="artifacts")
 except Exception as e:
     log.critical(f"Failed to mount /artifacts static files: {e}", exc_info=True)
     raise
@@ -1067,15 +1147,18 @@ async def queue_status():
     """
     queued_count = await jobs_store.count_queued()
     running_count = await jobs_store.count_active()
-    queued_rows = await jobs_store.list_queued()
-    queued_job_ids = [r["job_id"] for r in queued_rows]
 
     with app.state.scheduler_cv:
         active_jobs = app.state.active_jobs
 
+    # NOTE: individual queued job_ids are deliberately NOT returned here. A
+    # job_id is the de-facto capability token for /download, /artifacts,
+    # /preview, /stats and /pay (there is no auth), so listing live ids on an
+    # unauthenticated endpoint let anyone harvest them and read other customers'
+    # artifacts/PII. Only aggregate counts are exposed. The frontend polls
+    # /jobs/{id} for per-job state and never needed this list.
     return {
         "queued_jobs": queued_count,
-        "queued_job_ids": queued_job_ids,
         "max_queue_size": MAX_QUEUE_SIZE,
         "active_jobs": active_jobs,
         "max_workers": MAX_WORKERS,
@@ -1101,6 +1184,7 @@ def _validate_image(path: Path) -> None:
 
 @app.post("/generate")
 async def generate(
+    request: Request,
     file: UploadFile = File(...),
     mosaic_block_width: int = Form(...),
     mosaic_type: str = Form(...),
@@ -1153,6 +1237,11 @@ async def generate(
     # the actionable 422 rather than a 503 they'd retry forever.
     if app.state.scheduler_shutdown.is_set():
         raise HTTPException(status_code=503, detail="Server is shutting down")
+
+    # Per-IP rate limit AFTER validation (a 422 shouldn't burn the caller's
+    # cooldown) but BEFORE the disk write / full image decode / worker spawn.
+    # real_ip is set for every request by real_ip_middleware.
+    _enforce_generate_rate_limit(getattr(request.state, "real_ip", None))
 
     # Queue-full check BEFORE upload — saves the bytes-on-disk cost when we'd
     # reject anyway. Small TOCTOU race window (two concurrent /generate both
@@ -1482,6 +1571,9 @@ def cleanup_loop(app: FastAPI):
             for jid in deleted_ids:
                 try:
                     shutil.rmtree(OUTPUT_DIR / jid, ignore_errors=True)
+                    # Purge the private sidecar dir (payment.json / email.json)
+                    # on the same TTL — LAIGO retains no PII past the job.
+                    shutil.rmtree(PRIVATE_DIR / jid, ignore_errors=True)
                 except Exception as e:
                     clog.error(
                         f"Failed to remove output dir for job {jid}: {e}",

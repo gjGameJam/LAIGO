@@ -80,6 +80,7 @@ def send_build_pack_email(
     to_email: str,
     amount_cents: int,
     job_dir: Path,
+    sentinel_dir: Path | None = None,
 ) -> str:
     """Send the build pack for `job_id` to `to_email`. NEVER raises.
 
@@ -94,7 +95,16 @@ def send_build_pack_email(
     Runs in Starlette's threadpool (sync function handed to BackgroundTasks),
     strictly after the HTTP response is flushed — it can never fail or delay
     the customer's charge.
+
+    `job_dir` (OUTPUT_DIR/{job_id}) is read-only here — the attachment source.
+    `sentinel_dir` is where email.json (the dedup sentinel, which also holds the
+    recipient address) is written; it defaults to `job_dir` but pay_router passes
+    a PRIVATE_DIR path so the address never lands in the web-served output tree.
+    Both /pay and the webhook pass the SAME sentinel_dir, preserving the O_EXCL
+    sync-vs-webhook dedup.
     """
+    # Bind before the try so the except-block _record() always has a target.
+    sentinel_dir = sentinel_dir or job_dir
     try:
         if not is_enabled():
             logger.info(
@@ -103,7 +113,8 @@ def send_build_pack_email(
             )
             return "skipped"
 
-        if not _claim_send(job_dir):
+        sentinel_dir.mkdir(parents=True, exist_ok=True)
+        if not _claim_send(sentinel_dir):
             logger.info("email.duplicate job_id=%s", job_id)
             return "duplicate"
 
@@ -111,7 +122,7 @@ def send_build_pack_email(
         url = _download_url(job_id)
 
         if not attachments:
-            _record(job_dir, {
+            _record(sentinel_dir, {
                 "job_id": job_id,
                 "to": to_email,
                 "status": "failed",
@@ -148,7 +159,7 @@ def send_build_pack_email(
 
         if resp.status_code // 100 != 2:
             detail = f"HTTP {resp.status_code}: {resp.text[:300]}"
-            _record(job_dir, {
+            _record(sentinel_dir, {
                 "job_id": job_id,
                 "to": to_email,
                 "status": "failed",
@@ -164,7 +175,7 @@ def send_build_pack_email(
             resend_id = resp.json().get("id", "")
         except Exception:
             resend_id = ""
-        _record(job_dir, {
+        _record(sentinel_dir, {
             "job_id": job_id,
             "to": to_email,
             "status": "sent",
@@ -182,7 +193,7 @@ def send_build_pack_email(
     except Exception as exc:
         logger.warning("email.send_failed job_id=%s err=%s", job_id, exc)
         try:
-            _record(job_dir, {
+            _record(sentinel_dir, {
                 "job_id": job_id,
                 "to": to_email,
                 "status": "failed",
