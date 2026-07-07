@@ -61,6 +61,19 @@ _ORDER_LIST_RE = re.compile(r"order_list(?:_(\d+))?\.json")
 _DEFAULT_FROM = "LAIGO Mosaic Maker <onboarding@resend.dev>"
 
 
+def _mask_email(addr: str) -> str:
+    """Redact an address for logging: keep the first local-part char + domain
+    (e.g. 'grant@icloud.com' -> 'g***@icloud.com'). The full address still lives
+    in the PRIVATE_DIR email.json sentinel; this only keeps it out of laigo.log
+    (which rotates/persists and is not TTL-purged)."""
+    addr = (addr or "").strip()
+    if "@" not in addr:
+        return "***"
+    local, _, domain = addr.partition("@")
+    head = local[0] if local else ""
+    return f"{head}***@{domain}"
+
+
 def is_enabled() -> bool:
     """True when EMAIL_ENABLED is truthy AND RESEND_API_KEY is set.
 
@@ -168,7 +181,19 @@ def send_build_pack_email(
                 "link_only_fallback": link_only,
                 "recorded_at": time.time(),
             })
-            logger.warning("email.send_failed job_id=%s %s", job_id, detail)
+            # Do NOT log resp.text — Resend echoes the recipient address in
+            # validation errors, which would leak customer email PII into the
+            # persistent, non-purged laigo.log. The full body stays in the
+            # private, TTL-purged email.json record above. Log only the status
+            # and Resend's structured error name (which carries no address).
+            try:
+                resend_error = resp.json().get("name", "")
+            except Exception:
+                resend_error = ""
+            logger.warning(
+                "email.send_failed job_id=%s http=%s resend_error=%s",
+                job_id, resp.status_code, resend_error,
+            )
             return "failed"
 
         try:
@@ -186,7 +211,7 @@ def send_build_pack_email(
         })
         logger.info(
             "email.sent job_id=%s to=%s link_only=%s resend_id=%s",
-            job_id, to_email, link_only, resend_id,
+            job_id, _mask_email(to_email), link_only, resend_id,
         )
         return "sent"
 

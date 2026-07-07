@@ -41,6 +41,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pathlib import Path
 import uuid
 import os
@@ -90,7 +91,8 @@ log = logging.getLogger("laigo")
 # bypass .env loading). Same defect class as D1 in CHECKOUT_AUDIT.md §10.
 # is_truthy was imported on line 30 via .checkout.gate; it lives in
 # .checkout._env (dependency-free) and is safe to call before .env is loaded.
-if not is_truthy(os.getenv("RENDER")):
+_IS_RENDER = is_truthy(os.getenv("RENDER"))
+if not _IS_RENDER:
     load_project_env()
 
 INPUT_DIR = Path(os.getenv("INPUT_DIR", "./inputs")).resolve()
@@ -144,6 +146,27 @@ SCHEDULER_IDLE_POLL_SECONDS = 0.5
 GENERATE_RATE_LIMIT_SECONDS = int(os.getenv("GENERATE_RATE_LIMIT_SECONDS", "20"))
 _generate_rl_lock = threading.Lock()
 _last_generate_by_ip: dict[str, float] = {}
+
+# Bound concurrent /generate INTAKE (the streaming upload write + the full
+# ~80 MP image decode in _validate_image) in the shared web process. The
+# count_queued() cap only bounds DISPATCHED work — the store row isn't written
+# until AFTER the decode — so without this a burst of concurrent uploads each
+# streams up to MAX_UPLOAD_SIZE to disk and decodes ~0.5 GB of pixels in the
+# web process before any queue rejection, exhausting disk / OOM-killing the web
+# process on the 2 GB Standard tier. Default 3 keeps the transient cost bounded
+# (≤3 concurrent writes and ≤3 concurrent decodes) while comfortably serving
+# real single-product traffic; excess callers await a permit briefly. The
+# semaphore is created lazily on first use so it binds to the running loop
+# (avoids cross-loop issues under tests that spin up their own loops).
+GENERATE_INTAKE_CONCURRENCY = int(os.getenv("GENERATE_INTAKE_CONCURRENCY", "3"))
+_generate_intake_semaphore: "asyncio.Semaphore | None" = None
+
+
+def _get_intake_semaphore() -> "asyncio.Semaphore":
+    global _generate_intake_semaphore
+    if _generate_intake_semaphore is None:
+        _generate_intake_semaphore = asyncio.Semaphore(GENERATE_INTAKE_CONCURRENCY)
+    return _generate_intake_semaphore
 
 
 def _enforce_generate_rate_limit(ip: str | None) -> None:
@@ -564,7 +587,14 @@ async def lifespan(app: FastAPI):
         log.error(f"Error closing DB pool: {e}", exc_info=True)
 
 
-app = FastAPI(lifespan=lifespan)
+# Swagger UI (/docs), ReDoc (/redoc), and the raw OpenAPI schema (/openapi.json)
+# enumerate the entire API surface. They're useful in dev but are a recon aid in
+# prod, so disable them on Render. The RENDER switch mirrors the D-048 idiom used
+# for .env loading above.
+_docs_kwargs = (
+    dict(docs_url=None, redoc_url=None, openapi_url=None) if _IS_RENDER else {}
+)
+app = FastAPI(lifespan=lifespan, **_docs_kwargs)
 app.include_router(pay_router, prefix="/jobs")
 app.include_router(webhook_router)
 app.include_router(donate_router)  # global POST /donate (client-confirm tip)
@@ -604,16 +634,61 @@ except Exception as e:
     log.critical(f"Failed to mount /artifacts static files: {e}", exc_info=True)
     raise
 
+# The Vite dev origin (localhost:5173) is only needed for local frontend work;
+# in prod (Render) the only legitimate browser origin is the deployed frontend.
+_cors_origins = ["https://laigo-frontend.onrender.com"]
+if not _IS_RENDER:
+    _cors_origins.append("http://localhost:5173")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://laigo-frontend.onrender.com",
-        "http://localhost:5173",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -----------------------------
+# TRUSTED HOST (Host-header defense)
+# -----------------------------
+# Prod-gated to avoid any chance of a local/dev outage: on Render, requests
+# arrive at the service's *.onrender.com host (Render's assigned hostname and
+# health checks both use it). If the API is ever fronted by a CUSTOM domain,
+# add it via the TRUSTED_HOSTS env var (comma-separated) — otherwise those
+# requests would 400. Off Render the middleware isn't installed at all.
+if _IS_RENDER:
+    _trusted_hosts = ["*.onrender.com", "localhost", "127.0.0.1", "testserver"]
+    _render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if _render_host and _render_host not in _trusted_hosts:
+        _trusted_hosts.append(_render_host)
+    _trusted_hosts += [
+        h.strip() for h in os.getenv("TRUSTED_HOSTS", "").split(",") if h.strip()
+    ]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
+
+
+# -----------------------------
+# SECURITY HEADERS
+# -----------------------------
+# Defense-in-depth response headers on every reply. HSTS is honored only over
+# HTTPS (Render terminates TLS); browsers ignore it on plain-HTTP local dev. The
+# strict CSP is prod-only: locally /docs (Swagger) pulls its assets from a CDN
+# and a `default-src 'none'` policy would break it — and /docs is disabled in
+# prod anyway, where every response is JSON/zip/plain (no inline scripts).
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+    )
+    if _IS_RENDER:
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+        )
+    return response
 
 
 # -----------------------------
@@ -625,19 +700,29 @@ app.add_middleware(
 # request-scope IP need (rate limiting, abuse detection, request logging).
 #
 # Trust model — single proxy: Render is the ONLY trusted hop in front of this
-# app. Render appends the immediate client IP as the leftmost XFF entry, so
-# XFF[0] is the real customer. We take it unconditionally.
+# app. CRITICAL: Render does NOT reset/clear a client-supplied X-Forwarded-For
+# — it only APPENDS the real client IP to whatever the client sent (verified
+# against Render's own feature board, "Send the correct X-Forwarded-For").
+# So the LEFTMOST entry is attacker-controllable: a client can send its own
+# `X-Forwarded-For: <spoofed>` and that value survives at position 0. Taking
+# XFF[0] as the client IP therefore lets an attacker rotate the header to mint
+# a fresh rate-limit key per request and bypass the /generate throttle.
 #
-# DO NOT extend this to skip multiple hops or accept untrusted XFF without
-# also adding an explicit allowlist of trusted proxy IPs — otherwise any
-# client can spoof their source IP by sending their own XFF header.
+# Fix: trust exactly ONE appended hop — take the RIGHTMOST entry, which Render
+# appends after everything the client sent and which the client cannot append
+# past. That value is spoof-proof.
+#
+# DO NOT switch back to the leftmost entry, and DO NOT skip additional hops
+# from the right without an explicit allowlist of trusted proxy IPs — either
+# re-opens the spoofing gap.
 @app.middleware("http")
 async def real_ip_middleware(request: Request, call_next):
     xff = request.headers.get("x-forwarded-for")
     if xff:
-        # "client, proxy1, proxy2, ..." — leftmost is the original client.
-        first = xff.split(",", 1)[0].strip()
-        request.state.real_ip = first or (request.client.host if request.client else None)
+        # "spoofable, ..., <render-appended real client>" — rightmost is the
+        # entry Render itself appended, so it is the trustworthy client IP.
+        last = xff.rsplit(",", 1)[-1].strip()
+        request.state.real_ip = last or (request.client.host if request.client else None)
     else:
         request.state.real_ip = request.client.host if request.client else None
     return await call_next(request)
@@ -775,6 +860,14 @@ def _drop_runtime_state(app: FastAPI, job_id: str, *, drop_intake: bool = False)
             Path(progress_file).unlink(missing_ok=True)
         except Exception:
             pass
+    # Remove the transient upload file. Normal completion already deletes it in
+    # the worker; this covers terminal paths where the worker never ran to
+    # completion (timeout / wedged worker, submission failure) and would
+    # otherwise strand an up-to-MAX_UPLOAD_SIZE file in INPUT_DIR.
+    try:
+        (INPUT_DIR / f"{job_id}.upload").unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _mark_submission_failed(app: FastAPI, job_id: str, error: str, tb: str) -> None:
@@ -1133,7 +1226,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"status": "running", "message": "LAIGO API online. Use /health or /docs for info."}
+    return {"status": "running", "message": "LAIGO API online. Use /health for status."}
 
 
 @app.get("/queue")
@@ -1261,42 +1354,49 @@ async def generate(
     input_file = INPUT_DIR / f"{job_id}.upload"
 
     size = 0
-    try:
-        with open(input_file, "wb") as f:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_UPLOAD_SIZE:
-                    f.close()
-                    input_file.unlink(missing_ok=True)
-                    await file.close()
-                    log.warning(f"Job {job_id} rejected — file too large ({size} bytes)")
-                    raise HTTPException(status_code=413, detail="File too large")
-                f.write(chunk)
-            # D-038: no os.fsync here — it forced a blocking disk sync on the event
-            # loop for durability we don't need (a transient upload; if the server
-            # crashes the job is lost anyway). Closing the file (end of this `with`)
-            # flushes to the OS, which is all the worker subprocess needs to read it.
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"Job {job_id} failed during file upload: {e}", exc_info=True)
-        input_file.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+    # Hold the intake permit across BOTH the streaming write and the decode so
+    # concurrent uploads can't flood disk / OOM the web process (see
+    # _get_intake_semaphore). Released on exit; the store insert below is cheap
+    # and runs without it.
+    async with _get_intake_semaphore():
+        try:
+            with open(input_file, "wb") as f:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_SIZE:
+                        f.close()
+                        input_file.unlink(missing_ok=True)
+                        await file.close()
+                        log.warning(f"Job {job_id} rejected — file too large ({size} bytes)")
+                        raise HTTPException(status_code=413, detail="File too large")
+                    f.write(chunk)
+                # D-038: no os.fsync here — it forced a blocking disk sync on the event
+                # loop for durability we don't need (a transient upload; if the server
+                # crashes the job is lost anyway). Closing the file (end of this `with`)
+                # flushes to the OS, which is all the worker subprocess needs to read it.
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Job {job_id} failed during file upload: {e}", exc_info=True)
+            input_file.unlink(missing_ok=True)
+            # Don't echo the raw exception text to the client (info disclosure);
+            # the full error + traceback is in the log above.
+            raise HTTPException(status_code=500, detail="Upload failed")
 
-    await file.close()
-    log.info(f"Job {job_id} file saved | size={size} bytes")
+        await file.close()
+        log.info(f"Job {job_id} file saved | size={size} bytes")
 
-    try:
-        # D-006: a header sniff (img.verify()) passes a truncated JPEG/TIFF that
-        # then fails inside the worker 5-30s later, so force a full pixel decode +
-        # RGB conversion to reject bad uploads with an immediate 400.
-        # D-038: run that decode in a worker thread — img.load() on an up-to-250 MB
-        # upload would otherwise block the event loop (every /health and /jobs poll).
-        await asyncio.to_thread(_validate_image, input_file)
-    except Exception as e:
-        log.warning(f"Job {job_id} rejected — invalid image: {type(e).__name__}: {e}")
-        input_file.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="Invalid image file")
+        try:
+            # D-006: a header sniff (img.verify()) passes a truncated JPEG/TIFF that
+            # then fails inside the worker 5-30s later, so force a full pixel decode +
+            # RGB conversion to reject bad uploads with an immediate 400.
+            # D-038: run that decode in a worker thread — img.load() on an up-to-250 MB
+            # upload would otherwise block the event loop (every /health and /jobs poll).
+            await asyncio.to_thread(_validate_image, input_file)
+        except Exception as e:
+            log.warning(f"Job {job_id} rejected — invalid image: {type(e).__name__}: {e}")
+            input_file.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Invalid image file")
 
     settings = {
         "mosaic_block_width": mosaic_block_width,
@@ -1346,7 +1446,8 @@ async def generate(
         log.error(f"Job {job_id} failed to persist: {e}", exc_info=True)
         input_file.unlink(missing_ok=True)
         progress_file.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Failed to register job: {e}")
+        # Fixed client message; the exception detail stays in the log above.
+        raise HTTPException(status_code=500, detail="Failed to register job")
 
     # Wake the scheduler so dispatch latency stays sub-tick when the worker
     # is idle. Without this the scheduler would poll on its own
@@ -1367,7 +1468,9 @@ async def get_job(job_id: str):
         # disk briefly (worker writes it inside the output dir, which cleanup
         # rmtrees together with the row delete — so this fallback is rare in
         # the new design). Preserved for parity with the legacy contract.
-        error_manifest = OUTPUT_DIR / job_id / "manifest_failed.json"
+        # Route through _job_dir() so a crafted job_id can't escape OUTPUT_DIR
+        # (path containment; consistent with the /preview + /stats handlers).
+        error_manifest = _job_dir(job_id) / "manifest_failed.json"
         if error_manifest.exists():
             log.info(f"Job {job_id} served from error manifest on disk")
             try:
@@ -1584,6 +1687,26 @@ def cleanup_loop(app: FastAPI):
                 # /jobs/{id} keeps surfacing `settings` until TTL.
                 _drop_runtime_state(app, jid, drop_intake=True)
                 clog.info(f"Job {jid} cleaned up")
+
+            # Sweep orphaned intake files. The in-memory JSON jobs store is lost
+            # on restart, so a queued/running job interrupted by a redeploy
+            # leaves its inputs/{job_id}.upload (+ .progress) with no store row
+            # and no runtime side-table entry — cleanup_expired never sees it and
+            # it accumulates toward disk exhaustion. Any intake file older than
+            # the job TTL is definitively orphaned: a live job is force-failed by
+            # the timeout watchdog (JOB_TIMEOUT_SECONDS, < JOB_TTL_SECONDS) and a
+            # completed job's upload is deleted by the worker, so no live job's
+            # file is ever this old.
+            cutoff = time.time() - JOB_TTL_SECONDS
+            for stale in list(INPUT_DIR.glob("*.upload")) + list(INPUT_DIR.glob("*.progress")):
+                try:
+                    if stale.stat().st_mtime < cutoff:
+                        stale.unlink(missing_ok=True)
+                        clog.info(f"Swept orphaned intake file {stale.name}")
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    clog.error(f"Failed to sweep intake file {stale.name}: {e}")
         except Exception:
             clog.error("Unexpected error in cleanup loop", exc_info=True)
 

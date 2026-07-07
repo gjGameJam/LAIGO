@@ -451,9 +451,13 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
                 "webhook.recorded job_id=%s pi=%s amount=%s", job_id, pi_id, amount,
             )
         else:
+            # Do NOT log the full metadata dict — it can carry the customer's
+            # email (PII) into laigo.log. Log only the non-PII diagnostic keys.
             logger.warning(
                 "webhook.payment_intent_succeeded missing/invalid job_id "
-                "metadata pi=%s metadata=%s", pi_id, metadata,
+                "pi=%s source=%s type=%s has_email=%s",
+                pi_id, metadata.get("source"), metadata.get("type"),
+                bool(metadata.get("email")),
             )
     else:
         logger.debug("webhook.ignored type=%s", event_type)

@@ -27,7 +27,12 @@ def load_project_env():
 
     secrets_path = project_root / ".env.secrets"
     if secrets_path.exists():
-        load_dotenv(dotenv_path=secrets_path, override=False)
+        # override=True so real secrets ALWAYS beat the committed (secret-free)
+        # .env. With override=False, a secret key ever added to .env — even as a
+        # blank placeholder — would count as "set" and silently disable the real
+        # value here, a non-obvious footgun. (Local-dev only; on Render neither
+        # file is loaded — D-048 skips load_project_env when RENDER is set.)
+        load_dotenv(dotenv_path=secrets_path, override=True)
         log_info(f".env.secrets loaded from {secrets_path}")
 
     return project_root
