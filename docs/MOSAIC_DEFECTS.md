@@ -626,11 +626,11 @@ tooling) exits the interpreter or runs a full KMeans. It is the sole consumer of
 **Title:** Scattered env reads; `RENDER` gate idiom diverges; `.env` loaded twice
 **Severity:** **P3**
 **Status:** open
-**Location:** `Main.py:93`, `picToMosiac.py:17`, `logger.py:18,22`, etc.
+**Location:** `Main.py:93`, `picToMosiac.py:41`, `logger.py:18,22`, etc.
 
 Every module does its own `os.getenv` with no central config. Two concrete clashes:
 `Main.py` gates `.env` loading on `is_truthy(os.getenv("RENDER"))` while
-`picToMosiac.py:17` uses `os.getenv("RENDER") is None`, so `RENDER=false` makes one
+`picToMosiac.py:41` uses `os.getenv("RENDER") is None`, so `RENDER=false` makes one
 load `.env` and the other skip it (the `bool("False")` trap). `load_project_env()`
 also runs twice in the main process (picToMosiac import + `Main.py:94`). Fix: a
 single `config.py` bootstrap that reads + validates env once; use `is_truthy` in both

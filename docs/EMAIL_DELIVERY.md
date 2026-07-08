@@ -1,6 +1,6 @@
 # Build-Pack Email Delivery (ACTIVE — PWYW product)
 
-> **Rollout status (2026-07-05):**
+> **Rollout status (2026-07-06):**
 > - ✅ Backend code complete, tested, pushed. Verified end-to-end locally:
 >   a real $0 checkout delivered the pack (both attachments) to the owner's
 >   inbox via Resend dev mode; duplicate suppression and failure/retry
@@ -31,9 +31,20 @@
 >   frontend repo commit `041cb6a`). Production checkout no longer 422s.
 >   Spec remains in "Frontend contract" below. One cosmetic deviation:
 >   buttons validate email on click rather than being disabled until valid.
-> - ❌ Custom domain not verified — dev-mode Resend delivers ONLY to the
->   Resend account owner's own address; customers receive nothing until a
->   domain is verified and `EMAIL_FROM` is updated.
+> - ✅ **Custom domain verified (2026-07-06):** `laigomosaicmaker.com` is
+>   verified in Resend (DNS at GoDaddy) and
+>   `EMAIL_FROM=builds@laigomosaicmaker.com` is set as a Render env var, so the
+>   dev-mode owner-only restriction is lifted. Gotcha that cost a cycle:
+>   `EMAIL_FROM` must be a full sender address — a bare domain returns Resend
+>   HTTP 422 `validation_error`. Resend verifies the *domain*, so any local
+>   part on it sends (the mailbox need not exist).
+> - ⚠️ **Still to confirm:** a $0 checkout to a **non-owner** address, to prove
+>   the verified domain now delivers to real customers (every prior confirmed
+>   send was to the owner's own address).
+> - ⏸️ **Deferred:** reply-forwarding for `builds@` (replies currently bounce
+>   silently). ImprovMX is the low-risk path when wanted — 2 root MX + 1 SPF
+>   TXT at GoDaddy, no nameserver change, won't disturb Resend's `send.`
+>   subdomain records.
 > - ✅ **Live-mode Stripe active (2026-07-05)**: Render runs `sk_live_`, the
 >   deployed frontend bundle carries the matching `pk_live_`, and the (live)
 >   webhook destination's secret is what's on Render (its dashboard test
@@ -82,7 +93,7 @@ POST /webhooks/stripe payment_intent.succeeded
 - Sends are fire-and-forget: `send_build_pack_email` never raises and runs
   after the HTTP response is flushed. A send failure can never fail a charge.
 
-## Duplicate protection — `outputs/{job_id}/email.json`
+## Duplicate protection — `private/{job_id}/email.json`
 
 The sync success path and the webhook can both fire for one payment (and
 Stripe redelivers events). The first sender claims the sentinel atomically
@@ -101,8 +112,14 @@ releases the claim so a webhook redelivery retries. Schema:
 ```
 
 `"skipped"` (disabled / no API key) writes **no** sentinel, so enabling email
-later still allows a webhook-replay send. The file is purged with the job dir
-by the TTL cleanup.
+later still allows a webhook-replay send.
+
+The sentinel lives under `PRIVATE_DIR` (`private/{job_id}/email.json`) — a
+**non-web-served** dir, because the file holds the customer address (security
+Wave 1; `/artifacts` never serves it). `send_build_pack_email` takes a
+`sentinel_dir` param and both `/pay` and the webhook pass the **same**
+`PRIVATE_DIR / job_id`, preserving the `O_EXCL` claim across the two paths. It
+is purged with the job dir by the TTL cleanup.
 
 ## Attachments and the oversize fallback
 
@@ -148,10 +165,11 @@ change for any of this.
    `.env.secrets`. With the `onboarding@resend.dev` sender, Resend delivers
    **only to the account owner's own address** — perfect for testing, useless
    for customers.
-2. **Production:** verify a custom domain in Resend (add its SPF + DKIM DNS
-   records), then set `EMAIL_FROM=LAIGO <builds@yourdomain.com>` — **as a
-   Render dashboard env var** (the committed `.env` never loads on Render).
-   That's the whole switch.
+2. **Production (DONE 2026-07-06):** `laigomosaicmaker.com` is verified in
+   Resend (SPF + DKIM DNS records at GoDaddy) and
+   `EMAIL_FROM=builds@laigomosaicmaker.com` is set **as a Render dashboard env
+   var** (the committed `.env` never loads on Render). `EMAIL_FROM` must be a
+   full sender address — a bare domain → Resend 422. That was the whole switch.
 3. **3DS coverage prerequisite:** the webhook path only works once
    `STRIPE_WEBHOOK_SECRET` is set (done on Render 2026-07-05; missing ⇒
    webhook returns 503).
@@ -164,10 +182,10 @@ change for any of this.
 
 ## Frontend contract (laigo-frontend repo)
 
-The pay modal must collect a **required** email and include it in the
-`POST /jobs/{id}/pay` body for both $0 and paid flows. The backend with this
-requirement is already pushed — email-less `/pay` calls 422, so this is the
-blocking frontend task.
+The pay modal collects a **required** email and includes it in the
+`POST /jobs/{id}/pay` body for both $0 and paid flows. **Shipped and live**
+(frontend repo commit `041cb6a`, 2026-07-05) — email-less `/pay` calls 422.
+Spec retained below for reference / future changes.
 
 Request body:
 

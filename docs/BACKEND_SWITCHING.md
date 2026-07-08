@@ -66,11 +66,13 @@ When `DB_BACKEND=postgres`, these routes change:
 What `DB_BACKEND` does **not** control:
 
 - **Pay-what-you-want payments.** `POST /jobs/{id}/pay` and the Stripe webhook
-  write `outputs/{job_id}/payment.json` to disk and record in Stripe — never the
-  DB. Switching backends does not move or lose payment records.
+  write `private/{job_id}/payment.json` to disk (a non-web-served dir — see
+  `docs/SECURITY.md`) and record in Stripe — never the DB. Switching backends
+  does not move or lose payment records.
 - **Finished mosaic artifacts.** `artifact.zip`, `order_list.json`,
   `preview.json`, `manifest_failed.json` are always on disk under
-  `outputs/{job_id}/`, regardless of backend.
+  `outputs/{job_id}/`, regardless of backend. The per-job PII/financial
+  sidecars (`payment.json`, `email.json`) sit under `private/{job_id}/`.
 - **The shelved checkout saga routers.** `DB_BACKEND=postgres` re-points the
   *storage* of checkout state, but it does **not** re-mount the saga endpoints.
   See §8.

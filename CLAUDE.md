@@ -18,7 +18,8 @@ required email address**. The endpoint `POST /jobs/{job_id}/pay` (see
 `scripts/pay_router.py`) charges that
 amount once via Stripe (immediate-capture PaymentIntent; `job_id`, `source`,
 and `email` in metadata; `receipt_email` set)
-and records it to `outputs/{job_id}/payment.json`. `POST /webhooks/stripe`
+and records it to `private/{job_id}/payment.json` (a non-web-served dir; see
+**Security posture**). `POST /webhooks/stripe`
 (signature-verified with `STRIPE_WEBHOOK_SECRET`) is the authoritative recorder
 — it catches 3DS completions and charges whose sync response was lost.
 `GET /jobs/{job_id}/download` stays **ungated** — since $0 is allowed there is
@@ -31,7 +32,7 @@ the zip-missing fallback) to the given address via `scripts/emailer.py` (Resend 
 API over httpx; leaf module; fire-and-forget through FastAPI BackgroundTasks —
 a send failure never fails a charge). The webhook path emails too (3DS / lost
 responses), reading the address back from PaymentIntent metadata — LAIGO
-stores nothing; the `outputs/{job_id}/email.json` sentinel (atomic `open(x)`
+stores nothing; the `private/{job_id}/email.json` sentinel (atomic `open(x)`
 claim) dedupes sync-vs-webhook races and Stripe event redelivery, and is
 purged with the job dir at TTL. Tips (`/donate`, `type=tip`) never trigger a
 build-pack email. Oversize packs (> ~35 MB encoded) fall back to
@@ -39,7 +40,7 @@ order-list-only + an expiring download link. Full design + go-live runbook:
 `docs/EMAIL_DELIVERY.md`. Covered by `scripts/test_emailer.py` and the
 send-trigger tests in `test_pay_router.py`.
 
-**Rollout state as of 2026-07-05** (live checklist at the top of
+**Rollout state as of 2026-07-06** (live checklist at the top of
 `docs/EMAIL_DELIVERY.md` — update it there as steps complete): backend
 deployed (`40a3c91`); **laigo-frontend required-email field shipped and
 live**; Render env vars set (`RESEND_API_KEY`, `STRIPE_WEBHOOK_SECRET`, and
@@ -51,9 +52,13 @@ pack via Resend (sentinel `status: "sent"`, both attachments). **Stripe is in
 live mode** (2026-07-05): `sk_live_` on Render, `pk_live_` in the deployed
 frontend, and the webhook destination is live-mode with its secret on Render
 — so test cards no longer work against prod (paid-path tests = real charge +
-refund; the $0 path never touches Stripe). Still pending: a verified custom
-domain in Resend before real customers can receive mail (dev-mode sender
-delivers only to the owner), and `EMAIL_FROM` on Render at that switch.
+refund; the $0 path never touches Stripe). Custom domain **verified (2026-07-06)**: `laigomosaicmaker.com` is verified in
+Resend (DNS at GoDaddy) and `EMAIL_FROM=builds@laigomosaicmaker.com` is set on
+Render, lifting the dev-mode owner-only restriction. `EMAIL_FROM` must be a
+full sender address — a bare domain returns Resend HTTP 422. Remaining: confirm
+a $0 checkout to a **non-owner** address actually delivers, and (deferred)
+reply-forwarding for `builds@` so replies stop bouncing silently (ImprovMX is
+the low-risk path when wanted).
 
 A second, simpler endpoint `POST /donate` (global, no job scope — `donate_router`
 in `scripts/pay_router.py`) uses the **client-confirm** Stripe pattern instead:
@@ -116,7 +121,8 @@ Automated tests are runnable as bare modules from project root:
 `.venv\Scripts\python.exe -m scripts.test_<name>`. Live PWYW coverage:
 `test_pay_router`, `test_donate_router`, `test_emailer`. Mosaic pipeline: `test_preview`,
 `test_background_budget`, `test_order_list`, `test_piece_specs`,
-`test_stats_endpoint`. Mosaic jobs
+`test_stats_endpoint`, `test_image_formats`. Web / security hardening:
+`test_web_hardening`. Mosaic jobs
 store (json mode): `test_jobs_store_json`, `test_jobs_store_edge`. The remaining
 suites exercise the
 **shelved** checkout pipeline: `test_optimizer`, `test_gate_bypass`,
@@ -173,9 +179,14 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 | `CHECKOUT_ENABLED` | — | `false` | Master gate (L0) for the SHELVED checkout saga. The pay-what-you-want endpoint does NOT consult it (it checks the payment registry directly). Kept `false`; setting `true` while `DB_BACKEND=json` trips the B47 boot refusal. |
 | `DATABASE_URL` | — | (none in committed .env; belongs in `.env.secrets`) | Neon **pooler** DSN (host must contain `-pooler`). Read only when `DB_BACKEND=postgres`. Direct endpoint is reserved for `alembic upgrade head` + psql debugging. |
 | `EMAIL_ENABLED` | `false` (unset) | `true` | Master switch for build-pack emails (`scripts/emailer.py`). With no `RESEND_API_KEY`, sends are skipped (per-job log + boot warning) — never a boot failure. **On Render this must be a dashboard env var** — the committed `.env` is never loaded there (D-048 `RENDER` idiom), which silently disabled all prod sends until set (2026-07-05). |
-| `EMAIL_FROM` | `LAIGO <onboarding@resend.dev>` | same | Sender identity. The resend.dev sender is dev-mode (delivers only to the Resend account owner). Production switch = verify a domain in Resend + change only this var. |
+| `EMAIL_FROM` | `LAIGO <onboarding@resend.dev>` | same (Render: `builds@laigomosaicmaker.com`) | Sender identity. The committed `.env`/local default is the dev-mode `resend.dev` sender (delivers only to the Resend account owner). **Prod uses a Render dashboard env var** on the verified `laigomosaicmaker.com` domain (done 2026-07-06). Must be a full sender address — a bare domain → Resend 422. |
 | `PUBLIC_API_BASE_URL` | — | (empty) | Origin for the `/jobs/{id}/download` link inside emails (oversize/link-only fallback). Falls back to Render's auto-set `RENDER_EXTERNAL_URL`. |
 | `RESEND_API_KEY` | — | (belongs in `.env.secrets`) | Resend API key. Read at send time, not import time. |
+| `PRIVATE_DIR` | `./private` | `./private` | Non-web-served dir for per-job PII/financial sidecars (`payment.json`, `email.json`). Read by both `Main.py` and `pay_router.py` (values must match); purged with the job at TTL. Never mounted under `/artifacts` (security Wave 1; see `docs/SECURITY.md`). |
+| `GENERATE_RATE_LIMIT_SECONDS` | `20` | `20` | Per-IP cooldown on `POST /generate` (429 + `Retry-After` if exceeded). In-process limiter keyed on the real client IP. `/pay` and `/donate` are deliberately unlimited (light Stripe calls). |
+| `GENERATE_INTAKE_CONCURRENCY` | `3` | `3` | Max concurrent `/generate` intakes (streaming upload write + full-res decode) held in the web process by an `asyncio.Semaphore` — bounds transient disk/RAM so an upload burst can't OOM the 2 GB tier before the queue cap applies. |
+| `MAX_IMAGE_PIXELS` | `80_000_000` | `80000000` | Decompression-bomb cap: sets `PIL.Image.MAX_IMAGE_PIXELS`; a larger image raises instead of decoding. Read in `picToMosiac.py`. |
+| `TRUSTED_HOSTS` | — | (empty) | Extra comma-separated Host-header allowlist entries for `TrustedHostMiddleware` (Render only; the base list already covers `*.onrender.com` + `RENDER_EXTERNAL_HOSTNAME`). Needed only if a custom API domain fronts the service — otherwise those requests 400. |
 
 ## Architecture
 
@@ -194,6 +205,7 @@ Note: the former `STUD_WIDTH_OF_BLOCK` knob was **removed** (D-035, fixed 2026-0
 | `MosiacToOrder.py` | Generates brick purchase JSONs (splits >999-qty items across multiple files) |
 | `MosiacToInstruction.py` | Sequences instruction PNG steps → PDF |
 | `VisualMaker.py` | Draws isometric LEGO stud visuals for each instruction step |
+| `piece_specs.py` | Dependency-free leaf: physical-piece reference table (shape / stud dims / color / label per LEGO element ID) for the per-step "pieces used" legend. Imported by `VisualMaker`; keyed to the element IDs `MosiacToOrder` emits. |
 | `preview_builder.py` | Pure `build_preview_payload(...)` + atomic `write_preview_atomic(...)` for the 3D preview JSON. Consumed by `GET /jobs/{id}/preview`. See `docs/PREVIEW_API.md`. |
 | `pricing.py` | Stdlib-only leaf: loads the static price table `scripts/piece_prices.json` (element_id → US cents, null = unknown; refresh = edit file + bump `as_of` — a running server picks it up via mtime-checked cache, no restart) and computes the all-or-null `estimate_cost_cents(...)` for `GET /jobs/{id}/stats`. Static by design — no live LEGO.com fetch (Cloudflare-fronted, drifting fields, non-PaB structural parts). |
 | `emailer.py` | Leaf module (stdlib + httpx): emails the build pack after a PWYW checkout via Resend. Extracts the PDF and every `order_list*.json` (splits included) from `artifact.zip`, dedupes with the `email.json` sentinel. Never raises. See `docs/EMAIL_DELIVERY.md`. |
@@ -237,11 +249,51 @@ outputs/{job_id}/
   preview.json            # stable copy; served by GET /jobs/{id}/preview
   stats.json              # full per-element piece counts + total; served by GET /jobs/{id}/stats
   manifest_failed.json    # written on failure (outside workspace, persists)
+
+private/{job_id}/         # NON-web-served (PRIVATE_DIR); never under /artifacts
+  payment.json            # amount + PaymentIntent id (revenue log, not a gate)
+  email.json              # customer email + send-dedup sentinel; purged at TTL
 ```
+
+Per-job PII/financial sidecars (`payment.json`, `email.json`) live under
+`private/{job_id}/`, **not** the web-served `outputs/` tree — see **Security
+posture**.
 
 ### CORS
 
-Allowed origins are hardcoded in `Main.py`: `https://laigo-frontend.onrender.com` and `http://localhost:5173` (Vite default). The `FRONTEND_ORIGIN` env var in `.env` is **not** read by the server — update the hardcoded list in `Main.py` if the frontend URL changes.
+Allowed origins are set in `Main.py`: `https://laigo-frontend.onrender.com` always, plus `http://localhost:5173` (Vite default) **only off Render** (dropped when `RENDER` is set). The `FRONTEND_ORIGIN` env var in `.env` is **not** read by the server — update the hardcoded list in `Main.py` if the frontend URL changes.
+
+### Security posture
+
+Hardened in a 2026-07-06 audit (three waves; full shipped/open list in
+`docs/SECURITY.md`). The parts that shape runtime behavior:
+
+- **`/artifacts` is allowlisted** (`_AllowlistStaticFiles`) — only the public
+  build-pack files are served; `payment.json` / `email.json` /
+  `manifest_failed.json` 404 (fail-closed: any new sidecar under `outputs/` is
+  denied by default). Those PII/financial sidecars live in a **separate,
+  non-web-served `private/{job_id}/` dir** (`PRIVATE_DIR`), purged with the job
+  at TTL.
+- **`/generate` is rate-limited** per real client IP
+  (`GENERATE_RATE_LIMIT_SECONDS`, 429 + `Retry-After`) and its intake is bounded
+  by an `asyncio.Semaphore` (`GENERATE_INTAKE_CONCURRENCY`) so an upload burst
+  can't OOM the web process. `/pay` and `/donate` are deliberately unlimited.
+- **Real client IP** comes from the **rightmost** `X-Forwarded-For` entry
+  (`real_ip_middleware`) — Render appends the true client last, so leftmost is
+  attacker-spoofable. Do not revert to leftmost (it re-opens rate-limit bypass).
+- **Decompression-bomb cap:** `Image.MAX_IMAGE_PIXELS` (`MAX_IMAGE_PIXELS`, 80 MP)
+  — an oversized upload raises instead of decoding.
+- **Prod-only (gated on `_IS_RENDER`):** `/docs` `/redoc` `/openapi.json`
+  disabled; `TrustedHostMiddleware` (extend via `TRUSTED_HOSTS`); strict CSP;
+  `localhost:5173` dropped from CORS. Security headers (`nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, HSTS) on every reply.
+- **PII scrubbing:** customer emails are masked in logs (`emailer._mask_email`
+  → `g***@domain`); the raw address only lands in the TTL-purged
+  `private/{job_id}/email.json`.
+- Covered by `scripts/test_web_hardening.py`. Remaining security actions are
+  deferred infra items only (idempotency ledger, deps lockfile, secret-scanning
+  CI) — tracked in `docs/SECURITY.md`. The captured LEGO.com/Google session
+  concern is closed (revoked + timed out).
 
 ### Import graph (how the modules wire together)
 
@@ -293,7 +345,7 @@ Main.py (FastAPI + scheduler + cleanup threads + ProcessPoolExecutor)
 #### `Main.py` — FastAPI app + job lifecycle
 
 - Imports: `.picToMosiac` (MosaicType, MAX_BLOCK_WIDTH, MIN_BLOCK_WIDTH), `.worker` (run_job, _write_error_manifest), `.Util` (load_project_env), `.pricing` (load_price_table, estimate_cost_cents), `.pay_router` (pay_router, webhook_router, donate_router), `.checkout.gate_router` (checkout_gate_router), `.checkout.cache` (start_cache_sweeper), `.checkout.gate` (compute_decision, is_truthy, CheckoutMode), `.jobs_store_dispatch`; lazy-imports `.db` + `.checkout.payment.{registry,base,stripe_provider}` inside lifespan. The shelved `.checkout.router` / `.checkout.debug_router` / `.checkout.saga_resume` are **not** imported or mounted.
-- HTTP routes (mosaic): `GET /health`, `GET /`, `GET /queue`, `POST /generate`, `GET /jobs/{job_id}`, `GET /jobs/{job_id}/preview` (3D preview JSON — see `docs/PREVIEW_API.md`), `GET /jobs/{job_id}/stats` (authoritative piece count from `stats.json` + optional static-price estimate — `{piece_count, estimated_cost_cents, currency, pricing_as_of}`; cost is null unless every element is priced in `piece_prices.json`; 404 `STATS_NOT_AVAILABLE` when the file is absent, which the frontend renders as "no chip"), `GET /jobs/{job_id}/download` (ungated — $0 is allowed so there's nothing to protect). Static mount: `/artifacts` → `OUTPUT_DIR`.
+- HTTP routes (mosaic): `GET /health`, `GET /`, `GET /queue`, `POST /generate`, `GET /jobs/{job_id}`, `GET /jobs/{job_id}/preview` (3D preview JSON — see `docs/PREVIEW_API.md`), `GET /jobs/{job_id}/stats` (authoritative piece count from `stats.json` + optional static-price estimate — `{piece_count, estimated_cost_cents, currency, pricing_as_of}`; cost is null unless every element is priced in `piece_prices.json`; 404 `STATS_NOT_AVAILABLE` when the file is absent, which the frontend renders as "no chip"), `GET /jobs/{job_id}/download` (ungated — $0 is allowed so there's nothing to protect). Static mount: `/artifacts` → `OUTPUT_DIR`, **allowlisted** (`_AllowlistStaticFiles`) — only `artifact.zip` / `order_list*.json` / `preview.json` / `stats.json` / `manifest.json` are served; per-job PII/financial sidecars 404 (fail-closed). See **Security posture**.
 - HTTP routes (payment, via mounted routers): `POST /jobs/{job_id}/pay` (`pay_router`, prefix `/jobs`), `POST /donate` (`donate_router`), `POST /webhooks/stripe` (`webhook_router`), `GET /checkout/gate` (`checkout_gate_router` — operational visibility only, always 200). See the PWYW section at the top of this file.
 - Lifespan startup (in order — see "Boot invariants" below): alembic-head check → `init_pool()` (no-op on json) → `verify_schema()` (no-op on json) → capture event loop → StripeProvider registration (powers `pay`/`donate`) → gate computation (DISABLED under PWYW) → L1 boot invariants (incl. B47) → `resume_in_flight_sagas()` (no-op on json) → version-conditional `ProcessPoolExecutor` (`max_tasks_per_child=1` on Python 3.12+, omitted with a `respawn=off` warning on ≤3.11 — D-030) + scheduler + cleanup threads + cache sweeper → `start_reconcile_task()` (no-op on json).
 - Runtime-only side tables on `app.state` (persistent state lives in `jobs_store_dispatch`): `futures` (job_id → Future, also the arbitration sentinel for done-callback vs watchdog), `deadlines` (job_id → wallclock deadline), `intake` (job_id → full settings dict; preserves `to_frame` until TTL eviction), `progress` (job_id → .progress Path), `event_loop`. Plus `executor`, `active_jobs`, `progress_lock`, `scheduler_cv`, `scheduler_shutdown`.
@@ -554,6 +606,7 @@ in the SHELVED docs below. Do not treat them as current behavior.
 
 - **3D preview API + payload schema (frontend-facing):** `docs/PREVIEW_API.md`.
 - **Build-pack email delivery (Resend) — design, email.json schema, go-live runbook:** `docs/EMAIL_DELIVERY.md`.
+- **Security posture — shipped audit hardening + remaining deferred infra items:** `docs/SECURITY.md`.
 - **Piece price table (powers `GET /jobs/{id}/stats`):** `scripts/piece_prices.json` — element_id → US cents, `null` = unknown (estimate goes null until all 62 are filled). To refresh: edit the values + bump `as_of`; no code change and no server restart (`load_price_table` invalidates its cache on the file's mtime — uvicorn `--reload` only watches `.py` files). Deliberately static — no cron/live fetch (LEGO's price API is Cloudflare-fronted with drifting field names, and structural parts aren't on Pick-a-Brick).
 - **Backend switch runbook (JSON <-> Neon):** `docs/BACKEND_SWITCHING.md` -- how to flip `DB_BACKEND` in both directions, locally and on Render (env vars, pre-deploy command, the `override=False` precedence gotcha, B47, verification signals).
 - **Mosaic pipeline defects ledger:** `docs/MOSAIC_DEFECTS.md` -- per-defect root cause, reproduction, fix sketch, verification. Index mirrored in "Known defects (mosaic pipeline)" above.

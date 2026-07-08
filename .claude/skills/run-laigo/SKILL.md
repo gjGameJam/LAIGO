@@ -186,7 +186,7 @@ entry points.
   in dev mode: sends to the account owner's own address (grantjbenson@icloud.com)
   actually deliver to his inbox; sends to any other address are accepted by
   the API route (200) but rejected by Resend — recorded as `"failed"` in
-  `outputs/{id}/email.json`, which is fine for smoke tests. The driver uses
+  `private/{id}/email.json`, which is fine for smoke tests. The driver uses
   `driver-smoke@example.com` for exactly this reason. Duplicate sends are
   suppressed per job via the `email.json` sentinel (`"duplicate"` in the log);
   delete that file to force a resend. To silence email entirely, set
@@ -201,7 +201,7 @@ entry points.
 | Driver prints `Is the server up?` / connection refused | Server not booted yet (mediapipe import is slow) or wrong `--base-url` port. Re-run the health curl (step 3) first. |
 | `POST /generate` → 422 | Bad params — `mosaic_block_width` out of 1–40, or `mosaic_type` not `2d`/`3d`. |
 | `POST /pay` → 422 with `loc: ["body","email"]` | The `email` field is required for all amounts (incl. $0) since 2026-07-05. Add `"email": "driver-smoke@example.com"` to the body. |
-| Paid $0 but no email arrived | Expected unless the recipient is the Resend account owner (dev mode) — check `outputs/{id}/email.json` for `sent`/`failed`/`skipped` and the server log for `email.*` lines. |
+| Paid $0 but no email arrived | Expected unless the recipient is the Resend account owner (dev mode) — check `private/{id}/email.json` for `sent`/`failed`/`skipped` and the server log for `email.*` lines. |
 | `POST /donate` / paid `/pay` → 503 `PAYMENTS_UNAVAILABLE` | No Stripe key. Add `STRIPE_SECRET_KEY=sk_test_…` to `.env.secrets`. Free `$0` pay and the mosaic flow don't need it. |
 | `pip install` → `SSLCertVerificationError` | Corporate TLS proxy. Add `--trusted-host pypi.org --trusted-host files.pythonhosted.org` to the pip command. |
 | Job stuck at low % then fails ~30 min later | Width too large for the input; keep `--width` small. The 30-min timeout watchdog force-fails runaway jobs. |
